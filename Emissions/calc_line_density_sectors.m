@@ -1,4 +1,4 @@
-function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density_sectors( fpath, fnames, center_lon, center_lat, theta, varargin )
+function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density_sectors( fpath, fnames, center_lon, center_lat, theta, wind_logical, varargin )
 %[ NO2_X, NO2_LINEDENS, NO2_LINEDENS_STD, LON, LAT, NO2_MEAN, NO2_STD, NUM_VALID_OBS] = CALC_LINE_DENSITY( FPATH, FNAMES, CENTER_LON, CENTER_LAT, THETA )
 %   Calculate a wind-aligned line density for a given time period.
 %
@@ -22,8 +22,15 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       the domain, usually the coordinate of a city or other point
 %       emission source.
 %
-%       theta - a vector of wind directions given as degrees CCW from east
-%       between -180 and 180. Must match the number of files to be loaded.
+%       theta - a matrix of wind directions given as degrees CCW from east
+%       between -180 and 180. The first dimension must match the number of
+%       files to be loaded; the second must correspond to the orbit index
+%       in each Data structure; i.e. the winds for the third orbit,
+%       Data(3), in the 10th file would be given in theta(10,3).
+%
+%       wind_logical - used to separate sufficiently fast winds, this
+%       should be a logical matrix that is true for orbits that shold be
+%       included. Must have the same configuration as THETA.
 %
 %   Outputs:
 %
@@ -58,29 +65,6 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %
 %   Parameter inputs:
 %
-%
-%       data_ind - which top-level indices of the Data structure loaded from
-%       the files to use. Can be a single index, a vector of indicies, or
-%       (as is default) an empty vector which will use all the swaths present
-%       in each file.
-%
-%       'windvel' - a vector of wind velocities to be used in filtering out
-%       days that do not meet desired criteria. If not given, all days that
-%       have sufficient coverage (pixels not removed for clouds or row
-%       anomaly) are used.
-%
-%       'windcrit' - the number to compare windvel values to, if given, the
-%       parameter 'windop' must also be specified.
-%
-%       'windop' - can be '<', '>', '<=', or '>=' and will be used with
-%       'windcrit' to evalute windvel values in the expression windvel
-%       <windop> windcrit. If that evaluates to false, the day will be
-%       skipped.
-%
-%       'crit_logical' - an alternative to the wind inputs, this should be a 
-%       logical vector that is true for days that shold be included. Must
-%       have the same number of elements as the number of files to use.
-%
 %       'rel_box_corners' - a four element vector to be passed to rotate
 %       plume describing how large a box to use to circumscribe the plumes.
 %       See rotate_plume for more information.
@@ -110,11 +94,6 @@ E = JLLErrors;
 
 p=inputParser;
 p.addOptional('nox_or_no2','no2',@(x) ismember(lower(x),{'nox','no2'}));
-p.addParameter('data_ind',[]);
-p.addParameter('windvel',[]);
-p.addParameter('windcrit',[]);
-p.addParameter('windop','');
-p.addParameter('crit_logical',[]);
 p.addParameter('rel_box_corners',[]);
 p.addParameter('force_calc',false);
 p.addParameter('interp',true);
@@ -124,11 +103,6 @@ p.parse(varargin{:});
 
 pout=p.Results;
 nox_or_no2 = pout.nox_or_no2;
-data_ind = pout.data_ind;
-windvel = pout.windvel;
-windcrit = pout.windcrit;
-windop = pout.windop;
-crit_logical = pout.crit_logical;
 rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
 interp_bool = pout.interp;
@@ -153,12 +127,6 @@ else
     E.badinput('Input fnames is not a valid format; see documentation')
 end
 
-use_data_ind = true;
-if ~isempty(data_ind) && ~isnumeric(data_ind)
-    E.badinput('data_ind must be an empty matrix or numeric vector')
-elseif isempty(data_ind)
-    use_data_ind = false;
-end
 if ~isscalar(center_lon) || ~isnumeric(center_lon)
     E.badinput('center_lon must be a scalar number')
 end
@@ -166,54 +134,13 @@ if ~isscalar(center_lat) || ~isnumeric(center_lat)
     E.badinput('center_lat must be a scalar number')
 end
 
-if ~isnumeric(theta) || any(theta < -180 | theta > 180) || numel(theta) ~= numel(fnames_struct)
-    E.badinput('theta must be a numeric vector with values between -180 and +180 that has the same number of elements as the number of files to be loaded')
+if ~isnumeric(theta) || any(theta(:) < -180 | theta(:) > 180) || size(theta,1) ~= numel(fnames_struct)
+    E.badinput('theta must be a numeric vector with values between -180 and +180 that has the same size in the first dimension as the number of files to be loaded')
 end
 
-if ~isempty(crit_logical) && (numel(crit_logical) ~= numel(fnames_struct) || ~islogical(crit_logical))
-    E.badinput('crit_logical must be a logical vector with the same number of elements as the number of files to be loaded');
+if ~isequal(size(wind_logical), size(theta)) || ~islogical(wind_logical)
+    E.badinput('wind_logical must be a logical matrix with the same size as THETA');
 end
-
-% Check that if any one of windvel, windop, or windcrit are passed,
-% all of them are. Alternatively, if the crit_logical matrix is
-% available, none of those should be given.
-E.addCustomError('windvelcrit','If any of windvel, windop, or windcrit are given, all must be given');
-E.addCustomError('crit_conflict','crit_logical and the windvel/windop/windcrit parameters are mutually exclusive. You may only set one of them.');
-windvel_set = false;
-if ~isempty(windvel)
-    if ~isnumeric(windvel) || any(windvel < 0) || numel(windvel) ~= numel(fnames_struct)
-        E.badinput('windvel (if given) must be a numeric vector with values >= 0 that has the same number of elements as the number of files to be loaded')
-    end
-    windvel_set = true;
-    if ~isempty(crit_logical)
-        E.callCustomError('crit_conflict');
-    end
-end
-if ~isempty(windcrit)
-    if ~isnumeric(windcrit) || ~isscalar(windcrit) || windcrit < 0
-        E.badinput('windcrit (if given) must be a numeric vector with values >= 0 that has the same number of elements as the number of files to be loaded')
-    elseif ~windvel_set
-        E.callCustomError('windvelcrit');
-    end
-    if ~isempty(crit_logical)
-        E.callCustomError('crit_conflict');
-    end
-elseif windvel_set
-    E.callCustomError('windvelcrit');
-end
-if ~isempty(windop)
-    if ~ischar(windop) || ~ismember(windop,{'<','>','<=','>='})
-        E.badinput('windop (if given) must be one of ''<'', ''>'', ''<='', ''>=''')
-    elseif ~windvel_set
-        E.callCustomError('windvelcrit');
-    end
-    if ~isempty(crit_logical)
-        E.callCustomError('crit_conflict');
-    end
-elseif windvel_set
-    E.callCustomError('windvelcrit')
-end
-% Finished with the wind crit input checking
 
 if ~isempty(rel_box_corners) && ( ~isvector(rel_box_corners) || numel(rel_box_corners) ~= 4 )
     E.badinput('rel_box_corners must be a 4 element vector');
@@ -230,6 +157,9 @@ if ~isscalar(interp_bool) || ~islogical(interp_bool)
 end
 
 
+% Pixel reject structure for row anomaly, cloud fraction, etc.
+reject_details = struct('cloud_type', 'omi', 'cloud_frac', 0.2, 'row_anom_mode', 'XTrackFlags', 'check_behr_amf', true);
+
 %%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%% MAIN FUNCTION %%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%
@@ -241,47 +171,38 @@ else
     nox_no2_scale = 1;
 end
 
-if isempty(crit_logical) && windvel_set
-    crit_logical = eval(sprintf('windvel %s windcrit',windop));
-end
-
 create_array = true;
 i = 0;
 for d=1:numel(fnames_struct)
     D = load(fullfile(fpath,fnames_struct(d).name),'Data');
-    
-    if ~crit_logical(d)
-        if DEBUG_LEVEL > 0; fprintf('Condition criteria not met, skipping %s\n',fnames_struct(d).name); end
-        continue
-    end
-    
-    if ~use_data_ind
-        n_swath = numel(D.Data);
-    else 
-        n_swath = numel(data_ind);
-    end
 
     % We'll still "rotate" each day but divide it by sectors. This isn't so
     % much trying to reproduce Beirle 11 as give me a way to find out which
     % directions contribute to certain features of the line density.
+    n_swath = numel(D.Data);
     for s=1:n_swath
-        i = i+1;
-        if ~use_data_ind
-            e = s;
-        else
-            e = data_ind(s);
+        if ~wind_logical(d,s)
+            if DEBUG_LEVEL > 0; 
+                fprintf('Condition criteria not met, skipping %s orbit %d\n',fnames_struct(d).name, s); 
+            end
+            continue
         end
+        
+        
         if DEBUG_LEVEL > 0; disp('Rotating plume'); end
         if ~isempty(rel_box_corners)
-            OMI = rotate_plume(D.Data(e), center_lon, center_lat, theta(d), rel_box_corners);
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d), rel_box_corners);
         else
-            OMI = rotate_plume(D.Data(e), center_lon, center_lat, theta(d));
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d));
         end
         if isempty(OMI.Longitude)
             if DEBUG_LEVEL > 0; fprintf('No grid cells in %s\n',fnames_struct(d).name); end 
             continue
         end
-        OMI = omi_pixel_reject(OMI,'omi',0.2,'XTrackFlags');
+        
+        i = i+1;
+        
+        OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
         xx = OMI.Areaweight > 0;
         if create_array
             directions = {'W','SW','S','SE','E','NE','N','NW'};
@@ -294,14 +215,14 @@ for d=1:numel(fnames_struct)
             create_array = false;
         end
         
-        debug_cell{i} = sprintf('%s: swath %d', fnames_struct(d).name, e);
+        debug_cell{i} = sprintf('%s: swath %d', fnames_struct(d).name, s);
 
         
         % Find which bin this belongs in
-        if theta(d) < theta_bin_edges(2) || theta(d) > theta_bin_edges(end)
+        if theta(d,s) < theta_bin_edges(2) || theta(d,s) > theta_bin_edges(end)
             bin = 'W';
         else
-            theta_xx = theta_bin_edges(1:end-1) <= theta(d) & theta_bin_edges(2:end) > theta(d);
+            theta_xx = theta_bin_edges(1:end-1) <= theta(d,s) & theta_bin_edges(2:end) > theta(d,s);
             bin = directions{theta_xx};
         end
         

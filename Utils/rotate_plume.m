@@ -144,38 +144,26 @@ for corner=1:4
     y_box_rot(corner) = out(2) + center_lat;
 end
 
-% Remove pixels with VZA greater than the specified criteria
-% which defaults to 60 degrees.
-vv = Data.ViewingZenithAngle <= vza_crit;
-
-% Remove pixels outside the box
-pp = false(size(Data.Longitude));
-for a=1:numel(Data.Longitude)
-    pp(a) = test_box_overlap(Data.(loncorn_field)(:,a), Data.(latcorn_field)(:,a), x_box_rot, y_box_rot);
+% Check if this orbit has any pixels within the target box, if not, return
+% a dummy structure indicating that
+in_check = inpolygon(Data.Longitude, Data.Latitude, x_box_rot, y_box_rot);
+if ~any(in_check(:))
+    OMI.Longitude = [];
+    OMI.Latitude = [];
+    return;
 end
 
-xx = pp & vv;
-
+% Remove pixels with VZA greater than the specified criteria which defaults
+% to 60 degrees. Do any data field that is the 2D shape, and avoid any flag
+% fields, because they will cause a Python error on the CVM side.
+vv = Data.ViewingZenithAngle > vza_crit;
 fns = fieldnames(Data);
-fns(ismember(fns,{'Longitude','Latitude',loncorn_field,latcorn_field})) = []; % we handle this fields separately, so don't include them in the fieldnames loops
-
-Data.Longitude(~xx) = [];
-Data.Latitude(~xx) = [];
-Data.(loncorn_field)(:,~xx) = [];
-Data.(latcorn_field)(:,~xx) = [];
-fields_to_remove = {};
 for f=1:numel(fns)
-    if ~ismatrix(Data.(fns{f}))
-        fields_to_remove{end+1} = fns{f}; %#ok<AGROW>
-    elseif isnumeric(Data.(fns{f})) && all(size(xx) == size(Data.(fns{f})))
-        Data.(fns{f})(~xx) = [];
+    if isequal(size(Data.(fns{f})), size(vv)) && isnumeric(Data.(fns{f})) && ~ismember(fns{f}, BEHR_publishing_gridded_fields.flag_vars)
+        Data.(fns{f})(vv) = nan;
     end
 end
 
-for f=1:numel(fields_to_remove)
-    Data=rmfield(Data,fields_to_remove{f});
-    fns(strcmp(fns,fields_to_remove{f})) = [];
-end
 % Rotate the pixels back to the x-axis (only need to change the lon/lat fields)
 R = [cosd(-theta), -sind(-theta); sind(-theta), cosd(-theta)];
 for a=1:numel(Data.Longitude)
@@ -184,8 +172,8 @@ for a=1:numel(Data.Longitude)
     Data.Latitude(a) = out(2) + center_lat;
     for b=1:4
         out = R * [Data.(loncorn_field)(b,a) - center_lon; Data.(latcorn_field)(b,a) - center_lat];
-        Data.(loncorn_field{c,1})(b,a) = out(1) + center_lon;
-        Data.(latcorn_field{c,2})(b,a) = out(2) + center_lat;
+        Data.(loncorn_field)(b,a) = out(1) + center_lon;
+        Data.(latcorn_field)(b,a) = out(2) + center_lat;
     end
 end
 
@@ -197,6 +185,7 @@ resolution = 0.05;
 BoxGrid = GlobeGrid(resolution, 'domain', [lonmin, lonmax, latmin, latmax]);
 
 OMI = psm_wrapper(Data, BoxGrid, 'only_cvm', true, 'DEBUG_LEVEL', DEBUG_LEVEL);
+
 
 end
 
