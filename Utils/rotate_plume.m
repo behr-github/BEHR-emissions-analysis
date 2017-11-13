@@ -89,15 +89,22 @@ function [ OMI ] = rotate_plume( Data, center_lon, center_lat, theta, varargin )
 p = inputParser;
 p.addOptional('rel_box_corners',[]);
 p.addParameter('vza_crit',60);
+p.addParameter('loncorn', 'FoV75CornerLongitude');
+p.addParameter('latcorn', 'FoV75CornerLatitude');
+p.addParameter('DEBUG_LEVEL', 2);
+
 p.parse(varargin{:});
 pout = p.Results;
 rel_box_corners = pout.rel_box_corners;
 vza_crit = pout.vza_crit;
+loncorn_field = pout.loncorn;
+latcorn_field = pout.latcorn;
+DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 E = JLLErrors;
 
-if ~isstruct(Data) || ~isscalar(Data) || any(~ismember({'Longitude','Latitude','Loncorn','Latcorn'}, fieldnames(Data)))
-    E.badinput('Data must be a scalar structure with the fields Longitude, Latitude, Loncorn, and Latcorn')
+if ~isstruct(Data) || ~isscalar(Data) || any(~ismember({'Longitude','Latitude',loncorn_field,latcorn_field}, fieldnames(Data)))
+    E.badinput('Data must be a scalar structure with the fields Longitude, Latitude, %s, and %s', loncorn_field, latcorn_field)
 end
 if ~isscalar(center_lon) || ~isnumeric(center_lon) || center_lon > 180 || center_lon < -180
     E.badinput('center_lon must be a scalar numeric value between -180 and +180')
@@ -144,18 +151,18 @@ vv = Data.ViewingZenithAngle <= vza_crit;
 % Remove pixels outside the box
 pp = false(size(Data.Longitude));
 for a=1:numel(Data.Longitude)
-    pp(a) = test_box_overlap(Data.Loncorn(:,a), Data.Latcorn(:,a), x_box_rot, y_box_rot);
+    pp(a) = test_box_overlap(Data.(loncorn_field)(:,a), Data.(latcorn_field)(:,a), x_box_rot, y_box_rot);
 end
 
 xx = pp & vv;
 
 fns = fieldnames(Data);
-fns(ismember(fns,{'Longitude','Latitude','Loncorn','Latcorn'})) = []; % we handle this fields separately, so don't include them in the fieldnames loops
+fns(ismember(fns,{'Longitude','Latitude',loncorn_field,latcorn_field})) = []; % we handle this fields separately, so don't include them in the fieldnames loops
 
 Data.Longitude(~xx) = [];
 Data.Latitude(~xx) = [];
-Data.Loncorn(:,~xx) = [];
-Data.Latcorn(:,~xx) = [];
+Data.(loncorn_field)(:,~xx) = [];
+Data.(latcorn_field)(:,~xx) = [];
 fields_to_remove = {};
 for f=1:numel(fns)
     if ~ismatrix(Data.(fns{f}))
@@ -176,9 +183,9 @@ for a=1:numel(Data.Longitude)
     Data.Longitude(a) = out(1) + center_lon;
     Data.Latitude(a) = out(2) + center_lat;
     for b=1:4
-        out = R * [Data.Loncorn(b,a) - center_lon; Data.Latcorn(b,a) - center_lat];
-        Data.Loncorn(b,a) = out(1) + center_lon;
-        Data.Latcorn(b,a) = out(2) + center_lat;
+        out = R * [Data.(loncorn_field)(b,a) - center_lon; Data.(latcorn_field)(b,a) - center_lat];
+        Data.(loncorn_field{c,1})(b,a) = out(1) + center_lon;
+        Data.(latcorn_field{c,2})(b,a) = out(2) + center_lat;
     end
 end
 
@@ -186,22 +193,10 @@ end
 % Finally grid the data to a 0.05 x 0.05 degree grid.
 lonmin = center_lon + x_box(1);  lonmax = center_lon + x_box(3);
 latmin = center_lat + y_box(1);  latmax = center_lat + y_box(3);
-resolution = 0.05; resolution2 = 0.05;
-% This will be passed to the gridding function to keep the field order
-% correct.
-OMI = struct('BEHRColumnAmountNO2Trop', [], 'ViewingZenithAngle', [], 'SolarZenithAngle', [], 'AMFTrop', [], 'CloudFraction', [], 'CloudRadianceFraction', [],...
-    'CloudPressure', [], 'ColumnAmountNO2Trop', [], 'RelativeAzimuthAngle', [], 'MODISAlbedo', [], 'GLOBETerpres', [], 'BEHRAMFTrop', [],...
-    'Latitude', [], 'Longitude', [], 'MapData', struct, 'Count', [], 'Area', [], 'Areaweight', [], 'vcdQualityFlags', {{}}, 'XTrackQualityFlags', {{}});
-OMI = repmat(OMI,1,numel(Data));
-hh=0;
+resolution = 0.05;
+BoxGrid = GlobeGrid(resolution, 'domain', [lonmin, lonmax, latmin, latmax]);
 
-if all(Data.ViewingZenithAngle(:) == 0) || numel(Data.ViewingZenithAngle) == 1
-    return
-else
-    OMI = add2grid_BEHR_winds(Data,OMI,resolution,resolution2,[lonmin, lonmax],[latmin, latmax]);
-end
-
-
+OMI = psm_wrapper(Data, BoxGrid, 'only_cvm', true, 'DEBUG_LEVEL', DEBUG_LEVEL);
 
 end
 
