@@ -301,11 +301,11 @@ classdef misc_emissions_analysis
                 
                 % Call the sector division algorithm
                 [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                    = calc_line_density_sectors(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false);
+                    = calc_line_density_sectors(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', [1 2 1 1]);
                 %winds.locs(a).no2_sectors = no2;
             end
             
-            for a=1:numel(winds_locs)
+            for a=1:numel(winds.locs)
                 winds.locs(a).no2_sectors = no2(a);
             end
             
@@ -313,7 +313,7 @@ classdef misc_emissions_analysis
             dvec = winds.dvec;
             write_date = datestr(now);
             
-            save(save_name, 'locs', 'dvec', 'write_date');
+            save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
         %%%%%%%%%%%%%%%%%%%%
