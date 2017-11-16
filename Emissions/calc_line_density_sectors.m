@@ -191,9 +191,9 @@ for d=1:numel(fnames_struct)
         
         if DEBUG_LEVEL > 0; disp('Rotating plume'); end
         if ~isempty(rel_box_corners)
-            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d), rel_box_corners);
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s), rel_box_corners);
         else
-            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d));
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s));
         end
         if isempty(OMI.Longitude)
             if DEBUG_LEVEL > 0; fprintf('No grid cells in %s\n',fnames_struct(d).name); end 
