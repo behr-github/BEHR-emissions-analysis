@@ -38,8 +38,13 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = sectors_file_name(start_date, end_date)
-            filename = sprintf('site_sectors_no2_%sto%s.mat', datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
+        function filename = sectors_file_name(start_date, end_date, by_sectors)
+            if by_sectors
+                sectors_string = 'sectors';
+            else
+                sectors_string = 'rotated';
+            end
+            filename = sprintf('site_%s_no2_%sto%s.mat', sectors_string, datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -63,24 +68,7 @@ classdef misc_emissions_analysis
         %%%%%%%%%%%%%%%%%%%
         
         function locs = read_locs_file()
-            locs_file = fullfile(misc_emissions_analysis.workspace_dir, 'SiteData', 'trend_locations.nc');
-            ni = ncinfo(locs_file);
-            ncvarnames = {ni.Variables.Name};
-            struct_tmp_cell = cell(1, 2*numel(ncvarnames));
-            for a=1:numel(ncvarnames)
-                struct_tmp_cell{(a-1)*2 + 1} = ncvarnames{a};
-                val = ncread(locs_file, ncvarnames{a});
-                if ischar(val)
-                    val = cellstr(val);
-                else
-                    val = num2cell(val);
-                end
-                
-                struct_tmp_cell{a*2} = val;
-            end
-            
-            % This makes it into a structure where each index is a location
-            locs = struct(struct_tmp_cell{:});
+            locs = read_loc_spreadsheet();
         end
         
         function [xx, yy] = find_loc_indices(loc, lon, lat, radius)
@@ -120,6 +108,88 @@ classdef misc_emissions_analysis
                 utc_datenum = omi_time_conv(nanmean(Data(a).Time(:)));
                 [~, i_date] = min(abs(wrf_dates - utc_datenum));
                 wrf_files{a} = F(i_date).name;
+            end
+        end
+        
+        function [lon, lat] = rotate_lon_lat(lon, lat, center_lon, center_lat, theta)
+            R = [cosd(theta), -sind(theta); sind(theta), cosd(theta)];
+            for a=1:numel(lon)
+                rot_coords = R * [lon(a) - center_lon; lat(a) - center_lat];
+                lon(a) = rot_coords(1) + center_lon;
+                lat(a) = rot_coords(2) + center_lat;
+            end
+        end
+        
+        function wind_logical = set_wind_conditions(location, speed_cutoff, fast_or_slow, error_if_undef)
+            E = JLLErrors;
+            if ~isstruct(location) || ~isscalar(location) || any(~isfield(location, {'ShortName', 'WindDir', 'WindSpeed'}))
+                E.badinput('LOCATION must be a scalar structure with fields "ShortName", "WindDir", and "WindSpeed"')
+            end
+            
+            if ~isnumeric(speed_cutoff) || ~isscalar(speed_cutoff) || speed_cutoff < 0
+                E.badinput('SPEED_CUTOFF must be a scalar, positive number')
+            end
+            
+            allowed_fast_slow = {'fast', 'slow'};
+            if ~ismember(fast_or_slow, allowed_fast_slow)
+                E.badinput('FAST_OR_SLOW must be one of: %s', strjoin(fast_or_slow));
+            end
+            
+            if ~exist('error_if_undef','var')
+                error_if_undef = false;
+            elseif ~islogical(error_if_undef) || ~isscalar(error_if_undef)
+                E.badinput('ERROR_IF_UNDEF must be a scalar logical')
+            end
+            
+            wind_logical = true(size(location.WindDir));
+            % These can be used as constants to filter particular
+            % directions, or one can of could specify your own specific
+            % directions as degrees.
+            dir_N = [67.5 112.5];
+            dir_NE = [22.5 67.5];
+            dir_E = [-22.5 22.5];
+            dir_SE = [-67.2 22.5];
+            dir_S = [-112.5 -67.5];
+            dir_SW = [-152.5 -112.5];
+            dir_W = [152.5 -152.5];
+            dir_NW = [112.5 152.5];
+            
+            % Define how you want to filter wind directions for locations
+            % based on their short name here.
+            switch location.ShortName
+                case 'Bakersfield'
+                    % Using just 2012, Bakersfield is really hard to tell.
+                    % There always seems to be a downwind source, so for
+                    % now just going to try using all directions.
+                case 'Chicago'
+                    % The directions that have weird behavior just seem to
+                    % be due to missing data, averaging all wind directions
+                    % should help with that.
+                case 'Fresno'
+                    % This may just be sampling issues, i.e. the sectors
+                    % line densities had too few days to work from
+                    wind_logical(location.WindDir > dir_SW(1) & location.WindDir < dir_SW(2)) = false;
+                    wind_logical(location.WindDir > dir_N(1) & location.WindDir < dir_N(2)) = false;
+                case 'Houston'
+                    % North is a little weird, but could probably be used
+                    % with < 100 km downwind
+                    wind_logical(location.WindDir > dir_N(1) & location.WindDir < dir_N(2)) = false;
+                case 'Washington DC'
+                    % pass
+                otherwise
+                    msg = sprintf('No wind direction filtering for %s defined', location.ShortName);
+                    if error_if_undef
+                        E.notimplemented(msg);
+                    else
+                        fprintf('%s\n',msg);
+                    end
+            end
+            
+            % Handle wind speed filtering here
+            if strcmpi(fast_or_slow, 'fast')
+                wind_logical(location.WindSpeed < speed_cutoff) = false;
+            else
+                wind_logical(location.WindSpeed >= speed_cutoff) = false;
             end
         end
         
@@ -252,9 +322,57 @@ classdef misc_emissions_analysis
             save(save_file, 'locs', 'dvec', 'write_date');
         end
         
-        function make_sector_line_densities(do_overwrite)
-            if ~exist('overwrite', 'var')
+        function make_rotated_line_densities(varargin)
+            % MAKE_ROTATED_LINE_DENSITIES() will make the line densities
+            % aligning all wind directions for all locations, asking before
+            % overwriting existing files.
+            %
+            % MAKE_ROTATED_LINE_DENSITIES( LOC_INDICIES ) will restrict the
+            % locations to those given at locs(LOC_INDICIES) in the winds
+            % file (misc_emissions_analysis.winds_file_name). It will do
+            % this before removing rural sites. Will still ask to overwrite
+            % existing file.
+            %
+            % MAKE_ROTATED_LINE_DENSITIES( LOC_INDICIES, OVERWRITE ) given
+            % OVERWRITE == 0, will not overwrite an existing file and
+            % OVERWRITE > 0 will overwrite an existing file. OVERWRITE < 0
+            % will ask before overwriting.
+            misc_emissions_analysis.make_line_densities(false, varargin{:});
+        end
+        
+        function make_sector_line_densities(varargin)
+            % MAKE_SECTOR_LINE_DENSITIES() will make the line densities for
+            % separate wind direction sectors for all locations, asking
+            % before overwriting existing files.
+            %
+            % MAKE_SECTOR_LINE_DENSITIES( LOC_INDICIES ) will restrict the
+            % locations to those given at locs(LOC_INDICIES) in the winds
+            % file (misc_emissions_analysis.winds_file_name). It will do
+            % this before removing rural sites. Will still ask to overwrite
+            % existing file.
+            %
+            % MAKE_SECTOR_LINE_DENSITIES( LOC_INDICIES, OVERWRITE ) given
+            % OVERWRITE == 0, will not overwrite an existing file and
+            % OVERWRITE > 0 will overwrite an existing file. OVERWRITE < 0
+            % will ask before overwriting.
+            misc_emissions_analysis.make_line_densities(true, varargin{:});
+        end
+        
+        function make_line_densities(by_sectors, loc_indicies, do_overwrite)
+            if ~islogical(by_sectors) || ~isscalar(by_sectors)
+                E.badinput('BY_SECTORS must be a scalar logical')
+            end
+            
+            if ~exist('loc_indicies', 'var')
+                loc_indicies = [];
+            elseif ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
+                E.badinput('LOC_INDICIES must be a numeric array with all values >= 1')
+            end
+            
+            if ~exist('do_overwrite', 'var')
                 do_overwrite = -1;
+            elseif (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
+                E.badinput('DO_OVERWRITE must be a scalar logical or number')
             end
             
             start_date = misc_emissions_analysis.em_start_date;
@@ -262,7 +380,7 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.sectors_file_name(start_date, end_date);
+            save_name = misc_emissions_analysis.sectors_file_name(start_date, end_date, by_sectors);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn('%s exists. Overwrite?')
@@ -287,21 +405,37 @@ classdef misc_emissions_analysis
                 E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s)', winds_file, datestr(start_date), datestr(end_date));
             end
             
+            if ~isempty(loc_indicies)
+                winds.locs = winds.locs(loc_indicies);
+            end
             % Rural sites aren't going to be that interesting
             xx = strcmpi('Cities', {winds.locs.SiteType}) | strcmpi('PowerPlants', {winds.locs.SiteType});
             winds.locs(~xx) = [];
+            box_size = [1 2 1 1];
             
-            parfor a=1:numel(winds.locs)
+            for a=1:numel(winds.locs)
                 fprintf('Calculating sector line densities for %s\n', winds.locs(a).ShortName);
                 
                 % Choose slow wind days for this - our goal is to find out
                 % which directions have downwind sources that will confound the
                 % fitting
-                wind_logical = winds.locs(a).WindSpeed < 3;
+                if by_sectors
+                    % Place holder - I only use the sectors code to find
+                    % directions that are good for the line density
+                    % analysis, so I look at slow winds to find directions
+                    % that have downwind sources (like a manual version of
+                    % Liu et al. 2016)
+                    wind_logical = winds.locs(a).WindSpeed < 3;
+                    % Call the sector division algorithm
+                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
+                        = calc_line_density_sectors(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
+                else
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds.locs(a), 3, 'fast');
+                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
+                        = calc_line_density(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
+                end
                 
-                % Call the sector division algorithm
-                [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                    = calc_line_density_sectors(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', [1 2 1 1]);
+                
                 %winds.locs(a).no2_sectors = no2;
             end
             
@@ -320,7 +454,7 @@ classdef misc_emissions_analysis
         % Plotting methods %
         %%%%%%%%%%%%%%%%%%%%
         
-        function plot_site_summer_avg(loc_to_plot, plot_year)
+        function plot_site_summer_avg(loc_to_plot, plot_year, monthly_or_daily, plot_axis)
             locs = misc_emissions_analysis.read_locs_file();
             loc_names = {locs.ShortName};
             if ~exist('loc_to_plot', 'var') || isempty(loc_to_plot)
@@ -333,7 +467,7 @@ classdef misc_emissions_analysis
             
             avg_files = dir(fullfile(misc_emissions_analysis.avg_save_dir, '*.mat'));
             avg_files = {avg_files.name};
-            if ~exist('year', 'var')
+            if ~exist('plot_year', 'var')
                 file_to_plot = ask_multichoice('Plot which avg. file?', avg_files, 'list', true);
                 file_to_plot = fullfile(misc_emissions_analysis.avg_save_dir, file_to_plot);
             else
@@ -341,9 +475,16 @@ classdef misc_emissions_analysis
                     E.badinput('PLOT_YEAR must be a scalar number')
                 end
                 file_to_plot = misc_emissions_analysis.avg_file_name(plot_year);
-                if ~exist(file_name, 'file')
+                if ~exist(file_to_plot, 'file')
                     E.badinput('No average file for year %d', plot_year);
                 end
+            end
+            
+            allowed_mod_strings = {'both', 'monthly', 'daily'};
+            if ~exist('monthly_or_daily', 'var')
+                monthly_or_daily = 'both';
+            elseif ~ismember(monthly_or_daily, allowed_mod_strings)
+                E.badinput('MONTHLY_OR_DAILY must be one of: %s', allowed_mod_strings);
             end
             
             % From the average file, find the point near the given
@@ -359,23 +500,134 @@ classdef misc_emissions_analysis
             
             loc_longrid = avgs.monthly.lon(yy,xx);
             loc_latgrid = avgs.monthly.lat(yy,xx);
-            loc_no2grid = avgs.monthly.no2(yy,xx);
-            figure; 
-            pcolor(loc_longrid, loc_latgrid, avgs.monthly.no2(yy,xx));
-            line(locs(i_loc).Longitude, locs(i_loc).Latitude, 'marker', 'p', 'color', 'k', 'linestyle', 'none');
-            colorbar;
-            caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'max', [0 Inf]));
-            title(sprintf('%s - Monthly profiles', locs(i_loc).ShortName));
-            
+            if ismember(monthly_or_daily, {'both', 'monthly'})
+                loc_no2grid = avgs.monthly.no2(yy,xx);
+                figure;
+                pcolor(loc_longrid, loc_latgrid, loc_no2grid);
+                line(locs(i_loc).Longitude, locs(i_loc).Latitude, 'marker', 'p', 'color', 'k', 'linestyle', 'none');
+                colorbar;
+                caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'max', [0 Inf]));
+                title(sprintf('%s - Monthly profiles', locs(i_loc).ShortName));
+            end
             % If daily profile avgs are available too, plot them as well
-            if ~isscalar(avgs.daily.no2) % if no data, the no2 grid will just be a scalar NaN
-                figure; 
+            if ~isscalar(avgs.daily.no2) && ismember(monthly_or_daily, {'both', 'daily'}) % if no data, the no2 grid will just be a scalar NaN
                 loc_no2grid = avgs.daily.no2(yy,xx);
-                pcolor(loc_longrid, loc_latgrid, avgs.daily.no2(yy,xx));
+                if ~exist('plot_axis','var')
+                    figure; 
+                    pcolor(loc_longrid, loc_latgrid, loc_no2grid);
+                else
+                    pcolor(plot_axis, loc_longrid, loc_latgrid, loc_no2grid);
+                end
                 line(locs(i_loc).Longitude, locs(i_loc).Latitude, 'marker', 'p', 'color', 'k', 'linestyle', 'none');
                 colorbar;
                 caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'max', [0 Inf]));
                 title(sprintf('%s - Daily profiles', locs(i_loc).ShortName));
+            end
+        end
+        
+        function plot_site_sectors_linedens(locs_to_plot, locs_dvec)
+            E = JLLErrors;
+            if nargin < 2
+                avail_ld_files = dir(fullfile(misc_emissions_analysis.line_density_dir, '*.mat'));
+                
+                if numel(avail_ld_files) == 1
+                    ld_file = avail_ld_files(1).name;
+                else
+                    ld_file = ask_multichoice('Select the sector line density file to use', {avail_ld_files.name}, 'list', true);
+                end
+                
+                ld_file = fullfile(misc_emissions_analysis.line_density_dir, ld_file);
+                locs_data = load(ld_file);
+                locs_to_plot = locs_data.locs;
+                locs_dvec = locs_data.dvec;
+                
+                loc_inds = ask_multiselect('Choose the site(s) to plot', {locs_to_plot.ShortName}, 'returnindex', true);
+                locs_to_plot = locs_to_plot(loc_inds);
+                
+            elseif ~isstruct(locs_to_plot) || ~isfield(locs_to_plot, 'no2_sectors')
+                E.badinput('LOCS_TO_PLOT must be a structure with field "no2_sectors"');
+            end
+            
+            % Also load the summer average column density file so that we
+            % can plot that as the center figure.
+            locs_year = unique(year(locs_dvec));
+            if numel(locs_year) > 1
+                E.notimplemented('Line densities across multiple years')
+            end
+            
+            % Map the subplot index to the proper direction
+            direction_names = {'NW','N','NE','W','vcds','E','SW','S','SE'};
+            for a=1:numel(locs_to_plot)
+                figure;
+                for b=1:9
+                    ax=subplot(3,3,b);
+                    if strcmpi(direction_names{b}, 'vcds')
+                        misc_emissions_analysis.plot_site_summer_avg(locs_to_plot(a).ShortName, locs_year, 'daily', ax);
+                        cb=colorbar;
+                        cb.Label.String = 'NO_2 VCD (molec. cm^{-2})';
+                        line(locs_to_plot(a).Longitude, locs_to_plot(a).Latitude, 'linestyle','none','marker','p','linewidth',2,'color','k');
+                    else
+                        plot(locs_to_plot(a).no2_sectors.x.(direction_names{b}), locs_to_plot(a).no2_sectors.linedens.(direction_names{b}));
+                        xlabel('Dist. to site (km)');
+                        ylabel('Line density (mol km^{-1})');
+                        title(direction_names{b});
+                    end
+                end
+            end
+        end
+        
+        function plot_sector_no2avg_with_boxes(locs_to_plot)
+            if ~exist('locs_to_plot', 'var')
+                avail_ld_files = dir(fullfile(misc_emissions_analysis.line_density_dir, '*.mat'));
+                
+                if numel(avail_ld_files) == 1
+                    ld_file = avail_ld_files(1).name;
+                else
+                    ld_file = ask_multichoice('Select the sector line density file to use', {avail_ld_files.name}, 'list', true);
+                end
+                
+                ld_file = fullfile(misc_emissions_analysis.line_density_dir, ld_file);
+                locs_data = load(ld_file);
+                locs_to_plot = locs_data.locs;
+                
+                loc_inds = ask_multiselect('Choose the site(s) to plot', {locs_to_plot.ShortName}, 'returnindex', true);
+                locs_to_plot = locs_to_plot(loc_inds);
+                
+            elseif ~isstruct(locs_to_plot) || ~isfield(locs_to_plot, 'no2_sectors')
+                E.badinput('LOCS_TO_PLOT must be a structure with field "no2_sectors"');
+            end
+            
+            % Loop through the directions, plotting the average NO2 VCDs
+            % with four different size boxes.
+            direction_names = {'NW','N','NE','W','','E','SW','S','SE'};
+            direction_angles = [135, 90, 45, 180, NaN, 0, -135, -90, -45];
+            for a=1:numel(locs_to_plot)
+                figure;
+                boxes_rel_x = [-0.5 1 1 -0.5 -0.5;...
+                               -1 2 2 -1 -1;...
+                               -2 4 4 -2 -2];
+                boxes_rel_y = [-0.5 -0.5 0.5 0.5 -0.5;...
+                               -1 -1 1 1 -1;...
+                               -2 -2 2 2 -2];
+                for b=1:9
+                    subplot(3,3,b);
+                    if isempty(direction_names{b})
+                        title(locs_to_plot(a).Location);
+                        axis off
+                        continue
+                    end
+                    [lon, lat] = misc_emissions_analysis.rotate_lon_lat(locs_to_plot(a).no2_sectors.lon, locs_to_plot(a).no2_sectors.lat, locs_to_plot(a).Longitude, locs_to_plot(a).Latitude, direction_angles(b));
+                    box_lon = boxes_rel_x + locs_to_plot(a).Longitude;
+                    box_lat = boxes_rel_y + locs_to_plot(a).Latitude;
+                    [box_lon, box_lat] = misc_emissions_analysis.rotate_lon_lat(box_lon, box_lat, locs_to_plot(a).Longitude, locs_to_plot(a).Latitude, direction_angles(b));
+                    
+                    pcolor(lon, lat, locs_to_plot(a).no2_sectors.no2_mean.(direction_names{b}));
+                    shading flat; colorbar
+                    for c=1:size(box_lon,1)
+                        line(box_lon(c,:), box_lat(c,:), 'linewidth', 2, 'linestyle', '--', 'color', 'k');
+                    end
+                    title(direction_names{b});
+                end
             end
         end
     end

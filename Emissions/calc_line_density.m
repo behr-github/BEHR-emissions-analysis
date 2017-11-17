@@ -1,4 +1,4 @@
-function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density( fpath, fnames, center_lon, center_lat, theta, varargin )
+function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density( fpath, fnames, center_lon, center_lat, theta, wind_logical, varargin )
 %[ NO2_X, NO2_LINEDENS, NO2_LINEDENS_STD, LON, LAT, NO2_MEAN, NO2_STD, NUM_VALID_OBS] = CALC_LINE_DENSITY( FPATH, FNAMES, CENTER_LON, CENTER_LAT, THETA )
 %   Calculate a wind-aligned line density for a given time period.
 %
@@ -115,11 +115,6 @@ E = JLLErrors;
 
 p=inputParser;
 p.addOptional('nox_or_no2','no2',@(x) ismember(lower(x),{'nox','no2'}));
-p.addParameter('data_ind',[]);
-p.addParameter('windvel',[]);
-p.addParameter('windcrit',[]);
-p.addParameter('windop','');
-p.addParameter('crit_logical',[]);
 p.addParameter('rel_box_corners',[]);
 p.addParameter('force_calc',false);
 p.addParameter('interp',true);
@@ -129,11 +124,6 @@ p.parse(varargin{:});
 
 pout=p.Results;
 nox_or_no2 = pout.nox_or_no2;
-data_ind = pout.data_ind;
-windvel = pout.windvel;
-windcrit = pout.windcrit;
-windop = pout.windop;
-crit_logical = pout.crit_logical;
 rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
 interp_bool = pout.interp;
@@ -158,12 +148,6 @@ else
     E.badinput('Input fnames is not a valid format; see documentation')
 end
 
-use_data_ind = true;
-if ~isempty(data_ind) && ~isnumeric(data_ind)
-    E.badinput('data_ind must be an empty matrix or numeric vector')
-elseif isempty(data_ind)
-    use_data_ind = false;
-end
 if ~isscalar(center_lon) || ~isnumeric(center_lon)
     E.badinput('center_lon must be a scalar number')
 end
@@ -171,54 +155,13 @@ if ~isscalar(center_lat) || ~isnumeric(center_lat)
     E.badinput('center_lat must be a scalar number')
 end
 
-if ~isnumeric(theta) || any(theta < -180 | theta > 180) || numel(theta) ~= numel(fnames_struct)
+if ~isnumeric(theta) || any(theta(:) < -180 | theta(:) > 180) || size(theta,1) ~= numel(fnames_struct)
     E.badinput('theta must be a numeric vector with values between -180 and +180 that has the same number of elements as the number of files to be loaded')
 end
 
-if ~isempty(crit_logical) && (numel(crit_logical) ~= numel(fnames_struct) || ~islogical(crit_logical))
-    E.badinput('crit_logical must be a logical vector with the same number of elements as the number of files to be loaded');
+if ~isequal(size(wind_logical), size(theta)) || ~islogical(wind_logical)
+    E.badinput('wind_logical must be a logical matrix with the same size as THETA');
 end
-
-% Check that if any one of windvel, windop, or windcrit are passed,
-% all of them are. Alternatively, if the crit_logical matrix is
-% available, none of those should be given.
-E.addCustomError('windvelcrit','If any of windvel, windop, or windcrit are given, all must be given');
-E.addCustomError('crit_conflict','crit_logical and the windvel/windop/windcrit parameters are mutually exclusive. You may only set one of them.');
-windvel_set = false;
-if ~isempty(windvel)
-    if ~isnumeric(windvel) || any(windvel < 0) || numel(windvel) ~= numel(fnames_struct)
-        E.badinput('windvel (if given) must be a numeric vector with values >= 0 that has the same number of elements as the number of files to be loaded')
-    end
-    windvel_set = true;
-    if ~isempty(crit_logical)
-        E.callCustomError('crit_conflict');
-    end
-end
-if ~isempty(windcrit)
-    if ~isnumeric(windcrit) || ~isscalar(windcrit) || windcrit < 0
-        E.badinput('windcrit (if given) must be a numeric vector with values >= 0 that has the same number of elements as the number of files to be loaded')
-    elseif ~windvel_set
-        E.callCustomError('windvelcrit');
-    end
-    if ~isempty(crit_logical)
-        E.callCustomError('crit_conflict');
-    end
-elseif windvel_set
-    E.callCustomError('windvelcrit');
-end
-if ~isempty(windop)
-    if ~ischar(windop) || ~ismember(windop,{'<','>','<=','>='})
-        E.badinput('windop (if given) must be one of ''<'', ''>'', ''<='', ''>=''')
-    elseif ~windvel_set
-        E.callCustomError('windvelcrit');
-    end
-    if ~isempty(crit_logical)
-        E.callCustomError('crit_conflict');
-    end
-elseif windvel_set
-    E.callCustomError('windvelcrit')
-end
-% Finished with the wind crit input checking
 
 if ~isempty(rel_box_corners) && ( ~isvector(rel_box_corners) || numel(rel_box_corners) ~= 4 )
     E.badinput('rel_box_corners must be a 4 element vector');
@@ -234,6 +177,8 @@ if ~isscalar(interp_bool) || ~islogical(interp_bool)
     E.badinput('interp must be a scalar logical')
 end
 
+% Pixel reject structure for row anomaly, cloud fraction, etc.
+reject_details = struct('cloud_type', 'omi', 'cloud_frac', 0.2, 'row_anom_mode', 'XTrackFlags', 'check_behr_amf', true);
 
 %%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%% MAIN FUNCTION %%%%%
@@ -246,47 +191,38 @@ else
     nox_no2_scale = 1;
 end
 
-if isempty(crit_logical) && windvel_set
-    crit_logical = eval(sprintf('windvel %s windcrit',windop));
-end
-
-fid = fopen('index_date_and_swath.txt','w');
+%fid = fopen('index_date_and_swath.txt','w');
 
 create_array = true;
 i = 0;
 for d=1:numel(fnames_struct)
     D = load(fullfile(fpath,fnames_struct(d).name),'Data');
-    
-    if ~crit_logical(d)
-        if DEBUG_LEVEL > 0; fprintf('Condition criteria not met, skipping %s\n',fnames_struct(d).name); end
-        continue
-    end
-    
-    if ~use_data_ind
-        n_swath = numel(D.Data);
-    else 
-        n_swath = numel(data_ind);
-    end
 
+    n_swath = numel(D.Data);
     for s=1:n_swath
-        i = i+1;
-        fprintf(fid,'** %d: %s swath %d\n', i, fnames_struct(d).name, s);
-        if ~use_data_ind
-            e = s;
-        else
-            e = data_ind(s);
+        %fprintf(fid,'** %d: %s swath %d\n', i, fnames_struct(d).name, s);
+        if ~wind_logical(d,s)
+            if DEBUG_LEVEL > 0
+                fprintf('Condition criteria not met, skipping %s orbit %d\n', fnames_struct(d).name, s);
+            end
+            continue
         end
+        
+        
         if DEBUG_LEVEL > 0; disp('Rotating plume'); end
         if ~isempty(rel_box_corners)
-            OMI = rotate_plume(D.Data(e), center_lon, center_lat, theta(d), rel_box_corners);
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s), rel_box_corners);
         else
-            OMI = rotate_plume(D.Data(e), center_lon, center_lat, theta(d));
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s));
         end
         if isempty(OMI.Longitude)
             if DEBUG_LEVEL > 0; fprintf('No grid cells in %s\n',fnames_struct(d).name); end 
             continue
         end
-        OMI = omi_pixel_reject(OMI,'omi',0.2,'XTrackFlags');
+        
+        i = i+1;
+        
+        OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
         xx = OMI.Areaweight > 0;
         if create_array
             nox = nan(size(OMI.Longitude,1), size(OMI.Longitude,2), numel(fnames_struct)*n_swath);
@@ -297,7 +233,7 @@ for d=1:numel(fnames_struct)
             create_array = false;
         end
         
-        debug_cell{i} = sprintf('%s: swath %d', fnames_struct(d).name, e);
+        debug_cell{i} = sprintf('%s: swath %d', fnames_struct(d).name, s);
 
         if interp_bool
             % This criterion accounts for how many neighbors are empty, giving more
@@ -327,7 +263,7 @@ for d=1:numel(fnames_struct)
         end
     end
 end
-fclose(fid);
+%fclose(fid);
 
 %no2_mean = nanmean(nox,3);
 no2_mean = nansum2(nox .* aw, 3) ./ nansum2(aw, 3);
