@@ -3,9 +3,6 @@ classdef misc_emissions_analysis
     %   Detailed explanation goes here
     
     properties(Constant = true)
-        em_start_date = '2012-04-01';
-        em_end_date = '2012-09-30';
-        
         % These are the wind speed division and whether to use fast or slow
         % wind speeds to generate the rotated line densities.
         em_wind_spd = 3;
@@ -92,6 +89,31 @@ classdef misc_emissions_analysis
         
         function locs = read_locs_file()
             locs = read_loc_spreadsheet();
+        end
+        
+        function [start_dates, end_dates] = select_start_end_dates(time_period)
+            E = JLLErrors;
+            % Eventually these should change to cell arrays once the line
+            % density functions are set up to take non-contiguous time
+            % periods
+            if nargin < 1 || isempty(time_period)
+                time_period = ask_multichoice('Which time period to use?', {'beginning (2005)', 'end (2012)'}, 'list', true);
+                time_period = strsplit(time_period, ' ');
+                time_period = time_period{1};
+            end
+            
+            start_month = 4;
+            end_month = 9;
+            
+            if strcmpi(time_period, 'beginning')
+                start_dates = datenum(2005, start_month, 1);
+                end_dates = eomdate(2005, end_month);
+            elseif strcmpi(time_period, 'end')
+                start_dates = datenum(2012, start_month, 1);
+                end_dates = eomdate(2012, end_month);
+            else
+                E.badinput('TIME_PERIOD "%s" not recognized', time_period);
+            end
         end
         
         function [xx, yy] = find_loc_indices(loc, lon, lat, radius)
@@ -304,22 +326,25 @@ classdef misc_emissions_analysis
             save(save_name, 'monthly', 'daily');
         end
         
-        function make_location_winds_file(start_date, end_date, overwrite)
+        function make_location_winds_file(time_period, overwrite)
             % As in Laughner, Zare, and Cohen (2016, ACP) we will calculate
             % wind direction by averaging over the first 5 WRF layers in a
             % 3x3 grid centered on each location.
+            
+            if ~exist('time_period', 'var')
+                time_period = '';
+            end
             
             if ~exist('overwrite', 'var')
                 overwrite = -1;
             end
             
             locs = misc_emissions_analysis.read_locs_file();
-            start_date = validate_date(start_date);
-            end_date = validate_date(end_date);
+            [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             dvec = start_date:end_date;
             
             % Check that the save file exists
-            save_file = misc_emissions_analysis.winds_file_name;
+            save_file = misc_emissions_analysis.winds_file_name(start_date, end_date);
             if exist(save_file, 'file')
                 % If overwrite isn't specified, ask. Otherwise, if it is
                 % false and the file exists, abort.
@@ -448,7 +473,11 @@ classdef misc_emissions_analysis
             misc_emissions_analysis.make_line_densities(true, varargin{:});
         end
         
-        function make_line_densities(by_sectors, loc_indicies, do_overwrite)
+        function make_line_densities(time_period, by_sectors, loc_indicies, do_overwrite)
+            if ~exist('time_period', 'var')
+                time_period = '';
+            end
+            
             if ~islogical(by_sectors) || ~isscalar(by_sectors)
                 E.badinput('BY_SECTORS must be a scalar logical')
             end
@@ -465,8 +494,7 @@ classdef misc_emissions_analysis
                 E.badinput('DO_OVERWRITE must be a scalar logical or number')
             end
             
-            start_date = misc_emissions_analysis.em_start_date;
-            end_date = misc_emissions_analysis.em_end_date;
+            [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
