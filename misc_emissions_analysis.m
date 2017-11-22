@@ -5,6 +5,11 @@ classdef misc_emissions_analysis
     properties(Constant = true)
         em_start_date = '2012-04-01';
         em_end_date = '2012-09-30';
+        
+        % These are the wind speed division and whether to use fast or slow
+        % wind speeds to generate the rotated line densities.
+        em_wind_spd = 3;
+        em_wind_mode = 'fast';
     end
     
     methods(Static = true)
@@ -28,6 +33,10 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'LineDensities');
         end
         
+        function value = emis_wrf_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRFData');
+        end
+        
         function filename = avg_file_name(year_in)
             filename = sprintf('Summer_avg_%d.mat', year_in);
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
@@ -46,6 +55,20 @@ classdef misc_emissions_analysis
             end
             filename = sprintf('site_%s_no2_%sto%s.mat', sectors_string, datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
+        end
+        
+        function filename = fits_file_name(start_date, end_date, is_subset)
+            if is_subset
+                subset_str = '_subset';
+            else
+                subset_str = '';
+            end
+            filename = sprintf('site_emg_fits%s_%sto%s.mat', subset_str, datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
+            filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
+        end
+        
+        function filename = wrf_grid_area_file()
+            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, 'wrfgridarea_d01');
         end
         
         function fulldir = subdir_prep(root_dir, varargin)
@@ -191,6 +214,73 @@ classdef misc_emissions_analysis
             else
                 wind_logical(location.WindSpeed >= speed_cutoff) = false;
             end
+        end
+        
+        function emis_tau = calculate_emission_lifetime(line_dens_struct, fit_struct, wind_speed_vector)
+            % First we need to compute the total uncertainty in the
+            % parameters that accounts for uncertainty in the NO2 VCDs,
+            % across wind integration distance, choice of wind fields, etc.
+            param_uncert = calc_fit_param_uncert(fit_struct.ffit, fit_struct.param_stats.percent_ci95/100, line_dens_struct.num_valid_obs);
+            
+            % Then use these uncertainties to calculate the emissions and
+            % lifetime and their uncertainties
+            [emis_tau.emis, emis_tau.emis_uncert, emis_tau.tau, emis_tau.tau_uncert] = compute_emg_emis_tau(fit_struct.ffit.a, param_uncert(1), fit_struct.ffit.x_0, param_uncert(2), 'vec', wind_speed_vector, 'emissions_type', 'no');
+        end
+        
+        function [nei_no, nei_lon, nei_lat] = load_nei_by_year(nei_year)
+            % Make the input path
+            tmp_path = find_wrf_path('us','daily',datenum(nei_year,1,1));
+            path_parts = strsplit(tmp_path, '/');
+            
+            % The path on my computer is something like '/Volumes/share-wrfN/...' 
+            % and we just want to get which network drive it should be on.
+            % The first three parts of the split path should be an empty
+            % string, Volumes, and the share. This will put a / at the
+            % beginning
+            wrf_share = strjoin(path_parts(1:3), '/');
+            
+            % Whichever share it's on, it should be in a consistent path
+            % there - except for 2012. I was having trouble getting the
+            % full year's inputs to prepare, so I had to split it into two
+            % 6 month periods. The NEI emissions are the same in both, so
+            % we can just pick one.
+            inputs_path = fullfile(wrf_share, 'Inputs', num2str(nei_year), 'IC-BC-Emis');
+            if nei_year == 2012
+                inputs_path = fullfile(inputs_path, 'Months01-06');
+            end
+            
+            % We're going to average UTC 17-22, so we just need the second
+            % 12 hr file
+            nei_info = ncinfo(fullfile(inputs_path, 'wrfchemi_12z_d01'));
+            input_info = ncinfo(fullfile(inputs_path, 'wrfinput_d01'));
+            
+            fprintf('Reading NEI data...\n');
+            nei_lon = ncread(input_info.Filename, 'XLONG');
+            nei_lat = ncread(input_info.Filename, 'XLAT');
+            
+            % Load the precalculated area - but double check that the
+            % lat/lon matches the input
+            area_lon = ncread(misc_emissions_analysis.wrf_grid_area_file, 'XLONG');
+            area_lat = ncread(misc_emissions_analysis.wrf_grid_area_file, 'XLAT');
+            if max(abs(area_lon(:) - nei_lon(:))) < 0.001 && max(abs(area_lat(:) - nei_lat(:))) < 0.001
+                grid_area = ncread(misc_emissions_analysis.wrf_grid_area_file, 'AREA');
+            else
+                fprintf('Precomputed area lat/lon did not match, calculating WRF grid area...\n');
+                grid_area = wrf_grid_area(nei_lon, nei_lat);
+            end
+            
+            nei_times = ncread(nei_info.Filename, 'Times')';
+            nei_hours = hour(datenum(nei_times, 'yyyy-mm-dd_HH:MM:SS'));
+            tt = nei_hours > 17 & nei_hours < 22;
+            
+            % Add up the emissions over the whole vertical extent; averaged
+            % over 17:00 to 22:00 UTC, which is approximately the hours OMI
+            % is over North America.
+            nei_no = double(ncread(nei_info.Filename, 'E_NO'));
+            nei_no = nansum(nanmean(nei_no(:,:,:,tt), 4), 3);
+            % Convert from mol NO / km^2 / hr to Mg NO / hr: molar mass of NO =
+            % 30.006 g / mol = 30.006e-6 Mg / mol
+            nei_no = nei_no .* grid_area .* 30.06e-6; 
         end
         
         %%%%%%%%%%%%%%%%%%%%%%
@@ -430,7 +520,7 @@ classdef misc_emissions_analysis
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density_sectors(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
                 else
-                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds.locs(a), 3, 'fast');
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds.locs(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
                 end
@@ -445,6 +535,119 @@ classdef misc_emissions_analysis
             
             locs = winds.locs;
             dvec = winds.dvec;
+            write_date = datestr(now);
+            
+            save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
+        end
+        
+        function locs = make_emg_fits(loc_indicies, add_nei, do_overwrite)
+            E = JLLErrors;
+            
+            if ~exist('loc_indicies', 'var')
+                loc_indicies = [];
+            elseif ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
+                E.badinput('LOC_INDICIES must be a numeric array with all values >= 1')
+            end
+            
+            if ~exist('add_nei', 'var')
+                add_nei = true;
+            elseif ~isscalar(add_nei) || (~islogical(add_nei) && ~isnumeric(add_nei))
+                E.badinput('ADD_NEI must be a scalar logical or numeric value');
+            end
+            
+            if ~exist('do_overwrite', 'var')
+                do_overwrite = -1;
+            elseif (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
+                E.badinput('DO_OVERWRITE must be a scalar logical or number')
+            end
+            
+            start_date = misc_emissions_analysis.em_start_date;
+            end_date = misc_emissions_analysis.em_end_date;
+            
+            % If overwrite not given and the save file exists, ask to
+            % overwrite. Otherwise, only overwrite if instructed.
+            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, ~isempty(loc_indicies));
+            if exist(save_name, 'file')
+                if do_overwrite < 0
+                    if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
+                        return
+                    end
+                elseif ~do_overwrite
+                    return
+                end
+            end
+            
+            % Load the file with the line densities
+            ldens_file = misc_emissions_analysis.sectors_file_name(start_date, end_date, false);
+            line_densities = load(ldens_file);
+            
+            % Check that the dates match up with what we're expecting (it
+            % should because we load the file with those dates)
+            check_dvec = datenum(start_date):datenum(end_date);
+            if ~isequal(check_dvec, line_densities.dvec)
+                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s)', ldens_file, datestr(start_date), datestr(end_date));
+            end
+            
+            if ~isempty(loc_indicies)
+                locs = line_densities.locs(loc_indicies);
+            else
+                locs = line_densities.locs;
+            end
+            
+            % Load the NEI data. Will need to get lat/lon from
+            % wrfinput_d01, b/c the wrfchemi files don't include lat-lon.
+            if add_nei
+                nei_year = unique(year(check_dvec));
+                [nei_avg_no, nei_lon, nei_lat] = misc_emissions_analysis.load_nei_by_year(nei_year);
+            end
+            % Specify even the default options so that if fit_line_density
+            % changes, we know exactly what options we wanted.
+            common_opts = {'fmincon_output', 'none', 'emgtype', 'lu', 'fittype', 'ssresid', 'nattempts', 20};
+            
+            for a=1:numel(locs)
+                fprintf('Fitting %s\n', locs(a).ShortName);
+                while true
+                    [fit.ffit, fit.emgfit, fit.param_stats, fit.f0, fit.history, fit.fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                    % Try this a second time - if it gives a different
+                    % answer, we should re-run, since that suggests we
+                    % didn't find the minimum one time.
+                    ffit = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                    
+                    % Check that the two are the same to within 1%
+                    diff_tolerance = 0.01;
+                    rdel = reldiff(struct2array(ffit), struct2array(fit.ffit));
+                    if all(abs(rdel) < diff_tolerance)
+                        break
+                    else
+                        fprintf('Fit results differ by > %f%% (%s vs %s); retrying\n', diff_tolerance*100, struct2string(fit.ffit), struct2string(fit));
+                    end
+                end
+                locs(a).fit_info = fit;
+                
+                % Add the emissions and lifetime. Use the 95% confidence
+                % intervals as the uncertainty. We need to restrict the
+                % winds to what should have been used to calculate the line
+                % densities.
+                wind_logical = misc_emissions_analysis.set_wind_conditions(locs(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
+                emis_tau = misc_emissions_analysis.calculate_emission_lifetime(locs(a).no2_sectors, locs(a).fit_info, locs(a).WindSpeed(wind_logical));
+                
+                if add_nei
+                    % Calculate the across-wind distance from the rotated
+                    % latitude grid - since we rotate to the "x" (i.e.
+                    % east-west) axis, across wind == latitudinally
+                    across_wind_radius = abs((locs(a).no2_sectors.lat(1,1) - locs(a).no2_sectors.lat(end,1))/2);
+                    
+                    % Now get the WRF grid cells within that radius of the
+                    % site and add up their NEI NO emissions.
+                    xx = sqrt((nei_lon - locs(a).Longitude).^2 + (nei_lat - locs(a).Latitude).^2) < across_wind_radius;
+                    
+                    emis_tau.nei_emis = nansum(nei_avg_no(xx));
+                end
+                
+                locs(a).emis_tau = emis_tau;
+            end
+            
+            dvec = line_densities.dvec;
             write_date = datestr(now);
             
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
@@ -629,6 +832,34 @@ classdef misc_emissions_analysis
                     title(direction_names{b});
                 end
             end
+        end
+        
+        function plot_sat_nei_emissions()
+            % For now, I'm just going to assume that we want to plot all
+            % the locations in the subset emissions file. Later, I'll add
+            % the ability to choose a subset of locations.
+            D = load(misc_emissions_analysis.fits_file_name(misc_emissions_analysis.em_start_date, misc_emissions_analysis.em_end_date, true));
+            locs = D.locs;
+            
+            % Extract the site name, satellite, and NEI derived emissions
+            names = cell(size(locs));
+            sat_emis = nan(size(locs));
+            sat_errors = nan(size(locs));
+            nei_emis = nan(size(locs));
+            nei_errors = nan(size(locs));
+            for a=1:numel(locs)
+                names{a} = locs(a).ShortName;
+                sat_emis(a) = locs(a).emis_tau.emis;
+                sat_errors(a) = locs(a).emis_tau.emis_uncert;
+                nei_emis(a) = locs(a).emis_tau.nei_emis;
+            end
+            
+            figure;
+            bar([sat_emis, nei_emis]);
+            ylabel('NO Emissions (Mg h^{-1})');
+            %bar_errors([sat_emis, nei_emis], [sat_errors, nei_errors]);
+            set(gca,'xticklabel',names,'fontsize',16,'ygrid','on','xtickLabelRotation',-30);
+            legend('BEHR','NEI');
         end
     end
     
