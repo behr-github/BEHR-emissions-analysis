@@ -473,7 +473,7 @@ classdef misc_emissions_analysis
             misc_emissions_analysis.make_line_densities(true, varargin{:});
         end
         
-        function make_line_densities(time_period, by_sectors, loc_indicies, do_overwrite)
+        function make_line_densities(by_sectors, time_period, loc_indicies, do_overwrite)
             if ~exist('time_period', 'var')
                 time_period = '';
             end
@@ -508,7 +508,9 @@ classdef misc_emissions_analysis
                     return
                 end
             end
-            
+           
+            fprintf('Will save as %s\n', save_name);
+ 
             % Find the list of BEHR files between the start and end dates
             [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily');
             
