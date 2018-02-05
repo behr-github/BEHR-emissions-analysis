@@ -40,7 +40,9 @@ classdef misc_emissions_analysis
         end
         
         function filename = winds_file_name(start_date, end_date)
-            filename = sprintf('site_winds_%sto%s.mat', datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            filename = sprintf('site_winds_%sto%s.mat', datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
@@ -50,7 +52,9 @@ classdef misc_emissions_analysis
             else
                 sectors_string = 'rotated';
             end
-            filename = sprintf('site_%s_no2_%sto%s.mat', sectors_string, datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            filename = sprintf('site_%s_no2_%sto%s.mat', sectors_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(2), 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -60,7 +64,9 @@ classdef misc_emissions_analysis
             else
                 subset_str = '';
             end
-            filename = sprintf('site_emg_fits%s_%sto%s.mat', subset_str, datestr(start_date, 'yyyy-mm-dd'), datestr(end_date, 'yyyy-mm-dd'));
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            filename = sprintf('site_emg_fits%s_%sto%s.mat', subset_str, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(2), 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -91,13 +97,29 @@ classdef misc_emissions_analysis
             locs = read_loc_spreadsheet();
         end
         
+        function dvec = make_datevec(start_date, end_date)
+            % Create a date vector that enumerates all dates requested,
+            % even if those are over non-continuous ranges.
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            
+            if numel(start_date) ~= numel(end_date)
+                E.badinput('START_DATE and END_DATE must have equal numbers of elements')
+            end
+            
+            dvec = [];
+            for a=1:numel(start_date)
+                dvec = veccat(dvec, start_date(a):end_date(a));
+            end
+        end
+        
         function [start_dates, end_dates] = select_start_end_dates(time_period)
             E = JLLErrors;
             % Eventually these should change to cell arrays once the line
             % density functions are set up to take non-contiguous time
             % periods
             if nargin < 1 || isempty(time_period)
-                time_period = ask_multichoice('Which time period to use?', {'beginning (2005)', 'end (2012)'}, 'list', true);
+                time_period = ask_multichoice('Which time period to use?', {'beginning (2005, 2007)', 'end (2012-13)'}, 'list', true);
                 time_period = strsplit(time_period, ' ');
                 time_period = time_period{1};
             end
@@ -106,11 +128,11 @@ classdef misc_emissions_analysis
             end_month = 9;
             
             if strcmpi(time_period, 'beginning')
-                start_dates = datenum(2005, start_month, 1);
-                end_dates = eomdate(2005, end_month);
+                start_dates = {datenum(2005, start_month, 1), datenum(2007, start_month, 1)};
+                end_dates = {eomdate(2005, end_month), eomdate(2007, end_month)};
             elseif strcmpi(time_period, 'end')
-                start_dates = datenum(2012, start_month, 1);
-                end_dates = eomdate(2012, end_month);
+                start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1)};
+                end_dates = {eomdate(2013, end_month), eomdate(2013, end_month)};
             else
                 E.badinput('TIME_PERIOD "%s" not recognized', time_period);
             end
@@ -341,7 +363,7 @@ classdef misc_emissions_analysis
             
             locs = misc_emissions_analysis.read_locs_file();
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
-            dvec = start_date:end_date;
+            dvec = misc_emissions_analysis.make_datevec(start_date, end_date);
             
             % Check that the save file exists
             save_file = misc_emissions_analysis.winds_file_name(start_date, end_date);
@@ -518,9 +540,9 @@ classdef misc_emissions_analysis
             
             % Check that the dates match up with what we're expecting (it
             % should because we load the file with those dates)
-            check_dvec = datenum(start_date):datenum(end_date);
+            check_dvec = misc_emissions_analysis.make_datevec(start_date, end_date);
             if ~isequal(check_dvec, winds.dvec)
-                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s)', winds_file, datestr(start_date), datestr(end_date));
+                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s, %d dates)', winds_file, datestr(start_date(1)), datestr(end_date(end)), numel(check_dvec));
             end
             
             if ~isempty(loc_indicies)
@@ -529,10 +551,13 @@ classdef misc_emissions_analysis
             % Rural sites aren't going to be that interesting
             xx = strcmpi('Cities', {winds.locs.SiteType}) | strcmpi('PowerPlants', {winds.locs.SiteType});
             winds.locs(~xx) = [];
+            % This should allow the substructure "locs" to be a sliced,
+            % instead of broadcast, variable
+            winds_locs_distributed = winds.locs;
             box_size = [1 2 1 1];
             
             for a=1:numel(winds.locs)
-                fprintf('Calculating sector line densities for %s\n', winds.locs(a).ShortName);
+                fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
                 
                 % Choose slow wind days for this - our goal is to find out
                 % which directions have downwind sources that will confound the
@@ -543,14 +568,14 @@ classdef misc_emissions_analysis
                     % analysis, so I look at slow winds to find directions
                     % that have downwind sources (like a manual version of
                     % Liu et al. 2016)
-                    wind_logical = winds.locs(a).WindSpeed < 3;
+                    wind_logical = winds_locs_distributed(a).WindSpeed < 3;
                     % Call the sector division algorithm
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density_sectors(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
+                        = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
                 else
-                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds.locs(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density(behr_dir, behr_files, winds.locs(a).Longitude, winds.locs(a).Latitude, winds.locs(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
+                        = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
                 end
                 
                 
@@ -568,9 +593,13 @@ classdef misc_emissions_analysis
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
-        function locs = make_emg_fits(loc_indicies, add_nei, do_overwrite)
+        function locs = make_emg_fits(time_period, loc_indicies, add_nei, do_overwrite)
             E = JLLErrors;
             
+            if ~exist('time_period', 'var')
+                time_period = '';
+            end
+
             if ~exist('loc_indicies', 'var')
                 loc_indicies = [];
             elseif ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
@@ -589,9 +618,7 @@ classdef misc_emissions_analysis
                 E.badinput('DO_OVERWRITE must be a scalar logical or number')
             end
             
-            start_date = misc_emissions_analysis.em_start_date;
-            end_date = misc_emissions_analysis.em_end_date;
-            
+            [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
             save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, ~isempty(loc_indicies));
@@ -611,9 +638,9 @@ classdef misc_emissions_analysis
             
             % Check that the dates match up with what we're expecting (it
             % should because we load the file with those dates)
-            check_dvec = datenum(start_date):datenum(end_date);
+            check_dvec = misc_emissions_analysis.make_datevec(start_date, end_date);
             if ~isequal(check_dvec, line_densities.dvec)
-                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s)', ldens_file, datestr(start_date), datestr(end_date));
+                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s)', ldens_file, datestr(start_date(1)), datestr(end_date(end)));
             end
             
             if ~isempty(loc_indicies)
@@ -866,28 +893,57 @@ classdef misc_emissions_analysis
             % For now, I'm just going to assume that we want to plot all
             % the locations in the subset emissions file. Later, I'll add
             % the ability to choose a subset of locations.
-            D = load(misc_emissions_analysis.fits_file_name(misc_emissions_analysis.em_start_date, misc_emissions_analysis.em_end_date, true));
-            locs = D.locs;
+            allowed_time_periods = {'beginning','end','both'};
+            plot_time_period = ask_multichoice('Which time period(s) to plot?', allowed_time_periods, 'list', true);
+            plot_beginning = any(strcmpi(plot_time_period, {'beginning','both'}));
+            plot_end = any(strcmpi(plot_time_period, {'end','both'}));
+            
+            % Loading both time periods isn't very hard, so we'll load both
+            % and then just plot the one we want.
+            [beg_start_date, beg_end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
+            [end_start_date, end_end_date] = misc_emissions_analysis.select_start_end_dates('end');
+            D = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, true));
+            beg_locs = D.locs;
+            D = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, true));
+            end_locs = D.locs;
             
             % Extract the site name, satellite, and NEI derived emissions
-            names = cell(size(locs));
-            sat_emis = nan(size(locs));
-            sat_errors = nan(size(locs));
-            nei_emis = nan(size(locs));
-            nei_errors = nan(size(locs));
-            for a=1:numel(locs)
-                names{a} = locs(a).ShortName;
-                sat_emis(a) = locs(a).emis_tau.emis;
-                sat_errors(a) = locs(a).emis_tau.emis_uncert;
-                nei_emis(a) = locs(a).emis_tau.nei_emis;
+            names = cell(size(beg_locs));
+            beg_sat_emis = nan(size(beg_locs));
+            beg_sat_errors = nan(size(beg_locs));
+            beg_nei_emis = nan(size(beg_locs));
+            beg_nei_errors = nan(size(beg_locs));
+            end_sat_emis = nan(size(end_locs));
+            end_sat_errors = nan(size(end_locs));
+            end_nei_emis = nan(size(end_locs));
+            end_nei_errors = nan(size(end_locs));
+            for a=1:numel(beg_locs)
+                names{a} = beg_locs(a).ShortName;
+                beg_sat_emis(a) = beg_locs(a).emis_tau.emis;
+                beg_sat_errors(a) = beg_locs(a).emis_tau.emis_uncert;
+                beg_nei_emis(a) = beg_locs(a).emis_tau.nei_emis;
+                end_sat_emis(a) = end_locs(a).emis_tau.emis;
+                end_sat_errors(a) = end_locs(a).emis_tau.emis_uncert;
+                end_nei_emis(a) = end_locs(a).emis_tau.nei_emis;
+            end
+            
+            plot_data = [];
+            legend_strings = {};
+            if plot_beginning
+                plot_data = cat(2, plot_data, beg_sat_emis, beg_nei_emis);
+                legend_strings = cat(2, legend_strings, {'BEHR (2005)', 'NEI (2005)'});
+            end
+            if plot_end
+                plot_data = cat(2, plot_data, end_sat_emis, end_nei_emis);
+                legend_strings = cat(2, legend_strings, {'BEHR (2012)', 'NEI (2012)'});
             end
             
             figure;
-            bar([sat_emis, nei_emis]);
+            bar(plot_data);
             ylabel('NO Emissions (Mg h^{-1})');
             %bar_errors([sat_emis, nei_emis], [sat_errors, nei_errors]);
             set(gca,'xticklabel',names,'fontsize',16,'ygrid','on','xtickLabelRotation',-30);
-            legend('BEHR','NEI');
+            legend(legend_strings{:});
         end
     end
     
