@@ -7,6 +7,15 @@ classdef misc_emissions_analysis
         % wind speeds to generate the rotated line densities.
         em_wind_spd = 3;
         em_wind_mode = 'fast';
+        
+    end
+    
+    properties(Constant = true, Access = protected)
+        % This is used to help check if all the required Git repos are in
+        % the proper state. The first time any method calls the Git
+        % verification method, if it passes, this is set to true so that it
+        % doesn't need to be checked again.
+        git_check_complete = false;
     end
     
     methods(Static = true)
@@ -92,6 +101,19 @@ classdef misc_emissions_analysis
         %%%%%%%%%%%%%%%%%%%
         % Utility methods %
         %%%%%%%%%%%%%%%%%%%
+        
+        function verify_git_state()
+            if ~misc_emissions_analysis.git_check_complete
+                % This requires that validate_date and list_behr_files be able
+                % to handle discontinuous date ranges.
+                G = GitChecker;
+                G.addReqCommits(behr_paths.behr_utils, 'd524710e');
+                G.addReqCommits(behr_paths.utils, '9af1577');
+                % checkState() by default will error if the repositories
+                % are not in the correct state.
+                G.checkState()
+            end
+        end
         
         function locs = read_locs_file()
             locs = read_loc_spreadsheet();
@@ -353,6 +375,8 @@ classdef misc_emissions_analysis
             % wind direction by averaging over the first 5 WRF layers in a
             % 3x3 grid centered on each location.
             
+            misc_emissions_analysis.verify_git_state();
+            
             if ~exist('time_period', 'var')
                 time_period = '';
             end
@@ -496,6 +520,9 @@ classdef misc_emissions_analysis
         end
         
         function make_line_densities(by_sectors, time_period, loc_indicies, do_overwrite)
+            
+            misc_emissions_analysis.verify_git_state();
+            
             if ~exist('time_period', 'var')
                 time_period = '';
             end
