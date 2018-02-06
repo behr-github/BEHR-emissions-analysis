@@ -558,7 +558,7 @@ classdef misc_emissions_analysis
             winds_locs_distributed = winds.locs;
             box_size = [1 2 1 1];
             
-            for a=1:numel(winds.locs)
+            parfor a=1:numel(winds.locs)
                 fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
                 
                 % Choose slow wind days for this - our goal is to find out
