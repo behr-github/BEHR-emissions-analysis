@@ -30,7 +30,7 @@ for a=1:numel(sheets)
         error('trend_locations:missing_category', 'The category "BoxSize" is not present in the Excel file')
     else
         header{end+1} = 'SiteType';
-        raw(:,box_size_ind) = convert_box_size(raw(:,box_size_ind));
+        raw(:,box_size_ind) = convert_box_size(raw(:,box_size_ind), sheets{a});
     end
     
     raw(:,end+1) = repmat({sheets{a}},size(raw,1),1);
@@ -40,11 +40,19 @@ end
 
 end
 
-function cell_out = convert_box_size(cell_in)
+function cell_out = convert_box_size(cell_in, location_type)
 cell_out = cell(size(cell_in));
 for a=1:numel(cell_in)
     if isnan(cell_in{a})
-        cell_out{a} = nan(1,4);
+        if strcmpi(location_type, 'cities')
+            cell_out{a} = [1 2 1 1];
+        elseif strcmpi(location_type, 'powerplants')
+            cell_out{a} = [0.5 1 0.5 0.5];
+        elseif strcmpi(location_type, 'ruralareas')
+            cell_out{a} = nan(1,4);
+        else
+            error('trend_locations:unknown_site_type','No default box size defined for site type "%s"', location_type);
+        end
     else
         value = regexprep(cell_in{a},'[^\d\s\.]', '');
         cell_out{a} = str2double(strsplit(value));

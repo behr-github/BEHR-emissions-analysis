@@ -44,7 +44,8 @@ classdef misc_emissions_analysis
         end
         
         function filename = avg_file_name(year_in)
-            filename = sprintf('Summer_avg_%d.mat', year_in);
+            years_str = strjoin(sprintfmulti('%d', year_in),'_');
+            filename = sprintf('Summer_avg_%s.mat', years_str);
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
@@ -55,15 +56,20 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = sectors_file_name(start_date, end_date, by_sectors)
+        function filename = line_density_file_name(start_date, end_date, by_sectors, all_winds_bool)
             if by_sectors
                 sectors_string = 'sectors';
             else
                 sectors_string = 'rotated';
             end
+            if all_winds_bool
+                winds_string = '_allwinds';
+            else
+                winds_string = '';
+            end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_%s_no2_%sto%s.mat', sectors_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(2), 'yyyy-mm-dd'));
+            filename = sprintf('site_%s%s_no2_%sto%s.mat', sectors_string, winds_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(2), 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -117,6 +123,32 @@ classdef misc_emissions_analysis
         
         function locs = read_locs_file()
             locs = read_loc_spreadsheet();
+        end
+        
+        function winds = load_winds_file(start_date, end_date)
+            % Loads a winds file for a given start and end date and inserts
+            % up-to-date box size and wind direction filtering from the
+            % trend_locations.xlsx sheet.
+            E = JLLErrors;
+            
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            
+            winds_file = misc_emissions_analysis.winds_file_name(start_date, end_date);
+            winds = load(winds_file);
+            
+            trend_locs = misc_emissions_analysis.read_locs_file();
+            
+            trend_shortnames = {trend_locs.ShortName};
+            
+            for a=1:numel(winds.locs)
+                xx_loc = strcmp(winds.locs(a).ShortName, trend_shortnames);
+                if sum(xx_loc) ~= 1
+                    E.callError('location_not_found', 'Could not find location "%s" defined in the winds file %s but not the trend spreadsheet', winds.locs(a).ShortName, winds_file);
+                end
+                
+                winds.locs(a).BoxSize = trend_locs(xx_loc).BoxSize;
+            end
         end
         
         function dvec = make_datevec(start_date, end_date)
@@ -232,7 +264,7 @@ classdef misc_emissions_analysis
             
             wind_logical = true(size(location.WindDir));
             % These can be used as constants to filter particular
-            % directions, or one can of could specify your own specific
+            % directions, or one can of course specify your own specific
             % directions as degrees.
             dir_N = [67.5 112.5];
             dir_NE = [22.5 67.5];
@@ -354,15 +386,19 @@ classdef misc_emissions_analysis
         %%%%%%%%%%%%%%%%%%%%%%
         function make_summer_averages(avg_year)
             if ~exist('avg_year', 'var')
-                avg_year = ask_number('Enter the year to do a summer average for', 'testfxn', @(x) isscalar(x) && x >= 2005 && x <= 2015, 'testmsg', 'Year must be between 2005 and 2015');
+                avg_year = ask_number('Enter the year (or years separated by a space) to do a summer average for', 'testfxn', @(x) all(x >= 2005 & x <= 2015), 'testmsg', 'Year(s) must be between 2005 and 2015');
             end
             
-            start_date = datenum(avg_year, 4, 1);
-            end_date = datenum(avg_year, 9, 30);
+            start_date = cell(size(avg_year));
+            end_date = cell(size(avg_year));
+            for a=1:numel(avg_year)
+                start_date{a} = datenum(avg_year(a), 4, 1);
+                end_date{a} = datenum(avg_year(a), 9, 30);
+            end
             
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
-            common_opts = {'rejectmode', 'behr', 'DEBUG_LEVEL', 1};
+            common_opts = {'DEBUG_LEVEL', 1};
             [monthly.no2, monthly.lon, monthly.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
             [daily.no2, daily.lon, daily.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
             
@@ -519,38 +555,44 @@ classdef misc_emissions_analysis
             misc_emissions_analysis.make_line_densities(true, varargin{:});
         end
         
-        function make_line_densities(by_sectors, time_period, loc_indicies, do_overwrite)
-            
-            misc_emissions_analysis.verify_git_state();
-            
-            if ~exist('time_period', 'var')
-                time_period = '';
-            end
+        function make_line_densities(by_sectors, varargin)
             
             if ~islogical(by_sectors) || ~isscalar(by_sectors)
                 E.badinput('BY_SECTORS must be a scalar logical')
             end
             
-            if ~exist('loc_indicies', 'var')
-                loc_indicies = [];
-            elseif ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
-                E.badinput('LOC_INDICIES must be a numeric array with all values >= 1')
+            p = advInputParser;
+            p.addParameter('time_period', '');
+            p.addParameter('loc_indices', []);
+            p.addParameter('do_overwrite', -1);
+            p.addFlag('all_winds');
+            
+            p.parse(varargin{:});
+            pout = p.AdvResults;
+            
+            misc_emissions_analysis.verify_git_state();
+            
+            time_period = pout.time_period;
+            loc_indicies = pout.loc_indices;
+            do_overwrite = pout.do_overwrite;
+            all_winds = pout.all_winds;
+            
+            if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
+                E.badinput('The parameter "loc_indicies" must be a numeric array with all values >= 1')
             end
             
-            if ~exist('do_overwrite', 'var')
-                do_overwrite = -1;
-            elseif (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
-                E.badinput('DO_OVERWRITE must be a scalar logical or number')
+            if (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
+                E.badinput('The parameter "do_overwrite" must be a scalar logical or number')
             end
             
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.sectors_file_name(start_date, end_date, by_sectors);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, all_winds);
             if exist(save_name, 'file')
                 if do_overwrite < 0
-                    if ~ask_yn('%s exists. Overwrite?')
+                    if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
                         return
                     end
                 elseif ~do_overwrite
@@ -563,9 +605,9 @@ classdef misc_emissions_analysis
             % Find the list of BEHR files between the start and end dates
             [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily');
             
-            % Load the winds file
-            winds_file = misc_emissions_analysis.winds_file_name(start_date, end_date);
-            winds = load(winds_file);
+            % Load the winds file with up-to-date box sizes and wind
+            % sectors to reject
+            winds = misc_emissions_analysis.load_winds_file(start_date, end_date);
             
             % Check that the dates match up with what we're expecting (it
             % should because we load the file with those dates)
@@ -583,10 +625,19 @@ classdef misc_emissions_analysis
             % This should allow the substructure "locs" to be a sliced,
             % instead of broadcast, variable
             winds_locs_distributed = winds.locs;
-            box_size = [1 2 1 1];
+            
+            % Set up a default box size in case the spreadsheet has an
+            % invalid box size.
+            default_box = [1 2 1 1];
             
             parfor a=1:numel(winds.locs)
                 fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
+                
+                box_size = winds_locs_distributed(a).BoxSize;
+                if any(isnan(box_size))
+                    warning('NaN detected in box size. Setting to default %s for location %s', mat2str(default_box), winds_locs_distributed(a).ShortName)
+                    box_size = default_box;
+                end
                 
                 % Choose slow wind days for this - our goal is to find out
                 % which directions have downwind sources that will confound the
@@ -596,8 +647,16 @@ classdef misc_emissions_analysis
                     % directions that are good for the line density
                     % analysis, so I look at slow winds to find directions
                     % that have downwind sources (like a manual version of
-                    % Liu et al. 2016)
-                    wind_logical = winds_locs_distributed(a).WindSpeed < 3;
+                    % Liu et al. 2016).
+                    %
+                    % Alternately, since I really just want the best maps I
+                    % can get to look for downwind interferences, I can
+                    % just use all wind speeds
+                    if all_winds
+                        wind_logical = true(size(winds_locs_distributed(a).WindSpeed));
+                    else
+                        wind_logical = winds_locs_distributed(a).WindSpeed < 3;
+                    end
                     % Call the sector division algorithm
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
@@ -662,7 +721,7 @@ classdef misc_emissions_analysis
             end
             
             % Load the file with the line densities
-            ldens_file = misc_emissions_analysis.sectors_file_name(start_date, end_date, false);
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false);
             line_densities = load(ldens_file);
             
             % Check that the dates match up with what we're expecting (it
@@ -742,6 +801,8 @@ classdef misc_emissions_analysis
         %%%%%%%%%%%%%%%%%%%%
         
         function plot_site_summer_avg(loc_to_plot, plot_year, monthly_or_daily, plot_axis)
+            E = JLLErrors;
+            
             locs = misc_emissions_analysis.read_locs_file();
             loc_names = {locs.ShortName};
             if ~exist('loc_to_plot', 'var') || isempty(loc_to_plot)
