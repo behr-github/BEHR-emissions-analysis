@@ -148,6 +148,7 @@ classdef misc_emissions_analysis
                 end
                 
                 winds.locs(a).BoxSize = trend_locs(xx_loc).BoxSize;
+                winds.locs(a).WindRejects = trend_locs(xx_loc).WindRejects;
             end
         end
         
@@ -241,7 +242,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function wind_logical = set_wind_conditions(location, speed_cutoff, fast_or_slow, error_if_undef)
+        function wind_logical = set_wind_conditions(location, speed_cutoff, fast_or_slow)
             E = JLLErrors;
             if ~isstruct(location) || ~isscalar(location) || any(~isfield(location, {'ShortName', 'WindDir', 'WindSpeed'}))
                 E.badinput('LOCATION must be a scalar structure with fields "ShortName", "WindDir", and "WindSpeed"')
@@ -251,66 +252,42 @@ classdef misc_emissions_analysis
                 E.badinput('SPEED_CUTOFF must be a scalar, positive number')
             end
             
-            allowed_fast_slow = {'fast', 'slow'};
+            allowed_fast_slow = {'fast', 'slow', 'none'};
             if ~ismember(fast_or_slow, allowed_fast_slow)
-                E.badinput('FAST_OR_SLOW must be one of: %s', strjoin(fast_or_slow));
-            end
-            
-            if ~exist('error_if_undef','var')
-                error_if_undef = false;
-            elseif ~islogical(error_if_undef) || ~isscalar(error_if_undef)
-                E.badinput('ERROR_IF_UNDEF must be a scalar logical')
+                E.badinput('FAST_OR_SLOW must be one of: %s', strjoin(allowed_fast_slow));
             end
             
             wind_logical = true(size(location.WindDir));
-            % These can be used as constants to filter particular
-            % directions, or one can of course specify your own specific
-            % directions as degrees.
-            dir_N = [67.5 112.5];
-            dir_NE = [22.5 67.5];
-            dir_E = [-22.5 22.5];
-            dir_SE = [-67.2 22.5];
-            dir_S = [-112.5 -67.5];
-            dir_SW = [-152.5 -112.5];
-            dir_W = [152.5 -152.5];
-            dir_NW = [112.5 152.5];
             
-            % Define how you want to filter wind directions for locations
-            % based on their short name here.
-            switch location.ShortName
-                case 'Bakersfield'
-                    % Using just 2012, Bakersfield is really hard to tell.
-                    % There always seems to be a downwind source, so for
-                    % now just going to try using all directions.
-                case 'Chicago'
-                    % The directions that have weird behavior just seem to
-                    % be due to missing data, averaging all wind directions
-                    % should help with that.
-                case 'Fresno'
-                    % This may just be sampling issues, i.e. the sectors
-                    % line densities had too few days to work from
-                    wind_logical(location.WindDir > dir_SW(1) & location.WindDir < dir_SW(2)) = false;
-                    wind_logical(location.WindDir > dir_N(1) & location.WindDir < dir_N(2)) = false;
-                case 'Houston'
-                    % North is a little weird, but could probably be used
-                    % with < 100 km downwind
-                    wind_logical(location.WindDir > dir_N(1) & location.WindDir < dir_N(2)) = false;
-                case 'Washington DC'
-                    % pass
-                otherwise
-                    msg = sprintf('No wind direction filtering for %s defined', location.ShortName);
-                    if error_if_undef
-                        E.notimplemented(msg);
-                    else
-                        fprintf('%s\n',msg);
-                    end
+            % Use the wind direction ranges specified in the locations
+            % structure to reject wind directions with downwind
+            % interferences that will cause an issue with the
+            % lifetime/emissions. The ranges are an N-by-2 array, the first
+            % column specifies the beginning of the range, the second
+            % column the end. However, since wind directions go from -180
+            % to +180, we have to handle the "wrap-around" nature of
+            % angular coordinates. To do so, when the first column is less
+            % than the second we use the typical "&" operation, otherwise
+            % we use "|" (or) since e.g. all angles between +170 and -170
+            % would be >170 or <-170.
+            for a=1:size(location.WindRejects,1)
+                wind_dir_range = location.WindRejects(a,:);
+                if wind_dir_range(1) < wind_dir_range(2)
+                    xx = location.WindDir >= wind_dir_range(1) & location.WindDir < wind_dir_range(2);
+                else
+                    xx = location.WindDir >= wind_dir_range(1) | location.WindDir < wind_dir_range(2);
+                end
+                
+                wind_logical(xx) = false;
             end
             
             % Handle wind speed filtering here
             if strcmpi(fast_or_slow, 'fast')
                 wind_logical(location.WindSpeed < speed_cutoff) = false;
-            else
+            elseif strcmpi(fast_or_slow, 'slow')
                 wind_logical(location.WindSpeed >= speed_cutoff) = false;
+            elseif ~strcmpi(fast_or_slow, 'none')
+                E.badinput('FAST_OR_SLOW must be one of: "fast", "slow", or "none"');
             end
         end
         
