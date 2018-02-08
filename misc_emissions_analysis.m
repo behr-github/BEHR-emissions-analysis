@@ -796,8 +796,8 @@ classdef misc_emissions_analysis
                 file_to_plot = ask_multichoice('Plot which avg. file?', avg_files, 'list', true);
                 file_to_plot = fullfile(misc_emissions_analysis.avg_save_dir, file_to_plot);
             else
-                if ~isnumeric(plot_year) || ~isscalar(plot_year)
-                    E.badinput('PLOT_YEAR must be a scalar number')
+                if ~isnumeric(plot_year)
+                    E.badinput('PLOT_YEAR must be numeric')
                 end
                 file_to_plot = misc_emissions_analysis.avg_file_name(plot_year);
                 if ~exist(file_to_plot, 'file')
@@ -850,7 +850,43 @@ classdef misc_emissions_analysis
             end
         end
         
-        function plot_site_sectors_linedens(locs_to_plot, locs_dvec)
+        function plot_both_sectors_interactive()
+            % This will load the sites NO2 sectors file once then
+            % continuously loop and let the user pick which location to
+            % plot. It will then plot both the line densities and the
+            % column densities by sector to help me decide which directions
+            % to keep.
+            avail_ld_files = dir(fullfile(misc_emissions_analysis.line_density_dir, '*.mat'));
+                
+            if numel(avail_ld_files) == 1
+                ld_file = avail_ld_files(1).name;
+            else
+                ld_file = ask_multichoice('Select the sector line density file to use', {avail_ld_files.name}, 'list', true);
+            end
+            
+            ld_file = fullfile(misc_emissions_analysis.line_density_dir, ld_file);
+            locs_data = load(ld_file);
+            locs_available = locs_data.locs;
+            locs_dvec = locs_data.dvec;
+            
+            while true
+                loc_inds = ask_multiselect('Choose the site(s) to plot', {locs_available.ShortName}, 'returnindex', true);
+                locs_to_plot = locs_available(loc_inds);
+                
+                figs(1) = misc_emissions_analysis.plot_site_sectors_linedens(locs_to_plot, locs_dvec);
+                figs(2) = misc_emissions_analysis.plot_sector_no2avg_with_boxes(locs_to_plot);
+                
+                tilefigs;
+                
+                if ~ask_yn('Plot another location?')
+                    break
+                else
+                    close(figs)
+                end
+            end
+        end
+        
+        function sectors_fig = plot_site_sectors_linedens(locs_to_plot, locs_dvec)
             E = JLLErrors;
             if nargin < 2
                 avail_ld_files = dir(fullfile(misc_emissions_analysis.line_density_dir, '*.mat'));
@@ -876,14 +912,11 @@ classdef misc_emissions_analysis
             % Also load the summer average column density file so that we
             % can plot that as the center figure.
             locs_year = unique(year(locs_dvec));
-            if numel(locs_year) > 1
-                E.notimplemented('Line densities across multiple years')
-            end
             
             % Map the subplot index to the proper direction
             direction_names = {'NW','N','NE','W','vcds','E','SW','S','SE'};
             for a=1:numel(locs_to_plot)
-                figure;
+                sectors_fig = figure;
                 for b=1:9
                     ax=subplot(3,3,b);
                     if strcmpi(direction_names{b}, 'vcds')
@@ -901,7 +934,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function plot_sector_no2avg_with_boxes(locs_to_plot)
+        function sectors_fig = plot_sector_no2avg_with_boxes(locs_to_plot)
             if ~exist('locs_to_plot', 'var')
                 avail_ld_files = dir(fullfile(misc_emissions_analysis.line_density_dir, '*.mat'));
                 
@@ -927,7 +960,7 @@ classdef misc_emissions_analysis
             direction_names = {'NW','N','NE','W','','E','SW','S','SE'};
             direction_angles = [135, 90, 45, 180, NaN, 0, -135, -90, -45];
             for a=1:numel(locs_to_plot)
-                figure;
+                sectors_fig = figure;
                 boxes_rel_x = [-0.5 1 1 -0.5 -0.5;...
                                -1 2 2 -1 -1;...
                                -2 4 4 -2 -2];
