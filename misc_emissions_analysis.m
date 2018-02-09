@@ -56,20 +56,25 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = line_density_file_name(start_date, end_date, by_sectors, all_winds_bool)
+        function filename = line_density_file_name(start_date, end_date, by_sectors, all_winds_bool, loc_inds)
             if by_sectors
                 sectors_string = 'sectors';
             else
                 sectors_string = 'rotated';
             end
             if all_winds_bool
-                winds_string = '_allwinds';
+                winds_string = '_windsall';
             else
                 winds_string = '';
             end
+            if isempty(loc_inds)
+                locs_string = 'locsall';
+            else
+                locs_string = ['locs', sprintf_ranges(loc_inds)];
+            end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_%s%s_no2_%sto%s.mat', sectors_string, winds_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(2), 'yyyy-mm-dd'));
+            filename = sprintf('site_%s%s_%s_no2_%sto%s.mat', sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'));
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -111,10 +116,11 @@ classdef misc_emissions_analysis
         function verify_git_state()
             if ~misc_emissions_analysis.git_check_complete
                 % This requires that validate_date and list_behr_files be able
-                % to handle discontinuous date ranges.
+                % to handle discontinuous date ranges. Also requires that
+                % the sprintf_ranges function is available.
                 G = GitChecker;
                 G.addReqCommits(behr_paths.behr_utils, 'd524710e');
-                G.addReqCommits(behr_paths.utils, '9af1577');
+                G.addReqCommits(behr_paths.utils, '8c3aaec');
                 % checkState() by default will error if the repositories
                 % are not in the correct state.
                 G.checkState()
@@ -566,7 +572,7 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, all_winds);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, all_winds, loc_indicies);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -697,8 +703,10 @@ classdef misc_emissions_analysis
                 end
             end
             
-            % Load the file with the line densities
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false);
+            % Load the file with the line densities. For this, we never
+            % want the sectors line densities (first false) and never want
+            % the all winds line densities (second false).
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, false, loc_indicies);
             line_densities = load(ldens_file);
             
             % Check that the dates match up with what we're expecting (it
