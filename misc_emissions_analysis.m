@@ -199,7 +199,16 @@ classdef misc_emissions_analysis
             end
         end
         
-        function [xx, yy] = find_loc_indices(loc, lon, lat, radius)
+        function inds = find_loc_struct_inds(locs)
+            all_locs = misc_emissions_analysis.read_locs_file();
+            all_locs_shortnames = {all_locs.ShortName};
+            inds = nan(size(locs));
+            for i_loc = 1:numel(locs)
+                inds(i_loc) = find(strcmp(locs(i_loc).ShortName, all_locs_shortnames));
+            end
+        end
+        
+        function [xx, yy] = find_indicies_in_loc_radius(loc, lon, lat, radius)
             % LOC must be a scalar element of the locations structure, LON
             % and LAT must be 2D arrays of longitude and latitude
             % coordinates for an NO2 average or similar 2D field. RADIUS
@@ -364,6 +373,91 @@ classdef misc_emissions_analysis
             nei_no = nei_no .* grid_area .* 30.06e-6; 
         end
         
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        % Interactive utility methods %
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        
+        function merge_linedens_files(DEBUG_LEVEL)
+            E = JLLErrors;
+            if ~exist('DEBUG_LEVEL', 'var')
+                DEBUG_LEVEL = 2;
+            end
+            
+            fprintf('Select the line density files to merge.\n');
+            input('Press ENTER to continue','s');
+            
+            [files, path] = uigetfile('*.mat', 'Select files to merge', misc_emissions_analysis.line_density_dir, 'MultiSelect', 'on');
+            if isequal(path,0)
+                E.userCancel;
+            elseif ~iscell(files)
+                % files will be a character array if only one file was
+                % selected; otherwise it's a cell array.
+                fprintf('Must select >1 file to merge\n')
+                return
+            else
+                % Check that all files are "sectors" or "rotated" and
+                % "allwinds" or not.
+                is_sectors_vec = regcmp(files, 'sectors');
+                is_allwinds_vec = regcmp(files, 'windsall');
+                
+                if any(is_sectors_vec) && ~all(is_sectors_vec)
+                    E.badinput('Some, but not all, of the files selected are by sectors');
+                elseif any(is_allwinds_vec) && ~all(is_allwinds_vec)
+                    E.badinput('Some, but not all, of the files selected are using all winds');
+                else
+                    by_sectors = all(is_sectors_vec);
+                    all_winds_bool = all(is_allwinds_vec);
+                end
+            end
+            
+            for i_file = 1:numel(files)
+                if DEBUG_LEVEL > 1
+                    fprintf('Loading %s\n', files{i_file});
+                end
+                LD(i_file) = load(fullfile(path, files{i_file}));
+                
+                % Check that all the date vectors are the same; we don't
+                % want to merge files using different dates
+                if i_file > 1 && ~isequal(LD(i_file).dvec, LD(1).dvec)
+                    E.callError('datevec_mismatch', 'Different date vectors in %s and %s', files{1}, files{i_file});
+                end
+            end
+            
+            % Combine the line density structures then clear out the
+            % original to save memory (can be 10+ GB).
+            LD_all = make_empty_struct_from_cell(fieldnames(LD));
+            % We already checked that all the date vectors are the same
+            LD_all.dvec = LD(1).dvec;
+            % Keep all the write dates
+            LD_all.write_date = {LD.write_date};
+            % Concatenate the locations, then check for and remove
+            % duplicates
+            LD_all.locs = veccat(LD.locs);
+            clear('LD');
+            
+            loc_inds = misc_emissions_analysis.find_loc_struct_inds(LD_all.locs);
+            
+            [unique_inds, cut_down_vec] = unique(loc_inds);
+            if numel(unique_inds) ~= numel(loc_inds)
+                if ~ask_yn('Locations are duplicated among the files. Remove duplicates? (no will abort): ')
+                    return
+                end
+            end
+            % This will simultaneously remove duplicates and sort
+            % everything.
+            LD_all.locs = LD_all.locs(cut_down_vec);
+            all_loc_inds = misc_emissions_analysis.find_loc_struct_inds(LD_all.locs);
+            
+            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, all_winds_bool, all_loc_inds);
+            if exist(new_save_name, 'file')
+                if ~ask_yn(sprintf('%s exists. Overwrite? ', new_save_name))
+                    return
+                end
+            end
+            fprintf('Saving merged file as %s\n', new_save_name);
+            save(new_save_name, '-v7.3', '-struct', 'LD_all');
+        end
+        
         %%%%%%%%%%%%%%%%%%%%%%
         % Generation methods %
         %%%%%%%%%%%%%%%%%%%%%%
@@ -482,7 +576,7 @@ classdef misc_emissions_analysis
                     % for that swath
                     fprintf('  %s, swath %d: Averaging to locations\n', datestr(dvec(d)), a);
                     for l=1:numel(locs)
-                        [xx,yy] = misc_emissions_analysis.find_loc_indices(locs(l), wrf_lon, wrf_lat, 1);
+                        [xx,yy] = misc_emissions_analysis.find_indicies_in_loc_radius(locs(l), wrf_lon, wrf_lat, 1);
                         Ubar = nanmean(reshape(U(xx,yy),[],1));
                         Vbar = nanmean(reshape(V(xx,yy),[],1)); 
                         
@@ -829,7 +923,7 @@ classdef misc_emissions_analysis
             grid_del = abs(diff(avgs.monthly.lon(1,1:2)));
             radius_deg = locs(i_loc).Radius / 110;
             n_cells = ceil(radius_deg * 3 / grid_del);
-            [yy, xx] = misc_emissions_analysis.find_loc_indices(locs(i_loc), avgs.monthly.lon, avgs.monthly.lat, n_cells);
+            [yy, xx] = misc_emissions_analysis.find_indicies_in_loc_radius(locs(i_loc), avgs.monthly.lon, avgs.monthly.lat, n_cells);
             
             loc_longrid = avgs.monthly.lon(yy,xx);
             loc_latgrid = avgs.monthly.lat(yy,xx);
