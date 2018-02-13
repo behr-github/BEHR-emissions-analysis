@@ -56,7 +56,7 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = line_density_file_name(start_date, end_date, by_sectors, all_winds_bool, loc_inds)
+        function filename = line_density_file_name(start_date, end_date, by_sectors, all_winds_bool, loc_inds, days_of_week)
             if by_sectors
                 sectors_string = 'sectors';
             else
@@ -74,19 +74,19 @@ classdef misc_emissions_analysis
             end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_%s%s_%s_no2_%sto%s.mat', sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'));
+            filename = sprintf('site_%s%s_%s_no2_%sto%s_%s.mat', sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
-        function filename = fits_file_name(start_date, end_date, is_subset)
-            if is_subset
-                subset_str = '_subset';
+        function filename = fits_file_name(start_date, end_date, loc_inds, days_of_week)
+            if isempty(loc_inds)
+                locs_string = 'locsall';
             else
-                subset_str = '';
+                locs_string = ['locs', sprintf_ranges(loc_inds)];
             end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_emg_fits%s_%sto%s.mat', subset_str, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(2), 'yyyy-mm-dd'));
+            filename = sprintf('site_emg_fits_%s_%sto%s_%s.mat', locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -117,10 +117,11 @@ classdef misc_emissions_analysis
             if ~misc_emissions_analysis.git_check_complete
                 % This requires that validate_date and list_behr_files be able
                 % to handle discontinuous date ranges. Also requires that
-                % the sprintf_ranges function is available.
+                % the sprintf_ranges and do_keep_day_of_week functions are
+                % available.
                 G = GitChecker;
                 G.addReqCommits(behr_paths.behr_utils, 'd524710e');
-                G.addReqCommits(behr_paths.utils, '8c3aaec');
+                G.addReqCommits(behr_paths.utils, 'afd2522');
                 % checkState() by default will error if the repositories
                 % are not in the correct state.
                 G.checkState()
@@ -419,17 +420,26 @@ classdef misc_emissions_analysis
                 return
             else
                 % Check that all files are "sectors" or "rotated" and
-                % "allwinds" or not.
+                % "allwinds" or not. Also get the days of week, which
+                % should be the last group of upper case characters before
+                % the file extension, and some combination of U, M, T, W,
+                % R, F, S.
                 is_sectors_vec = regcmp(files, 'sectors');
                 is_allwinds_vec = regcmp(files, 'windsall');
+                
+                dow_check_fxn = @(d, d1) isequal(d,d1);
+                days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
                 
                 if any(is_sectors_vec) && ~all(is_sectors_vec)
                     E.badinput('Some, but not all, of the files selected are by sectors');
                 elseif any(is_allwinds_vec) && ~all(is_allwinds_vec)
                     E.badinput('Some, but not all, of the files selected are using all winds');
+                elseif ~all(cellfun(@(x) dow_check_fxn(x, days_of_week{1}), days_of_week))
+                    E.badinput('Not all of the files are for the same days of week (%s)', strjoin(days_of_week,' vs. '));
                 else
                     by_sectors = all(is_sectors_vec);
                     all_winds_bool = all(is_allwinds_vec);
+                    days_of_week = days_of_week{1};
                 end
             end
             
@@ -471,7 +481,7 @@ classdef misc_emissions_analysis
             LD_all.locs = LD_all.locs(cut_down_vec);
             all_loc_inds = misc_emissions_analysis.find_loc_struct_inds(LD_all.locs);
             
-            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, all_winds_bool, all_loc_inds);
+            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, all_winds_bool, all_loc_inds, days_of_week);
             if exist(new_save_name, 'file')
                 if ~ask_yn(sprintf('%s exists. Overwrite? ', new_save_name))
                     return
@@ -665,6 +675,7 @@ classdef misc_emissions_analysis
             p.addParameter('time_period', '');
             p.addParameter('loc_indices', []);
             p.addParameter('do_overwrite', -1);
+            p.addParameter('days_of_week', 'UMTWRFS');
             p.addFlag('all_winds');
             
             p.parse(varargin{:});
@@ -675,6 +686,7 @@ classdef misc_emissions_analysis
             time_period = pout.time_period;
             loc_indicies = pout.loc_indices;
             do_overwrite = pout.do_overwrite;
+            days_of_week = pout.days_of_week;
             all_winds = pout.all_winds;
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
@@ -689,7 +701,7 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, all_winds, loc_indicies);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, all_winds, loc_indicies, days_of_week);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -763,7 +775,7 @@ classdef misc_emissions_analysis
                 else
                     wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
+                        = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, 'days_of_week', days_of_week);
                 end
                 
                 
@@ -781,7 +793,7 @@ classdef misc_emissions_analysis
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
-        function locs = make_emg_fits(time_period, loc_indicies, add_nei, do_overwrite)
+        function locs = make_emg_fits(time_period, loc_indicies, add_nei, days_of_week, do_overwrite)
             E = JLLErrors;
             
             if ~exist('time_period', 'var')
@@ -800,6 +812,10 @@ classdef misc_emissions_analysis
                 E.badinput('ADD_NEI must be a scalar logical or numeric value');
             end
             
+            if ~exist('days_of_week', 'var')
+                days_of_week = 'UMTWRFS';
+            end
+            
             if ~exist('do_overwrite', 'var')
                 do_overwrite = -1;
             elseif (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
@@ -809,7 +825,7 @@ classdef misc_emissions_analysis
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, ~isempty(loc_indicies));
+            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, loc_indicies, days_of_week);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -823,7 +839,7 @@ classdef misc_emissions_analysis
             % Load the file with the line densities. For this, we never
             % want the sectors line densities (first false) and never want
             % the all winds line densities (second false).
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, false, loc_indicies);
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, false, loc_indicies, days_of_week);
             line_densities = load(ldens_file);
             
             % Check that the dates match up with what we're expecting (it

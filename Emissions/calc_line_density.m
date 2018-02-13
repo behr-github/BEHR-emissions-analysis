@@ -102,6 +102,10 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       mode is closer to how Lu et al. 2015 did their analysis, I believe.
 %       In the future, the default may change to false.
 %
+%       'days_of_week' - string understood as the DAYS_OF_WEEK argument to
+%       DO_KEEP_DAY_OF_WEEK() specifying which days to keep. Default is
+%       UMTWRFS, i.e. all days.
+%
 %       'DEBUG_LEVEL' - level of output to console. Defaults to 1, 0 shuts
 %       off all output.
 %
@@ -118,6 +122,7 @@ p.addOptional('nox_or_no2','no2',@(x) ismember(lower(x),{'nox','no2'}));
 p.addParameter('rel_box_corners',[]);
 p.addParameter('force_calc',false);
 p.addParameter('interp',true);
+p.addParameter('days_of_week', 'UMTWRFS');
 p.addParameter('DEBUG_LEVEL',1);
 
 p.parse(varargin{:});
@@ -127,6 +132,7 @@ nox_or_no2 = pout.nox_or_no2;
 rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
 interp_bool = pout.interp;
+days_of_week = pout.days_of_week;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 if ~ischar(fpath)
@@ -198,6 +204,13 @@ i = 0;
 for d=1:numel(fnames_struct)
     D = load(fullfile(fpath,fnames_struct(d).name),'Data');
 
+    if ~do_keep_day_of_week(D.Data(1).Date, days_of_week)
+        if DEBUG_LEVEL > 0
+            fprintf('%s, day of week is not in %s, skipping\n', D.Data(1).Date, days_of_week);
+        end
+        continue
+    end
+    
     n_swath = numel(D.Data);
     for s=1:n_swath
         %fprintf(fid,'** %d: %s swath %d\n', i, fnames_struct(d).name, s);
