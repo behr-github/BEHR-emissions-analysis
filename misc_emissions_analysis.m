@@ -317,60 +317,83 @@ classdef misc_emissions_analysis
             [emis_tau.emis, emis_tau.emis_uncert, emis_tau.tau, emis_tau.tau_uncert] = compute_emg_emis_tau(fit_struct.ffit.a, param_uncert(1), fit_struct.ffit.x_0, param_uncert(2), 'vec', wind_speed_vector, 'emissions_type', 'no');
         end
         
-        function [nei_no, nei_lon, nei_lat] = load_nei_by_year(nei_year)
-            % Make the input path
-            tmp_path = find_wrf_path('us','daily',datenum(nei_year,1,1));
-            path_parts = strsplit(tmp_path, '/');
+        function [total_nei_no, nei_lon, nei_lat] = load_nei_by_year(nei_year)
             
-            % The path on my computer is something like '/Volumes/share-wrfN/...' 
-            % and we just want to get which network drive it should be on.
-            % The first three parts of the split path should be an empty
-            % string, Volumes, and the share. This will put a / at the
-            % beginning
-            wrf_share = strjoin(path_parts(1:3), '/');
+            E = JLLErrors;
             
-            % Whichever share it's on, it should be in a consistent path
-            % there - except for 2012. I was having trouble getting the
-            % full year's inputs to prepare, so I had to split it into two
-            % 6 month periods. The NEI emissions are the same in both, so
-            % we can just pick one.
-            inputs_path = fullfile(wrf_share, 'Inputs', num2str(nei_year), 'IC-BC-Emis');
-            if nei_year == 2012
-                inputs_path = fullfile(inputs_path, 'Months01-06');
+            for a=1:numel(nei_year)
+                % Make the input path
+                tmp_path = find_wrf_path('us','daily',datenum(nei_year(a),1,1));
+                path_parts = strsplit(tmp_path, '/');
+                
+                % The path on my computer is something like '/Volumes/share-wrfN/...'
+                % and we just want to get which network drive it should be on.
+                % The first three parts of the split path should be an empty
+                % string, Volumes, and the share. This will put a / at the
+                % beginning
+                wrf_share = strjoin(path_parts(1:3), '/');
+                
+                % Whichever share it's on, it should be in a consistent path
+                % there - except for 2012. I was having trouble getting the
+                % full year's inputs to prepare, so I had to split it into two
+                % 6 month periods. The NEI emissions are the same in both, so
+                % we can just pick one.
+                inputs_path = fullfile(wrf_share, 'Inputs', num2str(nei_year(a)), 'IC-BC-Emis');
+                if nei_year(a) == 2012
+                    inputs_path = fullfile(inputs_path, 'Months01-06');
+                end
+                
+                % We're going to average UTC 17-22, so we just need the second
+                % 12 hr file
+                nei_info = ncinfo(fullfile(inputs_path, 'wrfchemi_12z_d01'));
+                input_info = ncinfo(fullfile(inputs_path, 'wrfinput_d01'));
+                
+                fprintf('Reading NEI data...\n');
+                nei_lon = ncread(input_info.Filename, 'XLONG');
+                nei_lat = ncread(input_info.Filename, 'XLAT');
+                
+                % Load the precalculated area - but double check that the
+                % lat/lon matches the input
+                area_lon = ncread(misc_emissions_analysis.wrf_grid_area_file, 'XLONG');
+                area_lat = ncread(misc_emissions_analysis.wrf_grid_area_file, 'XLAT');
+                if max(abs(area_lon(:) - nei_lon(:))) < 0.001 && max(abs(area_lat(:) - nei_lat(:))) < 0.001
+                    grid_area = ncread(misc_emissions_analysis.wrf_grid_area_file, 'AREA');
+                else
+                    fprintf('Precomputed area lat/lon did not match, calculating WRF grid area...\n');
+                    grid_area = wrf_grid_area(nei_lon, nei_lat);
+                end
+                
+                nei_times = ncread(nei_info.Filename, 'Times')';
+                nei_hours = hour(datenum(nei_times, 'yyyy-mm-dd_HH:MM:SS'));
+                tt = nei_hours > 17 & nei_hours < 22;
+                
+                % Add up the emissions over the whole vertical extent; averaged
+                % over 17:00 to 22:00 UTC, which is approximately the hours OMI
+                % is over North America.
+                nei_no = double(ncread(nei_info.Filename, 'E_NO'));
+                nei_no = nansum(nanmean(nei_no(:,:,:,tt), 4), 3);
+                
+                % Not set up to handle NaNs 
+                if any(isnan(nei_no(:))) || any(isnan(grid_area(:)))
+                    E.notimplemented('Not set up to handle NaNs in NEI NO emissions or grid area');
+                end
+                
+                % First time through the loop create the cumulative sum
+                % array
+                if a==1
+                    total_nei_no = zeros(size(nei_no));
+                end
+                
+                % Convert from mol NO / km^2 / hr to Mg NO / hr: molar mass of NO =
+                % 30.006 g / mol = 30.006e-6 Mg / mol. Add to the running
+                % sum, will normalize based on the number of years outside
+                % the loop.
+                total_nei_no = total_nei_no + nei_no .* grid_area .* 30.06e-6;
             end
             
-            % We're going to average UTC 17-22, so we just need the second
-            % 12 hr file
-            nei_info = ncinfo(fullfile(inputs_path, 'wrfchemi_12z_d01'));
-            input_info = ncinfo(fullfile(inputs_path, 'wrfinput_d01'));
-            
-            fprintf('Reading NEI data...\n');
-            nei_lon = ncread(input_info.Filename, 'XLONG');
-            nei_lat = ncread(input_info.Filename, 'XLAT');
-            
-            % Load the precalculated area - but double check that the
-            % lat/lon matches the input
-            area_lon = ncread(misc_emissions_analysis.wrf_grid_area_file, 'XLONG');
-            area_lat = ncread(misc_emissions_analysis.wrf_grid_area_file, 'XLAT');
-            if max(abs(area_lon(:) - nei_lon(:))) < 0.001 && max(abs(area_lat(:) - nei_lat(:))) < 0.001
-                grid_area = ncread(misc_emissions_analysis.wrf_grid_area_file, 'AREA');
-            else
-                fprintf('Precomputed area lat/lon did not match, calculating WRF grid area...\n');
-                grid_area = wrf_grid_area(nei_lon, nei_lat);
-            end
-            
-            nei_times = ncread(nei_info.Filename, 'Times')';
-            nei_hours = hour(datenum(nei_times, 'yyyy-mm-dd_HH:MM:SS'));
-            tt = nei_hours > 17 & nei_hours < 22;
-            
-            % Add up the emissions over the whole vertical extent; averaged
-            % over 17:00 to 22:00 UTC, which is approximately the hours OMI
-            % is over North America.
-            nei_no = double(ncread(nei_info.Filename, 'E_NO'));
-            nei_no = nansum(nanmean(nei_no(:,:,:,tt), 4), 3);
-            % Convert from mol NO / km^2 / hr to Mg NO / hr: molar mass of NO =
-            % 30.006 g / mol = 30.006e-6 Mg / mol
-            nei_no = nei_no .* grid_area .* 30.06e-6; 
+            % To get the average NEI NO, we should be able to just divide
+            % by the number of years that went into the calculation.
+            total_nei_no = total_nei_no / numel(nei_year);
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -818,6 +841,7 @@ classdef misc_emissions_analysis
             
             % Load the NEI data. Will need to get lat/lon from
             % wrfinput_d01, b/c the wrfchemi files don't include lat-lon.
+            % Would have to do some work to get this to run on the cluster.
             if add_nei
                 nei_year = unique(year(check_dvec));
                 [nei_avg_no, nei_lon, nei_lat] = misc_emissions_analysis.load_nei_by_year(nei_year);
@@ -829,22 +853,22 @@ classdef misc_emissions_analysis
             for a=1:numel(locs)
                 fprintf('Fitting %s\n', locs(a).ShortName);
                 while true
-                    [fit.ffit, fit.emgfit, fit.param_stats, fit.f0, fit.history, fit.fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                    [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
                     % Try this a second time - if it gives a different
                     % answer, we should re-run, since that suggests we
                     % didn't find the minimum one time.
-                    ffit = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                    ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
                     
                     % Check that the two are the same to within 1%
                     diff_tolerance = 0.01;
-                    rdel = reldiff(struct2array(ffit), struct2array(fit.ffit));
+                    rdel = reldiff(struct2array(ffit_check), struct2array(ffit));
                     if all(abs(rdel) < diff_tolerance)
                         break
                     else
-                        fprintf('Fit results differ by > %f%% (%s vs %s); retrying\n', diff_tolerance*100, struct2string(fit.ffit), struct2string(fit));
+                        fprintf('Fit results differ by > %f%% (%s vs %s); retrying\n', diff_tolerance*100, struct2string(ffit), struct2string(ffit_check));
                     end
                 end
-                locs(a).fit_info = fit;
+                locs(a).fit_info = struct('ffit',ffit,'emgfit',emgfit,'param_stats',param_stats,'f0',f0,'history',history,'fitresults',fitresults);
                 
                 % Add the emissions and lifetime. Use the 95% confidence
                 % intervals as the uncertainty. We need to restrict the
