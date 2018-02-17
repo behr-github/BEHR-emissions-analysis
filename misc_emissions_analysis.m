@@ -2,13 +2,6 @@ classdef misc_emissions_analysis
     %UNTITLED Summary of this class goes here
     %   Detailed explanation goes here
     
-    properties(Constant = true)
-        % These are the wind speed division and whether to use fast or slow
-        % wind speeds to generate the rotated line densities.
-        em_wind_spd = 3;
-        em_wind_mode = 'fast';
-        
-    end
     
     properties(Constant = true, Access = protected)
         % This is used to help check if all the required Git repos are in
@@ -39,6 +32,10 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'LineDensities');
         end
         
+        function value = emg_fit_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'EMGFits');
+        end
+        
         function value = emis_wrf_dir
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRFData');
         end
@@ -56,17 +53,22 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = line_density_file_name(start_date, end_date, by_sectors, all_winds_bool, loc_inds, days_of_week)
+        function filename = line_density_file_name(start_date, end_date, by_sectors, winds_op, winds_cutoff, loc_inds, days_of_week)
             if by_sectors
                 sectors_string = 'sectors';
             else
                 sectors_string = 'rotated';
             end
-            if all_winds_bool
-                winds_string = '_windsall';
-            else
-                winds_string = '';
+            
+            allowed_winds_ops = {'lt', 'gt'};
+            if ~ismember(winds_op, allowed_winds_ops)
+                E.badinput('WINDS_OP must be one of %s', strjoin(allowed_winds_ops, ', '));
             end
+            if ~isnumeric(winds_cutoff) || ~isscalar(winds_cutoff) || winds_cutoff < 0
+                E.badinput('WINDS_CUTOFF must be a positive scalar integer')
+            end
+            winds_string = sprintf('winds-%s%d', winds_op, winds_cutoff);
+            
             if isempty(loc_inds)
                 locs_string = 'locsall';
             else
@@ -74,7 +76,7 @@ classdef misc_emissions_analysis
             end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_%s%s_%s_no2_%sto%s_%s.mat', sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
+            filename = sprintf('site_%s_%s_%s_no2_%sto%s_%s.mat', sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
@@ -87,7 +89,7 @@ classdef misc_emissions_analysis
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
             filename = sprintf('site_emg_fits_%s_%sto%s_%s.mat', locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
-            filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
+            filename = fullfile(misc_emissions_analysis.emg_fit_dir, filename);
         end
         
         function filename = wrf_grid_area_file()
@@ -258,7 +260,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function wind_logical = set_wind_conditions(location, speed_cutoff, fast_or_slow)
+        function wind_logical = set_wind_conditions(location, speed_cutoff, winds_op)
             E = JLLErrors;
             if ~isstruct(location) || ~isscalar(location) || any(~isfield(location, {'ShortName', 'WindDir', 'WindSpeed'}))
                 E.badinput('LOCATION must be a scalar structure with fields "ShortName", "WindDir", and "WindSpeed"')
@@ -268,9 +270,9 @@ classdef misc_emissions_analysis
                 E.badinput('SPEED_CUTOFF must be a scalar, positive number')
             end
             
-            allowed_fast_slow = {'fast', 'slow', 'none'};
-            if ~ismember(fast_or_slow, allowed_fast_slow)
-                E.badinput('FAST_OR_SLOW must be one of: %s', strjoin(allowed_fast_slow));
+            allowed_fast_slow = {'lt', 'gt'};
+            if ~ismember(winds_op, allowed_fast_slow)
+                E.badinput('WINDS_OP must be one of: %s', strjoin(allowed_fast_slow));
             end
             
             wind_logical = true(size(location.WindDir));
@@ -298,12 +300,12 @@ classdef misc_emissions_analysis
             end
             
             % Handle wind speed filtering here
-            if strcmpi(fast_or_slow, 'fast')
+            if strcmpi(winds_op, 'gt')
                 wind_logical(location.WindSpeed < speed_cutoff) = false;
-            elseif strcmpi(fast_or_slow, 'slow')
+            elseif strcmpi(winds_op, 'lt')
                 wind_logical(location.WindSpeed >= speed_cutoff) = false;
-            elseif ~strcmpi(fast_or_slow, 'none')
-                E.badinput('FAST_OR_SLOW must be one of: "fast", "slow", or "none"');
+            else
+                E.notimplemented('WINDS_OP = %s is not implemented', winds_op);
             end
         end
         
@@ -315,7 +317,20 @@ classdef misc_emissions_analysis
             
             % Then use these uncertainties to calculate the emissions and
             % lifetime and their uncertainties
-            [emis_tau.emis, emis_tau.emis_uncert, emis_tau.tau, emis_tau.tau_uncert] = compute_emg_emis_tau(fit_struct.ffit.a, param_uncert(1), fit_struct.ffit.x_0, param_uncert(2), 'vec', wind_speed_vector, 'emissions_type', 'no');
+            emissions_type = 'no';
+            [emis_tau.emis, emis_tau.emis_uncert, emis_tau.tau, emis_tau.tau_uncert] = compute_emg_emis_tau(fit_struct.ffit.a, param_uncert(1), fit_struct.ffit.x_0, param_uncert(2), 'vec', wind_speed_vector, 'emissions_type', emissions_type);
+            
+            % Calculate emission and lifetime standard deviations and
+            % degrees of freedom because they are needed for the two-sample
+            % t-tests.
+            
+            param_sd = calc_fit_param_uncert(fit_struct.ffit, fit_struct.param_stats.percentsd/100, line_dens_struct.num_valid_obs);
+            [~, emis_tau.emis_sd, ~, emis_tau.tau_sd] = compute_emg_emis_tau(fit_struct.ffit.a, param_sd(1), fit_struct.ffit.x_0, param_sd(2), 'vec', wind_speed_vector, 'emissions_type', emissions_type);
+            
+            % In the fitting, we consider the number of measurements to be
+            % the number of points in the line density. Since we are
+            % fitting 5 parameters, we lose 5 degrees of freedom.
+            emis_tau.n_dofs = sum(~isnan(line_dens_struct.linedens)) - 5;
         end
         
         function [total_nei_no, nei_lon, nei_lat] = load_nei_by_year(nei_year)
@@ -397,6 +412,98 @@ classdef misc_emissions_analysis
             total_nei_no = total_nei_no / numel(nei_year);
         end
         
+        function fit = default_fit_structure()
+            % Return a default structure skeleton for fitting information
+            % to be used in cases where the fit fails but we want a
+            % placeholder.
+            null_value = [];
+            fit.ffit = make_empty_struct_from_cell({'a','x_0','mu_x','sigma_x','B'},null_value);
+            fit.emgfit = null_value;
+            fit.param_stats = make_empty_struct_from_cell({'sd','percentsd','ci95','percent_ci95','r','r2'}, null_value);
+            fit.f0 = null_value;
+            fit.history.x = null_value;
+            % Fit results is a complicated structure that I don't use, so
+            % just make it an empty struct
+            fit.fitresults = struct();
+        end
+        
+        function emis_tau = default_emis_tau_structure()
+            % Return a default structure skeleton for emissions and
+            % lifetime information to be used in cases where the fit fails
+            % but we want a placeholder.
+            null_value = [];
+            emis_tau = make_empty_struct_from_cell({'emis','emis_uncert','tau','tau_uncert','emis_sd','tau_sd','n_dofs','nei_emis'}, null_value);
+        end
+        
+        function loc_inds = get_loc_inds_of_type(site_type)
+            locs = misc_emissions_analysis.read_locs_file();
+            loc_types = {locs.SiteType};
+            
+            if ~ischar(site_type)
+                E.badinput('SITE_TYPE must be a character array')
+            elseif strcmpi(site_type, 'all')
+                loc_inds = 1:numel(locs);
+                return
+            elseif ~ismember(site_type, loc_types)
+                E.badinput('SITE_TYPE is not a valid site type listed in the locations spreadsheet')
+            end
+            
+            loc_inds = find(strcmp(site_type, loc_types));
+        end
+        
+        function [changes, loc_names, loc_coords] = collect_changes(first_time_period, second_time_period, first_weekdays, second_weekdays, varargin)
+            
+            p = inputParser;
+            p.addParameter('loc_types',{'Cities','PowerPlants','RuralAreas'});
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            allowed_loc_types = pout.loc_types;
+            
+            [first_dates_st, first_dates_end] = misc_emissions_analysis.select_start_end_dates(first_time_period);
+            [second_dates_st, second_dates_end] = misc_emissions_analysis.select_start_end_dates(second_time_period);
+            
+            % As of 13 Feb 2018, all of the fits files are for the first 70
+            % locations, which misses Valmy, but I can fix that when I
+            % rerun for the 3 year data anyway.
+            loc_inds = 1:70;
+            first_locs = load(misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), loc_inds, first_weekdays));
+            second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), loc_inds, second_weekdays));
+            
+            xx_type = ismember({first_locs.locs.SiteType}, allowed_loc_types);
+            first_locs.locs(~xx_type) = [];
+            second_locs.locs(~xx_type) = [];
+            loc_names = {first_locs.locs.Location};
+            loc_coords.lon = [first_locs.locs.Longitude]';
+            loc_coords.lat = [first_locs.locs.Latitude]';
+            
+            % Collect the emissions and lifetimes differences into two
+            % n-by-2 arrays. Also get some metrics of the goodness of fit
+            
+            goodness_fns = {'r2'};
+            emis_tau_fns = fieldnames(first_locs.locs(1).emis_tau);
+            all_fns = veccat(emis_tau_fns, goodness_fns);
+            default_mat = nan(numel(first_locs.locs), 2);
+            for i_fn = 1:numel(all_fns)
+                changes.(all_fns{i_fn}) = default_mat;
+                for i_loc = 1:numel(first_locs.locs)
+                    if ~ismember(first_locs.locs(i_loc).SiteType, allowed_loc_types)
+                        continue
+                    end
+                    
+                    if ismember(all_fns{i_fn}, emis_tau_fns)
+                        first_substruct = first_locs.locs(i_loc).emis_tau;
+                        second_substruct = second_locs.locs(i_loc).emis_tau;
+                    else
+                        first_substruct = first_locs.locs(i_loc).fit_info.param_stats;
+                        second_substruct = second_locs.locs(i_loc).fit_info.param_stats;
+                    end
+                    changes.(all_fns{i_fn})(i_loc, :) = [first_substruct.(all_fns{i_fn})(:), second_substruct.(all_fns{i_fn})(:)];
+                end
+            end
+            
+        end
+        
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         % Interactive utility methods %
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -425,20 +532,21 @@ classdef misc_emissions_analysis
                 % the file extension, and some combination of U, M, T, W,
                 % R, F, S.
                 is_sectors_vec = regcmp(files, 'sectors');
-                is_allwinds_vec = regcmp(files, 'windsall');
+                winds_strings = regexp(files, 'winds-(lt|gt)\d', 'match', 'once');
                 
                 dow_check_fxn = @(d, d1) isequal(d,d1);
                 days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
                 
                 if any(is_sectors_vec) && ~all(is_sectors_vec)
                     E.badinput('Some, but not all, of the files selected are by sectors');
-                elseif any(is_allwinds_vec) && ~all(is_allwinds_vec)
+                elseif ~all(strcmp(winds_strings, winds_strings{1}))
                     E.badinput('Some, but not all, of the files selected are using all winds');
                 elseif ~all(cellfun(@(x) dow_check_fxn(x, days_of_week{1}), days_of_week))
                     E.badinput('Not all of the files are for the same days of week (%s)', strjoin(days_of_week,' vs. '));
                 else
                     by_sectors = all(is_sectors_vec);
-                    all_winds_bool = all(is_allwinds_vec);
+                    winds_op = regexp(winds_strings{1}, '(?<=winds\-)(lt|gt)','match','once');
+                    winds_cutoff = str2double(regexp(winds_strings{1}, '(?<=winds\-[lg]t)\d','match','once'));
                     days_of_week = days_of_week{1};
                 end
             end
@@ -481,7 +589,7 @@ classdef misc_emissions_analysis
             LD_all.locs = LD_all.locs(cut_down_vec);
             all_loc_inds = misc_emissions_analysis.find_loc_struct_inds(LD_all.locs);
             
-            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, all_winds_bool, all_loc_inds, days_of_week);
+            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, winds_op, winds_cutoff, all_loc_inds, days_of_week);
             if exist(new_save_name, 'file')
                 if ~ask_yn(sprintf('%s exists. Overwrite? ', new_save_name))
                     return
@@ -644,6 +752,9 @@ classdef misc_emissions_analysis
             % OVERWRITE == 0, will not overwrite an existing file and
             % OVERWRITE > 0 will overwrite an existing file. OVERWRITE < 0
             % will ask before overwriting.
+            if ~any(strcmp('winds_op', varargin)) && ~any(strcmp('winds_cutoff', varargin))
+                varargin(end+1:end+4) = {'winds_op', 'gt', 'winds_cutoff', 3};
+            end
             misc_emissions_analysis.make_line_densities(false, varargin{:});
         end
         
@@ -662,6 +773,9 @@ classdef misc_emissions_analysis
             % OVERWRITE == 0, will not overwrite an existing file and
             % OVERWRITE > 0 will overwrite an existing file. OVERWRITE < 0
             % will ask before overwriting.
+            if ~any(strcmp('winds_op', varargin)) && ~any(strcmp('winds_cutoff', varargin))
+                varargin(end+1:end+4) = {'winds_op', 'lt', 'winds_cutoff', 3};
+            end
             misc_emissions_analysis.make_line_densities(true, varargin{:});
         end
         
@@ -676,7 +790,8 @@ classdef misc_emissions_analysis
             p.addParameter('loc_indices', []);
             p.addParameter('do_overwrite', -1);
             p.addParameter('days_of_week', 'UMTWRFS');
-            p.addFlag('all_winds');
+            p.addParameter('winds_op', 'gt')
+            p.addParameter('winds_cutoff', 3);
             
             p.parse(varargin{:});
             pout = p.AdvResults;
@@ -687,7 +802,8 @@ classdef misc_emissions_analysis
             loc_indicies = pout.loc_indices;
             do_overwrite = pout.do_overwrite;
             days_of_week = pout.days_of_week;
-            all_winds = pout.all_winds;
+            winds_op = pout.winds_op;
+            winds_cutoff = pout.winds_cutoff;
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
                 E.badinput('The parameter "loc_indicies" must be a numeric array with all values >= 1')
@@ -701,7 +817,7 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, all_winds, loc_indicies, days_of_week);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, winds_op, winds_cutoff, loc_indicies, days_of_week);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -764,16 +880,18 @@ classdef misc_emissions_analysis
                     % Alternately, since I really just want the best maps I
                     % can get to look for downwind interferences, I can
                     % just use all wind speeds
-                    if all_winds
-                        wind_logical = true(size(winds_locs_distributed(a).WindSpeed));
+                    if strcmpi(winds_op, 'lt')
+                        wind_logical = winds_locs_distributed(a).WindSpeed < winds_cutoff;
+                    elseif strcmpi(winds_op, 'gt')
+                        wind_logical = winds_locs_distributed(a).WindSpeed > winds_cutoff;
                     else
-                        wind_logical = winds_locs_distributed(a).WindSpeed < 3;
+                        E.notimplemented('Operation for winds_op = %s not defined', winds_op);
                     end
                     % Call the sector division algorithm
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
                 else
-                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), winds_cutoff, winds_op);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, 'days_of_week', days_of_week);
                 end
@@ -793,32 +911,49 @@ classdef misc_emissions_analysis
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
-        function locs = make_emg_fits(time_period, loc_indicies, add_nei, days_of_week, do_overwrite)
+        function locs = make_emg_fits(varargin)
             E = JLLErrors;
+            p = inputParser;
+            p.addParameter('time_period', '');
+            p.addParameter('loc_indicies', []);
+            p.addParameter('add_nei', true);
+            p.addParameter('days_of_week', 'UMTWRFS');
+            p.addParameter('do_overwrite', -1);
+            % by default if it doesn't get it the second time, then it's
+            % probably just going to randomly sample until it happens to
+            % get two runs that give the same fit, which there's no reason
+            % to believe that is the minimum.
+            p.addParameter('max_fit_attempts', 2);  
+            p.addParameter('fatal_fit_fail', true);
+            p.addParameter('skip_linedens_errors', -1);
             
-            if ~exist('time_period', 'var')
-                time_period = '';
-            end
-
-            if ~exist('loc_indicies', 'var')
-                loc_indicies = [];
-            elseif ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            time_period = pout.time_period;
+            loc_indicies = pout.loc_indicies;
+            add_nei = pout.add_nei;
+            days_of_week = pout.days_of_week;
+            do_overwrite = pout.do_overwrite;
+            max_fit_attempts = pout.max_fit_attempts;
+            fatal_if_cannot_fit = pout.fatal_fit_fail;
+            skip_linedens_errors = pout.skip_linedens_errors;
+            
+            % time_period should be checked in select_start_end_dates
+            
+            if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
                 E.badinput('LOC_INDICIES must be a numeric array with all values >= 1')
             end
             
-            if ~exist('add_nei', 'var')
-                add_nei = true;
-            elseif ~isscalar(add_nei) || (~islogical(add_nei) && ~isnumeric(add_nei))
+            if ~isscalar(add_nei) || (~islogical(add_nei) && ~isnumeric(add_nei))
                 E.badinput('ADD_NEI must be a scalar logical or numeric value');
             end
             
-            if ~exist('days_of_week', 'var')
-                days_of_week = 'UMTWRFS';
+            if ~ischar(days_of_week)
+                E.badinput('DAYS_OF_WEEK must be a character array');
             end
             
-            if ~exist('do_overwrite', 'var')
-                do_overwrite = -1;
-            elseif (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
+            if (~isnumeric(do_overwrite) && ~islogical(do_overwrite)) || ~isscalar(do_overwrite)
                 E.badinput('DO_OVERWRITE must be a scalar logical or number')
             end
             
@@ -832,14 +967,23 @@ classdef misc_emissions_analysis
                         return
                     end
                 elseif ~do_overwrite
+                    [~,save_basename] = fileparts(save_name);
+                    fprintf('%s exists already. Not overwriting\n', save_basename);
                     return
                 end
             end
             
             % Load the file with the line densities. For this, we never
-            % want the sectors line densities (first false) and never want
-            % the all winds line densities (second false).
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, false, loc_indicies, days_of_week);
+            % want the sectors line densities (first false) and usually
+            % want the file with winds greater than 3 m/s. This may change
+            % if I do the slow winds convolution approach.
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, 'gt', 3, loc_indicies, days_of_week);
+            if ~exist(ldens_file, 'file')
+                [~,ldens_basename] = fileparts(ldens_file);
+                % Use regular error function to have more control over the
+                % error identifier
+                error('emis_analysis:no_linedens_file', 'Line density file %s not found, cannot fit EMG functions', ldens_basename);
+            end
             line_densities = load(ldens_file);
             
             % Check that the dates match up with what we're expecting (it
@@ -868,45 +1012,71 @@ classdef misc_emissions_analysis
             
             for a=1:numel(locs)
                 fprintf('Fitting %s\n', locs(a).ShortName);
+                safety_count = 1;
                 while true
-                    [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
-                    % Try this a second time - if it gives a different
-                    % answer, we should re-run, since that suggests we
-                    % didn't find the minimum one time.
-                    ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                    try
+                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                        % Try this a second time - if it gives a different
+                        % answer, we should re-run, since that suggests we
+                        % didn't find the minimum one time.
+                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                    catch err
+                        msg = sprintf('Fitting %s failed with error:\n "%s"\nSkip this location and continue?', locs(a).ShortName, err.message);
+                        if skip_linedens_errors > 0 || (skip_linedens_errors < 0 && ask_yn(msg))
+                            locs(a).fit_info = misc_emissions_analysis.default_fit_structure;
+                            break
+                        else
+                            rethrow(err)
+                        end
+                    end
+                        
                     
                     % Check that the two are the same to within 1%
                     diff_tolerance = 0.01;
                     rdel = reldiff(struct2array(ffit_check), struct2array(ffit));
                     if all(abs(rdel) < diff_tolerance)
+                        locs(a).fit_info = struct('ffit',ffit,'emgfit',emgfit,'param_stats',param_stats,'f0',f0,'history',history,'fitresults',fitresults);
                         break
+                    elseif safety_count > max_fit_attempts
+                        msg = sprintf('Could not fit %s in %d attempts', locs(a).ShortName, max_fit_attempts);
+                        if fatal_if_cannot_fit
+                            E.callError('fit_failure', msg);
+                        else
+                            fprintf('%s\n', msg);
+                            locs(a).fit_info = misc_emissions_analysis.default_fit_structure;
+                            break
+                        end
                     else
-                        fprintf('Fit results differ by > %f%% (%s vs %s); retrying\n', diff_tolerance*100, struct2string(ffit), struct2string(ffit_check));
+                        fprintf('Attempt %d of %d: fit results differ by > %f%% (%s vs %s); retrying\n', safety_count, max_fit_attempts, diff_tolerance*100, struct2string(ffit), struct2string(ffit_check));
+                        safety_count = safety_count + 1;
                     end
                 end
-                locs(a).fit_info = struct('ffit',ffit,'emgfit',emgfit,'param_stats',param_stats,'f0',f0,'history',history,'fitresults',fitresults);
                 
-                % Add the emissions and lifetime. Use the 95% confidence
-                % intervals as the uncertainty. We need to restrict the
-                % winds to what should have been used to calculate the line
-                % densities.
-                wind_logical = misc_emissions_analysis.set_wind_conditions(locs(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
-                emis_tau = misc_emissions_analysis.calculate_emission_lifetime(locs(a).no2_sectors, locs(a).fit_info, locs(a).WindSpeed(wind_logical));
-                
-                if add_nei
-                    % Calculate the across-wind distance from the rotated
-                    % latitude grid - since we rotate to the "x" (i.e.
-                    % east-west) axis, across wind == latitudinally
-                    across_wind_radius = abs((locs(a).no2_sectors.lat(1,1) - locs(a).no2_sectors.lat(end,1))/2);
+                if ~isequal(locs(a).fit_info, misc_emissions_analysis.default_fit_structure)
+                    % Add the emissions and lifetime. Use the 95% confidence
+                    % intervals as the uncertainty. We need to restrict the
+                    % winds to what should have been used to calculate the line
+                    % densities.
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(locs(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
+                    emis_tau = misc_emissions_analysis.calculate_emission_lifetime(locs(a).no2_sectors, locs(a).fit_info, locs(a).WindSpeed(wind_logical));
                     
-                    % Now get the WRF grid cells within that radius of the
-                    % site and add up their NEI NO emissions.
-                    xx = sqrt((nei_lon - locs(a).Longitude).^2 + (nei_lat - locs(a).Latitude).^2) < across_wind_radius;
+                    if add_nei
+                        % Calculate the across-wind distance from the rotated
+                        % latitude grid - since we rotate to the "x" (i.e.
+                        % east-west) axis, across wind == latitudinally
+                        across_wind_radius = abs((locs(a).no2_sectors.lat(1,1) - locs(a).no2_sectors.lat(end,1))/2);
+                        
+                        % Now get the WRF grid cells within that radius of the
+                        % site and add up their NEI NO emissions.
+                        xx = sqrt((nei_lon - locs(a).Longitude).^2 + (nei_lat - locs(a).Latitude).^2) < across_wind_radius;
+                        
+                        emis_tau.nei_emis = nansum(nei_avg_no(xx));
+                    end
                     
-                    emis_tau.nei_emis = nansum(nei_avg_no(xx));
+                    locs(a).emis_tau = emis_tau;
+                else
+                    locs(a).emis_tau = misc_emissions_analysis.default_emis_tau_structure;
                 end
-                
-                locs(a).emis_tau = emis_tau;
             end
             
             dvec = line_densities.dvec;
@@ -1186,6 +1356,287 @@ classdef misc_emissions_analysis
             %bar_errors([sat_emis, nei_emis], [sat_errors, nei_errors]);
             set(gca,'xticklabel',names,'fontsize',16,'ygrid','on','xtickLabelRotation',-30);
             legend(legend_strings{:});
+        end
+        
+        function plot_fits_interactive()
+            [beg_start_date, beg_end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
+            [end_start_date, end_end_date] = misc_emissions_analysis.select_start_end_dates('end');
+            
+            % Load the weekday, weekend, and all day fits files. Cut out
+            % the memory intensive parts of the line density sub structure
+            % to save memory.
+            loc_inds = 1:70;
+            days_of_week = {'UMTWRFS', 'TWRF', 'US'};
+            loc_prototype = struct('Location', '', 'x', [], 'linedens', [], 'emgfit', [], 'r2', []);
+            beg_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
+            end_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
+            
+            for i_dow = 1:numel(days_of_week)
+                beg_fits = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, loc_inds, days_of_week{i_dow}));
+                end_fits = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, loc_inds, days_of_week{i_dow}));
+                for i_loc = 1:numel(beg_fits.locs)
+                    beg_locs(i_loc, i_dow) = copy_structure_fields(beg_fits.locs(i_loc), loc_prototype, 'substructs');
+                    end_locs(i_loc, i_dow) = copy_structure_fields(end_fits.locs(i_loc), loc_prototype, 'substructs');
+                end
+            end
+            
+            % Now we can actually do the plotting. Make a list of the
+            % available locations, then ask which one to plot until we quit
+            locs_list = {beg_locs(:,1).Location};
+            colors = {[0.5 0.5 0.5], 'c', [1 0.5 0];...
+                      'k'          , 'b', 'r'};
+            while true
+                loc_ind = ask_multichoice('Plot which location?', locs_list, 'list', true, 'index', true);
+                beg_fig = figure;
+                l = gobjects(size(beg_locs,2),1);
+                for i_wkday = 1:size(beg_locs,2)
+                    l(i_wkday) = line(beg_locs(loc_ind, i_wkday).x, beg_locs(loc_ind, i_wkday).linedens, 'color', colors{1, i_wkday}, 'marker', 'o', 'linestyle', 'none');
+                    if ~isempty(beg_locs(loc_ind, i_wkday).emgfit)
+                        line(beg_locs(loc_ind, i_wkday).x, beg_locs(loc_ind, i_wkday).emgfit, 'color', colors{2, i_wkday}, 'linestyle', '--');
+                    end
+                end
+                r2_array = {beg_locs(loc_ind, :).r2};
+                xx = iscellcontents(r2_array, @isempty);
+                r2_array(xx) = {nan};
+                legend(l, sprintfmulti('%s (R^2 = %.2f)', days_of_week, r2_array));
+                title(sprintf('Beginning, %s', beg_locs(loc_ind, 1).Location)); 
+                
+                end_fig = figure;
+                l = gobjects(size(beg_locs,2),1);
+                for i_wkday = 1:size(beg_locs,2)
+                    l(i_wkday) = line(end_locs(loc_ind, i_wkday).x, end_locs(loc_ind, i_wkday).linedens, 'color', colors{1, i_wkday}, 'marker', 'o', 'linestyle', 'none');
+                    if ~isempty(end_locs(loc_ind, i_wkday).emgfit)
+                        line(end_locs(loc_ind, i_wkday).x, end_locs(loc_ind, i_wkday).emgfit, 'color', colors{2, i_wkday}, 'linestyle', '--');
+                    end
+                end
+                r2_array = {end_locs(loc_ind, :).r2};
+                xx = iscellcontents(r2_array, @isempty);
+                r2_array(xx) = {nan};
+                legend(l, sprintfmulti('%s (R^2 = %.2f)', days_of_week, r2_array));
+                title(sprintf('End, %s', end_locs(loc_ind, 1).Location));
+                tilefigs;
+                
+                input('Press ENTER to continue','s');
+                
+                close([beg_fig, end_fig]);
+            end
+        end
+        
+        function plot_emis_tau_changes(varargin)
+            
+            [first_time_period, second_time_period, first_weekdays, second_weekdays, loc_types, series_labels] = misc_emissions_analysis.get_change_file_selection_input(varargin{:});
+            
+            [changes, loc_names] = misc_emissions_analysis.collect_changes(first_time_period, second_time_period, first_weekdays, second_weekdays, 'loc_types', loc_types);
+            
+            plot_grouped_changes({changes.emis, changes.nei_emis}, 'group_labels', {'BEHR','NEI'}, 'series_labels', series_labels, 'inter_space', 2, 'tick_labels', loc_names);
+            set(gca,'XTickLabelRotation',30);
+            plot_grouped_changes({changes.tau}, 'group_labels', {'Lifetime'}, 'series_labels', series_labels, 'inter_space', 2, 'tick_labels', loc_names);
+            set(gca,'XTickLabelRotation',30);
+        end
+        
+        function plot_lifetime_change_map(varargin)
+            % Makes a scatter plot of changes in lifetime, both 2012-2013
+            % minus 2005-2007 and weekend minus weekday, plotted on a map.
+            % Each location will have three symbols in a triangle, the top
+            % symbol will represent the decadal change, the bottom left one
+            % the 2005-2007 weekend/weekday change, and the bottom right
+            % right the 2012-2013 weekend/weekday change. Different symbols
+            % will be used to represent the significance of each change;
+            % circles for changes significant using 95% CIs, asterisks for
+            % changes not significant using 95% CIs, and X's for changes in
+            % which one of the R2 values is less than some critical value.
+            
+            E = JLLErrors;
+            
+            p = inputParser;
+            p.addParameter('loc_types','');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_types = pout.loc_types;
+            
+            allowed_loc_types = {'Cities','PowerPlants'};
+            if ~ischar(loc_types) && ~iscellstr(loc_types)
+                E.badinput('"loc_types" must be a character array or cell array of character arrays')
+            elseif ~isempty(loc_types)
+                if ~all(ismember(loc_types, allowed_loc_types))
+                    E.badinput('"loc_types" must be one or more of the following: %s', strjoin(allowed_loc_types, ', '));
+                end
+            else
+                loc_types = ask_multiselect('Select one or more site types to plot:', allowed_loc_types);
+            end
+            
+            weekdays = 'TWRF';
+            weekends = 'US';
+            alldays = 'UMTWRFS';
+            
+            [decadal_changes, loc_names, loc_coords] = misc_emissions_analysis.collect_changes('beginning', 'end', alldays, alldays, 'loc_types', loc_types);
+            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', weekdays, weekends, 'loc_types', loc_types);
+            end_changes = misc_emissions_analysis.collect_changes('end', 'end', weekdays, weekends, 'loc_types', loc_types);
+            
+            decadal_series = misc_emissions_analysis.lifetime_map_series(decadal_changes.tau, decadal_changes.tau_sd, decadal_changes.n_dofs, decadal_changes.r2, loc_coords, 'top', loc_names);
+            beginning_series = misc_emissions_analysis.lifetime_map_series(beginning_changes.tau, beginning_changes.tau_sd, beginning_changes.n_dofs, beginning_changes.r2, loc_coords, 'bottom-left', loc_names);
+            end_series = misc_emissions_analysis.lifetime_map_series(end_changes.tau, end_changes.tau_sd, end_changes.n_dofs, end_changes.r2, loc_coords, 'bottom-right', loc_names);
+            
+            figure;
+            state_outlines('k','not','ak','hi');
+            misc_emissions_analysis.plot_map_series(gca, decadal_series, 'include_names');
+            misc_emissions_analysis.plot_map_series(gca, beginning_series);
+            misc_emissions_analysis.plot_map_series(gca, end_series);
+            cb = colorbar;
+            cb.Label.String = '\Delta \tau_{NO2} (hours)';
+            colormap(blue_red_only_cmap);
+            caxis([-6 6]);
+            set(gca,'fontsize',16);
+        end
+        
+    end
+    
+    methods(Static = true, Access = private)
+        
+        function [first_time_period, second_time_period, first_weekdays, second_weekdays, loc_types, series_labels] = get_change_file_selection_input(varargin)
+            allowed_change_types = {'decadal','weekend-weekday'};
+            allowed_time_periods = {'beginning','end'};
+            allowed_loc_types = {'Cities','PowerPlants'};
+            
+            p = inputParser;
+            p.addParameter('change_type', '', @(x) ischar(x) && ismember(x, [{''}, allowed_change_types]));
+            p.addParameter('time_period', '', @(x) ischar(x) && ismember(x, [{''}, allowed_time_periods]));
+            p.addParameter('loc_types','');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            change_type = pout.change_type;
+            time_period = pout.time_period;
+            loc_types = pout.loc_types;
+            
+            if isempty(change_type)
+                change_type = ask_multichoice('Which type of change to plot?', allowed_change_types, 'list', true);
+            end
+            
+            if ~strcmpi(change_type, 'decadal')
+                if isempty(time_period)
+                    time_period = ask_multichoice('For which time period?', allowed_time_periods, 'list', true);
+                end
+                
+                first_time_period = time_period;
+                second_time_period = time_period;
+                first_weekdays = 'TWRF';
+                second_weekdays = 'US';
+                series_labels = {'Weekday','Weekend'};
+            else
+                first_time_period = 'beginning';
+                second_time_period = 'end';
+                first_weekdays = 'UMTWRFS';
+                second_weekdays = 'UMTWRFS';
+                series_labels = {'2005-2007','2012-2013'};
+            end
+            
+            if ~ischar(loc_types) && ~iscellstr(loc_types)
+                E.badinput('"loc_types" must be a character array or cell array of character arrays')
+            elseif ~isempty(loc_types)
+                if ~all(ismember(loc_types, allowed_loc_types))
+                    E.badinput('"loc_types" must be one or more of the following: %s', strjoin(allowed_loc_types, ', '));
+                end
+            else
+                loc_types = ask_multiselect('Select one or more site types to plot:', allowed_loc_types);
+            end
+        end
+        
+        
+        function plot_map_series(ax, map_series, varargin)
+            ax.NextPlot = 'add';
+            for i=1:numel(map_series)
+                scatter(ax, map_series(i).lon, map_series(i).lat, [], map_series(i).change, map_series(i).symbol{:});
+            end
+            
+            
+            if ismember(varargin, 'include_names')
+                lons = veccat(map_series.lon);
+                lats = veccat(map_series.lat) - 0.5; % -0.5 temp hack to put the name in the middle of the triangles
+                names = veccat(map_series.names);
+                % ensure all given as column vectors
+                text(lons(:),lats(:),names(:));
+            end
+        end
+        
+        function plot_series = lifetime_map_series(values, value_sds, value_dofs, value_r2, coords, corner, loc_names)
+            % Helper function to set up the series with the right
+            % coordinates and symbols based on their confidence and r2
+            % values. "corner" should be a string indicating
+            % which corner of the triangle in the plot it should be.
+            % Possible values are "center", "top", "bottom-left", and
+            % "bottom-right"
+            
+            E = JLLErrors;
+            
+            if ~exist('corner', 'var')
+                corner = 'center';
+            end
+            
+            % Go ahead and compute the offsets for the corner now
+            offset_distance = 0.5; % the triangle's corners will be this distance from the center
+            switch lower(corner)
+                case 'center'
+                    offset = [0 0];
+                case 'top'
+                    offset = offset_distance * [cosd(90), sind(90)];
+                case 'bottom-left'
+                    offset = offset_distance * [cosd(-150), sind(-150)];
+                case 'bottom-right'
+                    offset = offset_distance * [cosd(-30), sind(-30)];
+                otherwise
+                    E.badinput('CORNER must be one of the strings "center", "top", "bottom-left", or "bottom-right"');
+            end
+            
+            r2_criterion = 0.9;
+            
+            xx_bad_r2 = any(value_r2 < r2_criterion, 2);
+            
+            difference_is_significant = false(size(values,1),1);
+            
+            % Calculate whether the difference is significant at the 95%
+            % confidence level.
+            for i_chng = 1:size(values,1)
+                % For SSR (sum of squared residuals), since SD = sqrt( SSR
+                % / n_dofs ) calculate SSR from number of degrees of
+                % freedom and square root. For the numbers of measurements,
+                % we need to add back in the 5 degrees of freedom removed
+                % in accounting for the fitting parameters.
+                [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
+                    values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
+                    sum(value_dofs(i_chng,:)), 'confidence', 0.95);
+            end
+            
+            xx_not_sig = ~difference_is_significant & ~xx_bad_r2;
+            xx_sig = ~xx_not_sig & ~xx_bad_r2;
+            
+            xx_cell = {xx_sig, xx_not_sig, xx_bad_r2};
+            
+            default_mat = repmat({[]}, size(xx_cell));
+            
+            % Use cell arrays of cell arrays so that we can call
+            % SCATTER(lon, lat, [], change, symbol{:}) and get filled
+            % circles but not filled asterisks or x's. Testing shows that
+            % calling 'filled' with * markers makes them just disappear.
+            symbols = {{'o','filled'},{'*'},{'x'}};
+            
+            plot_series = struct('lon', default_mat, 'lat', default_mat, 'change', default_mat, 'percent_change', default_mat, 'symbol', symbols, 'names', {{}});
+            for i_series = 1:numel(plot_series)
+                plot_series(i_series).lon = coords.lon(xx_cell{i_series}) + offset(1);
+                plot_series(i_series).lat = coords.lat(xx_cell{i_series}) + offset(2);
+                
+                % Take the difference and percent difference of the second
+                % column of values minus the first.
+                plot_series(i_series).change = diff(values(xx_cell{i_series},:),1,2);
+                % reldiff(A,B) is (A-B)/B
+                plot_series(i_series).percent_change = reldiff(values(xx_cell{i_series},2), values(xx_cell{i_series},1)) * 100;
+                
+                plot_series(i_series).names = loc_names(xx_cell{i_series});
+            end
+            
         end
     end
     
