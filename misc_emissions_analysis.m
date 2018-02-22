@@ -40,9 +40,9 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRFData');
         end
         
-        function filename = avg_file_name(year_in)
+        function filename = avg_file_name(year_in, days_of_week)
             years_str = strjoin(sprintfmulti('%d', year_in),'_');
-            filename = sprintf('Summer_avg_%s.mat', years_str);
+            filename = sprintf('Summer_avg_%s_%s.mat', years_str, days_of_week);
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
@@ -451,14 +451,22 @@ classdef misc_emissions_analysis
             loc_inds = find(strcmp(site_type, loc_types));
         end
         
+        function loc_inds = get_loc_inds_interactive()
+            locs = misc_emissions_analysis.read_locs_file();
+            loc_names = {locs.ShortName};
+            loc_inds = ask_multiselect('Choose the locations to use', loc_names, 'returnindex', true);
+        end
+        
         function [changes, loc_names, loc_coords] = collect_changes(first_time_period, second_time_period, first_weekdays, second_weekdays, varargin)
             
             p = inputParser;
             p.addParameter('loc_types',{'Cities','PowerPlants','RuralAreas'});
+            p.addParameter('loc_inds', []);
             p.parse(varargin{:});
             pout = p.Results;
             
             allowed_loc_types = pout.loc_types;
+            user_loc_inds = pout.loc_inds;
             
             [first_dates_st, first_dates_end] = misc_emissions_analysis.select_start_end_dates(first_time_period);
             [second_dates_st, second_dates_end] = misc_emissions_analysis.select_start_end_dates(second_time_period);
@@ -471,6 +479,11 @@ classdef misc_emissions_analysis
             second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), loc_inds, second_weekdays));
             
             xx_type = ismember({first_locs.locs.SiteType}, allowed_loc_types);
+            if ~isempty(user_loc_inds)
+                xx_user_loc = false(size(xx_type));
+                xx_user_loc(user_loc_inds) = true;
+                xx_type = xx_type & xx_user_loc;
+            end
             first_locs.locs(~xx_type) = [];
             second_locs.locs(~xx_type) = [];
             loc_names = {first_locs.locs.Location};
@@ -479,10 +492,11 @@ classdef misc_emissions_analysis
             
             % Collect the emissions and lifetimes differences into two
             % n-by-2 arrays. Also get some metrics of the goodness of fit
+            % and total mass
             
-            goodness_fns = {'r2'};
+            additional_fns = {'r2','a'};
             emis_tau_fns = fieldnames(first_locs.locs(1).emis_tau);
-            all_fns = veccat(emis_tau_fns, goodness_fns);
+            all_fns = veccat(emis_tau_fns, additional_fns, 'column');
             default_mat = nan(numel(first_locs.locs), 2);
             for i_fn = 1:numel(all_fns)
                 changes.(all_fns{i_fn}) = default_mat;
@@ -491,14 +505,16 @@ classdef misc_emissions_analysis
                         continue
                     end
                     
-                    if ismember(all_fns{i_fn}, emis_tau_fns)
-                        first_substruct = first_locs.locs(i_loc).emis_tau;
-                        second_substruct = second_locs.locs(i_loc).emis_tau;
-                    else
-                        first_substruct = first_locs.locs(i_loc).fit_info.param_stats;
-                        second_substruct = second_locs.locs(i_loc).fit_info.param_stats;
+                    first_value = find_substruct_field(first_locs.locs(i_loc), all_fns{i_fn});
+                    second_value = find_substruct_field(second_locs.locs(i_loc), all_fns{i_fn});
+                    if isempty(first_value)
+                        first_value = nan;
                     end
-                    changes.(all_fns{i_fn})(i_loc, :) = [first_substruct.(all_fns{i_fn})(:), second_substruct.(all_fns{i_fn})(:)];
+                    if isempty(second_value)
+                        second_value = nan;
+                    end
+                    
+                    changes.(all_fns{i_fn})(i_loc, :) = [first_value, second_value];
                 end
             end
             
@@ -602,10 +618,24 @@ classdef misc_emissions_analysis
         %%%%%%%%%%%%%%%%%%%%%%
         % Generation methods %
         %%%%%%%%%%%%%%%%%%%%%%
-        function make_summer_averages(avg_year)
-            if ~exist('avg_year', 'var')
+        function make_summer_averages(varargin)
+            E = JLLErrors;
+            p = inputParser;
+            p.addParameter('avg_year',[]);
+            p.addParameter('days_of_week','');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_year = pout.avg_year;
+            days_of_week = pout.days_of_week;
+            
+            if isempty(avg_year)
                 avg_year = ask_number('Enter the year (or years separated by a space) to do a summer average for', 'testfxn', @(x) all(x >= 2005 & x <= 2015), 'testmsg', 'Year(s) must be between 2005 and 2015');
+            elseif ~isnumeric(avg_year) || any(avg_year < 2005 | avg_year > 2015)
+                E.badinput('AVG_YEAR must be a numeric vector with values between 2005 and 2015');
             end
+            
+            days_of_week = misc_emissions_analysis.choose_days_of_week(days_of_week);
             
             start_date = cell(size(avg_year));
             end_date = cell(size(avg_year));
@@ -616,11 +646,11 @@ classdef misc_emissions_analysis
             
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
-            common_opts = {'DEBUG_LEVEL', 1};
+            common_opts = {'DEBUG_LEVEL', 1, 'dayofweek', days_of_week};
             [monthly.no2, monthly.lon, monthly.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
             [daily.no2, daily.lon, daily.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
             
-            save_name = misc_emissions_analysis.avg_file_name(avg_year);
+            save_name = misc_emissions_analysis.avg_file_name(avg_year, days_of_week);
             save(save_name, 'monthly', 'daily');
         end
         
@@ -780,6 +810,7 @@ classdef misc_emissions_analysis
         end
         
         function make_line_densities(by_sectors, varargin)
+            E = JLLErrors;
             
             if ~islogical(by_sectors) || ~isscalar(by_sectors)
                 E.badinput('BY_SECTORS must be a scalar logical')
@@ -885,6 +916,7 @@ classdef misc_emissions_analysis
                     elseif strcmpi(winds_op, 'gt')
                         wind_logical = winds_locs_distributed(a).WindSpeed > winds_cutoff;
                     else
+                        wind_logical = [];
                         E.notimplemented('Operation for winds_op = %s not defined', winds_op);
                     end
                     % Call the sector division algorithm
@@ -1089,12 +1121,28 @@ classdef misc_emissions_analysis
         % Plotting methods %
         %%%%%%%%%%%%%%%%%%%%
         
-        function plot_site_summer_avg(loc_to_plot, plot_year, monthly_or_daily, plot_axis)
+        function plot_site_summer_avg(varargin)
             E = JLLErrors;
+            
+            p = inputParser;
+            p.addParameter('loc_to_plot', '');
+            p.addParameter('plot_year',[]);
+            p.addParameter('days_of_week', '');
+            p.addParameter('monthly_or_daily', '');
+            p.addParameter('plot_axis', gobjects(0));
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_to_plot = pout.loc_to_plot;
+            plot_year = pout.plot_year;
+            days_of_week = pout.days_of_week;
+            monthly_or_daily = pout.monthly_or_daily;
+            plot_axis = pout.plot_axis;
             
             locs = misc_emissions_analysis.read_locs_file();
             loc_names = {locs.ShortName};
-            if ~exist('loc_to_plot', 'var') || isempty(loc_to_plot)
+            if isempty(loc_to_plot)
                 loc_to_plot = ask_multichoice('Which location to plot?', loc_names, 'list', true);
             elseif ~any(strcmpi(loc_to_plot, loc_names))
                 E.badinput('LOC_TO_PLOT must be one of the shortname in the trend locations file');
@@ -1102,23 +1150,20 @@ classdef misc_emissions_analysis
             
             i_loc = strcmpi(loc_names, loc_to_plot);
             
-            avg_files = dir(fullfile(misc_emissions_analysis.avg_save_dir, '*.mat'));
-            avg_files = {avg_files.name};
-            if ~exist('plot_year', 'var')
-                file_to_plot = ask_multichoice('Plot which avg. file?', avg_files, 'list', true);
-                file_to_plot = fullfile(misc_emissions_analysis.avg_save_dir, file_to_plot);
-            else
-                if ~isnumeric(plot_year)
-                    E.badinput('PLOT_YEAR must be numeric')
-                end
-                file_to_plot = misc_emissions_analysis.avg_file_name(plot_year);
-                if ~exist(file_to_plot, 'file')
-                    E.badinput('No average file for year %d', plot_year);
-                end
+            if isempty(plot_year)
+                plot_year = ask_number('Enter the year (or years separated by a space) to do a summer average for', 'testfxn', @(x) all(x >= 2005 & x <= 2015), 'testmsg', 'Year(s) must be between 2005 and 2015');
+            elseif ~isnumeric(plot_year)
+                E.badinput('PLOT_YEAR must be numeric')
             end
             
+            days_of_week = misc_emissions_analysis.choose_days_of_week(days_of_week);
+            file_to_plot = misc_emissions_analysis.avg_file_name(plot_year, days_of_week);
+            if ~exist(file_to_plot, 'file')
+                E.badinput('No average file for year %d and days of week %s', plot_year, days_of_week);
+            end   
+            
             allowed_mod_strings = {'both', 'monthly', 'daily'};
-            if ~exist('monthly_or_daily', 'var')
+            if isempty(monthly_or_daily)
                 monthly_or_daily = 'both';
             elseif ~ismember(monthly_or_daily, allowed_mod_strings)
                 E.badinput('MONTHLY_OR_DAILY must be one of: %s', allowed_mod_strings);
@@ -1142,23 +1187,29 @@ classdef misc_emissions_analysis
                 figure;
                 pcolor(loc_longrid, loc_latgrid, loc_no2grid);
                 line(locs(i_loc).Longitude, locs(i_loc).Latitude, 'marker', 'p', 'color', 'k', 'linestyle', 'none');
-                colorbar;
-                caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'max', [0 Inf]));
-                title(sprintf('%s - Monthly profiles', locs(i_loc).ShortName));
+                cb=colorbar;
+                cb.Label.String = 'NO_2 VCD (molec. cm^{-2})';
+                set(gca,'fontsize',16);
+                shading flat;
+                caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'zero', 'max', [0 Inf]));
+                title(sprintf('%s - Monthly profiles (%s, %s)', locs(i_loc).ShortName, sprintf_ranges(plot_year, 'value_sep', ', '), days_of_week));
             end
             % If daily profile avgs are available too, plot them as well
             if ~isscalar(avgs.daily.no2) && ismember(monthly_or_daily, {'both', 'daily'}) % if no data, the no2 grid will just be a scalar NaN
                 loc_no2grid = avgs.daily.no2(yy,xx);
-                if ~exist('plot_axis','var')
+                if isempty(plot_axis)
                     figure; 
                     pcolor(loc_longrid, loc_latgrid, loc_no2grid);
                 else
                     pcolor(plot_axis, loc_longrid, loc_latgrid, loc_no2grid);
                 end
                 line(locs(i_loc).Longitude, locs(i_loc).Latitude, 'marker', 'p', 'color', 'k', 'linestyle', 'none');
-                colorbar;
-                caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'max', [0 Inf]));
-                title(sprintf('%s - Daily profiles', locs(i_loc).ShortName));
+                cb=colorbar;
+                cb.Label.String = 'NO_2 VCD (molec. cm^{-2})';
+                set(gca,'fontsize',16);
+                shading flat;
+                caxis(calc_plot_limits(loc_no2grid(:), 1e15, 'zero', 'max', [0 Inf]));
+                title(sprintf('%s - Daily profiles (%s %s)', locs(i_loc).ShortName, sprintf_ranges(plot_year, 'value_sep', ', '), days_of_week));
             end
         end
         
@@ -1491,6 +1542,41 @@ classdef misc_emissions_analysis
             set(gca,'fontsize',16);
         end
         
+        function plot_lifetime_vs_mass(varargin)
+            p = inputParser;
+            p.addParameter('loc_inds', nan);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = pout.loc_inds;
+            if isnan(loc_inds)
+                loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
+            end
+            
+            locs = misc_emissions_analysis.read_locs_file();
+            
+            decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds);
+            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds);
+            end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds);
+            
+            decadal_style = struct('marker', {'o','x'}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
+            beginning_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {'c','m'},'markersize',10);
+            end_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {[1 0.5 0], [0.5 0 0.5]},'markersize',10);
+            for i_loc = 1:numel(loc_inds)
+                l = gobjects(6,1);
+                figure;
+                ax = gca;
+                l(1:2) = plot_changes(decadal_changes.a(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'parent', ax);
+                l(3:4) = plot_changes(beginning_changes.a(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'parent', ax);
+                l(5:6) = plot_changes(end_changes.a(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'parent', ax);
+                legend(l, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
+                set(ax,'fontsize',16);
+                xlabel('a (mol NO_2)');
+                ylabel('\tau (hours)');
+                title(locs(loc_inds(i_loc)).Location);
+            end
+        end
     end
     
     methods(Static = true, Access = private)
@@ -1637,6 +1723,41 @@ classdef misc_emissions_analysis
                 plot_series(i_series).names = loc_names(xx_cell{i_series});
             end
             
+        end
+        
+        function dow = choose_days_of_week(varargin)
+            E = JLLErrors;
+            
+            p = advInputParser;
+            p.addOptional('days_of_week','',@ischar);
+            p.addFlag('individual');
+            
+            p.parse(varargin{:});
+            pout = p.AdvResults;
+            
+            days_of_week = pout.days_of_week;
+            indiv_bool = pout.individual;
+            
+            if isempty(days_of_week)
+                if indiv_bool
+                    allowed_dow = {'S','M','T','W','R','F','S'};
+                    dow = ask_multiselect('Choose days of week to include', allowed_dow);
+                    dow = strjoin(dow, '');
+                else
+                    allowed_dow = {'weekdays', 'weekends', 'both'};
+                    dow_ans = ask_multichoice('Choose days of week to include', allowed_dow, 'list', true);
+                    switch lower(dow_ans)
+                        case 'weekdays'
+                            dow = 'TWRF';
+                        case 'weekends'
+                            dow = 'US';
+                        case 'both'
+                            dow = 'UMTWRFS';
+                    end
+                end
+            elseif ~ischar(days_of_week) || any(~ismember(days_of_week, 'UMTWRFS'))
+                E.badinput('DAYS_OF_WEEK must be a character array consisting only of the characters U, M, T, W, R, F, or S');
+            end
         end
     end
     
