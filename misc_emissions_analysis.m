@@ -1421,60 +1421,44 @@ classdef misc_emissions_analysis
         end
         
         function plot_sat_nei_emissions()
-            % For now, I'm just going to assume that we want to plot all
-            % the locations in the subset emissions file. Later, I'll add
-            % the ability to choose a subset of locations.
-            allowed_time_periods = {'beginning','end','both'};
-            plot_time_period = ask_multichoice('Which time period(s) to plot?', allowed_time_periods, 'list', true);
-            plot_beginning = any(strcmpi(plot_time_period, {'beginning','both'}));
-            plot_end = any(strcmpi(plot_time_period, {'end','both'}));
+            % Plot a bar graph of OMI derived and NEI derived emissions.
             
-            % Loading both time periods isn't very hard, so we'll load both
-            % and then just plot the one we want.
-            [beg_start_date, beg_end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
-            [end_start_date, end_end_date] = misc_emissions_analysis.select_start_end_dates('end');
-            D = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, true));
-            beg_locs = D.locs;
-            D = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, true));
-            end_locs = D.locs;
+            loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
             
-            % Extract the site name, satellite, and NEI derived emissions
-            names = cell(size(beg_locs));
-            beg_sat_emis = nan(size(beg_locs));
-            beg_sat_errors = nan(size(beg_locs));
-            beg_nei_emis = nan(size(beg_locs));
-            beg_nei_errors = nan(size(beg_locs));
-            end_sat_emis = nan(size(end_locs));
-            end_sat_errors = nan(size(end_locs));
-            end_nei_emis = nan(size(end_locs));
-            end_nei_errors = nan(size(end_locs));
-            for a=1:numel(beg_locs)
-                names{a} = beg_locs(a).ShortName;
-                beg_sat_emis(a) = beg_locs(a).emis_tau.emis;
-                beg_sat_errors(a) = beg_locs(a).emis_tau.emis_uncert;
-                beg_nei_emis(a) = beg_locs(a).emis_tau.nei_emis;
-                end_sat_emis(a) = end_locs(a).emis_tau.emis;
-                end_sat_errors(a) = end_locs(a).emis_tau.emis_uncert;
-                end_nei_emis(a) = end_locs(a).emis_tau.nei_emis;
+            if numel(loc_inds) > 1
+                allowed_time_periods = {'beginning','end','both'};
+                plot_time_period = ask_multichoice('Which time period(s) to plot?', allowed_time_periods, 'list', true);
+                plot_beginning = any(strcmpi(plot_time_period, {'beginning','both'}));
+                plot_end = any(strcmpi(plot_time_period, {'end','both'}));
+                time_inds = [plot_beginning, plot_end];
+            else
+                time_inds = true(1,2);
             end
             
-            plot_data = [];
-            legend_strings = {};
-            if plot_beginning
-                plot_data = cat(2, plot_data, beg_sat_emis, beg_nei_emis);
-                legend_strings = cat(2, legend_strings, {'BEHR (2005)', 'NEI (2005)'});
-            end
-            if plot_end
-                plot_data = cat(2, plot_data, end_sat_emis, end_nei_emis);
-                legend_strings = cat(2, legend_strings, {'BEHR (2012)', 'NEI (2012)'});
+            
+            
+            [changes, loc_names] = misc_emissions_analysis.collect_changes('beginning','end','UMTWRFS','UMTWRFS','loc_inds',loc_inds);
+            if numel(loc_inds) == 1
+                % If only plotting one location, then we can split up the
+                % bars more nicely than if plotting multiple locations
+                plot_data = cat(2, changes.emis', changes.nei_emis');
+                legend_str = {'Top-down (BEHR)','Bottom-up (NEI)'};
+                legend_inds = true(size(legend_str));
+                xticklabels =  {'2005,07','2012-13'};
+                axis_opts = {'xticklabels', xticklabels(time_inds), 'fontsize',14};
+            else
+                plot_data = cat(2, changes.emis(:,time_inds), changes.nei_emis(:,time_inds));
+                legend_inds = [time_inds(1), time_inds(2), time_inds(1), time_inds(2)]; % needed for the legend string
+                legend_str = {'05-07 Top-down (BEHR)','12-13 Top-down (BEHR)','05-07 Bottom-up (NEI)','12-13 Bottom-up (NEI)'};
+                axis_opts = {'xticklabels', loc_names', 'xticklabelrotation', 30, 'fontsize', 14};
             end
             
             figure;
             bar(plot_data);
+            set(gca, axis_opts{:});
+            legend(legend_str{legend_inds});
             ylabel('NO Emissions (Mg h^{-1})');
-            %bar_errors([sat_emis, nei_emis], [sat_errors, nei_errors]);
-            set(gca,'xticklabel',names,'fontsize',16,'ygrid','on','xtickLabelRotation',-30);
-            legend(legend_strings{:});
+            
         end
         
         function plot_fits_interactive()
@@ -1556,6 +1540,83 @@ classdef misc_emissions_analysis
             set(gca,'XTickLabelRotation',30);
         end
         
+        function plot_emis_change_map(varargin)
+            default_differences = struct('emis_type', {'emis','nei_emis';'emis','nei_emis'},...
+                                         'time_period', {'beginning', 'beginning'; 'end', 'end'},...
+                                         'days_of_week', {'UMTWRFS', 'UMTWRFS'; 'UMTWRFS', 'UMTWRFS'});
+            
+            p = inputParser;
+            p.addParameter('differences',default_differences);
+            p.addParameter('loc_types','');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_types = pout.loc_types;
+            differences = pout.differences;
+            
+            allowed_loc_types = {'Cities','PowerPlants'};
+            if ~ischar(loc_types) && ~iscellstr(loc_types)
+                E.badinput('"loc_types" must be a character array or cell array of character arrays')
+            elseif ~isempty(loc_types)
+                if ~all(ismember(loc_types, allowed_loc_types))
+                    E.badinput('"loc_types" must be one or more of the following: %s', strjoin(allowed_loc_types, ', '));
+                end
+            else
+                loc_types = ask_multiselect('Select one or more site types to plot:', allowed_loc_types);
+            end
+            
+            n_differences = size(differences, 1);
+            plot_loc_inds = misc_emissions_analysis.loc_types_to_inds(loc_types{:});
+            % Add an extra point to the corners so that the last point
+            % we actually plot does not overlap the first one, but all
+            % points are evenly spaced around the circle.
+            plot_corners = fliplr(linspace(-180,180,n_differences+1));
+            
+            map_fig=figure;
+            map_ax = gca;
+            state_outlines('k','not','ak','hi');
+            max_diff = 0;
+            for i_change = 1:n_differences
+                [this_change, loc_names, loc_coords] = misc_emissions_analysis.collect_changes(differences(i_change,1).time_period, differences(i_change,2).time_period, differences(i_change,1).days_of_week, differences(i_change,2).days_of_week, 'loc_inds', plot_loc_inds);
+                % for now, assume no uncertainty in the NEI emissions.
+                this_change.nei_emis_sd = zeros(size(this_change.emis_sd));
+                
+                emis_field_1 = differences(i_change,1).emis_type;
+                sd_field_1 = sprintf('%s_sd', emis_field_1);
+                emis_field_2 = differences(i_change,2).emis_type;
+                sd_field_2 = sprintf('%s_sd', emis_field_2);
+                
+                emis_values = [this_change.(emis_field_1)(:,1), this_change.(emis_field_2)(:,2)];
+                sd_values = [this_change.(sd_field_1)(:,1), this_change.(sd_field_2)(:,2)];
+
+                max_diff = ceil(max(max_diff, max(abs(diff(emis_values, [], 2)))));
+                
+                this_series = misc_emissions_analysis.create_map_series(emis_values, sd_values, this_change.n_dofs, this_change.r2, loc_coords, plot_corners(i_change), loc_names);
+                if plot_corners(i_change) == min(abs(plot_corners))
+                    % Only include names on the right most point.
+                    misc_emissions_analysis.plot_map_series(map_ax, this_series, 'include_names');
+                else
+                    misc_emissions_analysis.plot_map_series(map_ax, this_series);
+                end
+                
+                % Make box plots as well
+                figure;
+                boxplot(diff(emis_values,[],2));
+                set(gca,'fontsize',16,'xticklabels',{''});
+                title_emis_types = struct('emis', 'BEHR', 'nei_emis', 'NEI');
+                title(sprintf('%s (%s, %s) - %s (%s, %s)', title_emis_types.(emis_field_2), differences(i_change,2).time_period, differences(i_change,2).days_of_week, title_emis_types.(emis_field_1), differences(i_change,1).time_period, differences(i_change,1).days_of_week));
+                ylabel('\Delta E_{NO2} (Mg NO_x h^{-1})');
+            end
+            
+            figure(map_fig);
+            cb = colorbar;
+            cb.Label.String = '\Delta E_{NO2} (Mg NO_x h^{-1}, NEI - BEHR)';
+            colormap(blue_red_only_cmap);
+            caxis([-max_diff max_diff]);
+            set(gca,'fontsize',16);
+        end
+        
         function plot_lifetime_change_map(varargin)
             % Makes a scatter plot of changes in lifetime, both 2012-2013
             % minus 2005-2007 and weekend minus weekday, plotted on a map.
@@ -1599,9 +1660,9 @@ classdef misc_emissions_analysis
             beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', weekdays, weekends, 'loc_types', loc_types);
             end_changes = misc_emissions_analysis.collect_changes('end', 'end', weekdays, weekends, 'loc_types', loc_types);
             
-            decadal_series = misc_emissions_analysis.lifetime_map_series(decadal_changes.tau, decadal_changes.tau_sd, decadal_changes.n_dofs, decadal_changes.r2, loc_coords, 'top', loc_names);
-            beginning_series = misc_emissions_analysis.lifetime_map_series(beginning_changes.tau, beginning_changes.tau_sd, beginning_changes.n_dofs, beginning_changes.r2, loc_coords, 'bottom-left', loc_names);
-            end_series = misc_emissions_analysis.lifetime_map_series(end_changes.tau, end_changes.tau_sd, end_changes.n_dofs, end_changes.r2, loc_coords, 'bottom-right', loc_names);
+            decadal_series = misc_emissions_analysis.create_map_series(decadal_changes.tau, decadal_changes.tau_sd, decadal_changes.n_dofs, decadal_changes.r2, loc_coords, 'top', loc_names);
+            beginning_series = misc_emissions_analysis.create_map_series(beginning_changes.tau, beginning_changes.tau_sd, beginning_changes.n_dofs, beginning_changes.r2, loc_coords, 'bottom-left', loc_names);
+            end_series = misc_emissions_analysis.create_map_series(end_changes.tau, end_changes.tau_sd, end_changes.n_dofs, end_changes.r2, loc_coords, 'bottom-right', loc_names);
             
             figure;
             state_outlines('k','not','ak','hi');
@@ -1821,20 +1882,28 @@ classdef misc_emissions_analysis
         function plot_map_series(ax, map_series, varargin)
             ax.NextPlot = 'add';
             for i=1:numel(map_series)
-                scatter(ax, map_series(i).lon, map_series(i).lat, [], map_series(i).change, map_series(i).symbol{:});
+                % Default scatter size is 36. Double the point size for
+                % legibility.
+                scatter(ax, map_series(i).lon, map_series(i).lat, 72, map_series(i).change, map_series(i).symbol{:});
             end
             
             
             if ismember(varargin, 'include_names')
-                lons = veccat(map_series.lon);
-                lats = veccat(map_series.lat) - 0.5; % -0.5 temp hack to put the name in the middle of the triangles
+                % Put the name further out along the same vector from the
+                % center as the point being plotted.
+                point_lons = veccat(map_series.lon);
+                point_lats = veccat(map_series.lat);
+                center_lons = veccat(map_series.center_lon);
+                center_lats = veccat(map_series.center_lat);
+                dlon = point_lons - center_lons;
+                dlat = point_lats - center_lats;
                 names = veccat(map_series.names);
                 % ensure all given as column vectors
-                text(lons(:),lats(:),names(:));
+                text(center_lons(:) + 1.5*dlon(:),center_lats(:)+1.5*dlat(:),names(:),'parent',ax);
             end
         end
         
-        function plot_series = lifetime_map_series(values, value_sds, value_dofs, value_r2, coords, corner, loc_names)
+        function plot_series = create_map_series(values, value_sds, value_dofs, value_r2, coords, corner, loc_names)
             % Helper function to set up the series with the right
             % coordinates and symbols based on their confidence and r2
             % values. "corner" should be a string indicating
@@ -1850,17 +1919,23 @@ classdef misc_emissions_analysis
             
             % Go ahead and compute the offsets for the corner now
             offset_distance = 0.5; % the triangle's corners will be this distance from the center
-            switch lower(corner)
-                case 'center'
-                    offset = [0 0];
-                case 'top'
-                    offset = offset_distance * [cosd(90), sind(90)];
-                case 'bottom-left'
-                    offset = offset_distance * [cosd(-150), sind(-150)];
-                case 'bottom-right'
-                    offset = offset_distance * [cosd(-30), sind(-30)];
-                otherwise
-                    E.badinput('CORNER must be one of the strings "center", "top", "bottom-left", or "bottom-right"');
+            if isnumeric(corner)
+                offset = offset_distance * [cosd(corner), sind(corner)];
+            else
+                switch lower(corner)
+                    case 'center'
+                        offset = [0 0];
+                    case 'top'
+                        offset = offset_distance * [cosd(90), sind(90)];
+                    case 'bottom-left'
+                        offset = offset_distance * [cosd(-150), sind(-150)];
+                    case 'bottom-right'
+                        offset = offset_distance * [cosd(-30), sind(-30)];
+                    case 'bottom'
+                        offset = offset_distance * [cosd(-90), sind(-90)];
+                    otherwise
+                        E.badinput('CORNER must be one of the strings "center", "top", "bottom, "bottom-left", or "bottom-right"');
+                end
             end
             
             r2_criterion = 0.9;
@@ -1897,6 +1972,8 @@ classdef misc_emissions_analysis
             
             plot_series = struct('lon', default_mat, 'lat', default_mat, 'change', default_mat, 'percent_change', default_mat, 'symbol', symbols, 'names', {{}});
             for i_series = 1:numel(plot_series)
+                plot_series(i_series).center_lon = coords.lon(xx_cell{i_series});
+                plot_series(i_series).center_lat = coords.lat(xx_cell{i_series});
                 plot_series(i_series).lon = coords.lon(xx_cell{i_series}) + offset(1);
                 plot_series(i_series).lat = coords.lat(xx_cell{i_series}) + offset(2);
                 
