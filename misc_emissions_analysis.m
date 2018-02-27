@@ -40,6 +40,10 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRFData');
         end
         
+        function value = wrf_vcd_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.emis_wrf_dir, 'WRF-VCDs');
+        end
+        
         function filename = avg_file_name(year_in, days_of_week)
             years_str = strjoin(sprintfmulti('%d', year_in),'_');
             filename = sprintf('Summer_avg_%s_%s.mat', years_str, days_of_week);
@@ -53,11 +57,17 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = line_density_file_name(start_date, end_date, by_sectors, winds_op, winds_cutoff, loc_inds, days_of_week)
+        function filename = line_density_file_name(start_date, end_date, by_sectors, use_wrf, winds_op, winds_cutoff, loc_inds, days_of_week)
             if by_sectors
                 sectors_string = 'sectors';
             else
                 sectors_string = 'rotated';
+            end
+            
+            if use_wrf
+                data_string = 'WRF';
+            else
+                data_string = 'BEHR';
             end
             
             allowed_winds_ops = {'lt', 'gt'};
@@ -76,11 +86,17 @@ classdef misc_emissions_analysis
             end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_%s_%s_%s_no2_%sto%s_%s.mat', sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
+            filename = sprintf('%s_%s_%s_%s_no2_%sto%s_%s.mat', data_string, sectors_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
-        function filename = fits_file_name(start_date, end_date, loc_inds, days_of_week)
+        function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week)
+            if using_wrf
+                product_string = 'WRF';
+            else
+                product_string = 'BEHR';
+            end
+            
             if isempty(loc_inds)
                 locs_string = 'locsall';
             else
@@ -88,9 +104,11 @@ classdef misc_emissions_analysis
             end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('site_emg_fits_%s_%sto%s_%s.mat', locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
+            filename = sprintf('%s_emg_fits_%s_%sto%s_%s.mat', product_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.emg_fit_dir, filename);
         end
+        
+        
         
         function filename = wrf_grid_area_file()
             filename = fullfile(misc_emissions_analysis.emis_wrf_dir, 'wrfgridarea_d01');
@@ -126,7 +144,7 @@ classdef misc_emissions_analysis
                 G.addReqCommits(behr_paths.utils, 'afd2522');
                 % checkState() by default will error if the repositories
                 % are not in the correct state.
-                G.checkState()
+                G.checkState();
             end
         end
         
@@ -211,7 +229,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function [xx, yy] = find_indicies_in_loc_radius(loc, lon, lat, radius)
+        function [xx, yy] = find_indicies_in_box_around_point(loc, lon, lat, radius)
             % LOC must be a scalar element of the locations structure, LON
             % and LAT must be 2D arrays of longitude and latitude
             % coordinates for an NO2 average or similar 2D field. RADIUS
@@ -222,13 +240,20 @@ classdef misc_emissions_analysis
             if ~exist('radius', 'var')
                 radius = 0;
             end
-            
-            r = sqrt((lon - loc.Longitude).^2 + (lat - loc.Latitude).^2);
-            [~, i_min] = min(r(:));
-            [xx, yy] = ind2sub(size(lon), i_min); 
+             
+            [xx, yy] = misc_emissions_analysis.find_lat_lon_index(loc.Longitude, loc.Latitude, lon, lat);
             
             xx = (xx - radius):(xx + radius);
             yy = (yy - radius):(yy + radius);
+        end
+        
+        function [xx, radius] = find_indices_in_radius_around_loc(loc, lon, lat)
+            % The Radius field is a carry over from Russell et al. 2012.
+            % Now we use the boxes defined for the EMG fitting for
+            % consistency.
+            radius = mean(loc.BoxSize(3:4));
+            r = sqrt((lon - loc.Longitude).^2 + (lat - loc.Latitude).^2);
+            xx = r < radius;
         end
         
         function [wrf_files, F] = closest_wrf_file_in_time(date_in, F)
@@ -260,7 +285,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function wind_logical = set_wind_conditions(location, speed_cutoff, winds_op)
+        function wind_logical = set_wind_conditions(location, speed_cutoff, winds_op, wind_reject_field)
             E = JLLErrors;
             if ~isstruct(location) || ~isscalar(location) || any(~isfield(location, {'ShortName', 'WindDir', 'WindSpeed'}))
                 E.badinput('LOCATION must be a scalar structure with fields "ShortName", "WindDir", and "WindSpeed"')
@@ -273,6 +298,14 @@ classdef misc_emissions_analysis
             allowed_fast_slow = {'lt', 'gt'};
             if ~ismember(winds_op, allowed_fast_slow)
                 E.badinput('WINDS_OP must be one of: %s', strjoin(allowed_fast_slow));
+            end
+            
+            if ~exist('wind_reject_field','var') || isempty(wind_reject_field)
+                wind_reject_field = 'WindRejects';
+            elseif ~ischar(wind_reject_field)
+                E.badinput('WIND_REJECT_FIELD must be a character array');
+            elseif ~isfield(location, wind_reject_field)
+                E.badinput('The WIND_REJECT_FIELD "%s" is not a field in LOCATION', wind_reject_field);
             end
             
             wind_logical = true(size(location.WindDir));
@@ -288,8 +321,8 @@ classdef misc_emissions_analysis
             % than the second we use the typical "&" operation, otherwise
             % we use "|" (or) since e.g. all angles between +170 and -170
             % would be >170 or <-170.
-            for a=1:size(location.WindRejects,1)
-                wind_dir_range = location.WindRejects(a,:);
+            for a=1:size(location.(wind_reject_field),1)
+                wind_dir_range = location.(wind_reject_field)(a,:);
                 if wind_dir_range(1) < wind_dir_range(2)
                     xx = location.WindDir >= wind_dir_range(1) & location.WindDir < wind_dir_range(2);
                 else
@@ -451,41 +484,51 @@ classdef misc_emissions_analysis
             loc_inds = find(strcmp(site_type, loc_types));
         end
         
-        function loc_inds = get_loc_inds_interactive()
+        function loc_inds = get_loc_inds_interactive(varargin)
+            p = advInputParser;
+            p.addFlag('one_loc');
+            p.parse(varargin{:});
+            pout = p.AdvResults;
+            
+            one_loc_flag = pout.one_loc;
+            
             locs = misc_emissions_analysis.read_locs_file();
             loc_names = {locs.ShortName};
-            loc_inds = ask_multiselect('Choose the locations to use', loc_names, 'returnindex', true);
+            if ~one_loc_flag
+                loc_inds = ask_multiselect('Choose the locations to use', loc_names, 'returnindex', true);
+            else
+                loc_inds = ask_multichoice('Choose the location to use', loc_names, 'returnindex', true);
+            end
         end
         
         function [changes, loc_names, loc_coords] = collect_changes(first_time_period, second_time_period, first_weekdays, second_weekdays, varargin)
             
             p = inputParser;
-            p.addParameter('loc_types',{'Cities','PowerPlants','RuralAreas'});
             p.addParameter('loc_inds', []);
+            p.addParameter('include_vcds', true);
+            p.addParameter('use_wrf', false);
+            p.addParameter('file_loc_inds', 1:70); % location indicies in the file name
             p.parse(varargin{:});
             pout = p.Results;
             
-            allowed_loc_types = pout.loc_types;
             user_loc_inds = pout.loc_inds;
+            include_vcds = pout.include_vcds;
+            use_wrf = pout.use_wrf;
+            file_loc_inds = pout.file_loc_inds;
             
             [first_dates_st, first_dates_end] = misc_emissions_analysis.select_start_end_dates(first_time_period);
             [second_dates_st, second_dates_end] = misc_emissions_analysis.select_start_end_dates(second_time_period);
             
             % As of 13 Feb 2018, all of the fits files are for the first 70
             % locations, which misses Valmy, but I can fix that when I
-            % rerun for the 3 year data anyway.
-            loc_inds = 1:70;
-            first_locs = load(misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), loc_inds, first_weekdays));
-            second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), loc_inds, second_weekdays));
+            % rerun for the 3 year data anyway. Thus we only need to
+            % override the default value if the fits files don't cover
+            % sites 1-70.
+            first_locs = load(misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), use_wrf, file_loc_inds, first_weekdays));
+            second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), use_wrf, file_loc_inds, second_weekdays));
             
-            xx_type = ismember({first_locs.locs.SiteType}, allowed_loc_types);
-            if ~isempty(user_loc_inds)
-                xx_user_loc = false(size(xx_type));
-                xx_user_loc(user_loc_inds) = true;
-                xx_type = xx_type & xx_user_loc;
-            end
-            first_locs.locs(~xx_type) = [];
-            second_locs.locs(~xx_type) = [];
+            first_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(first_locs.locs, user_loc_inds);
+            second_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(second_locs.locs, user_loc_inds);
             loc_names = {first_locs.locs.Location};
             loc_coords.lon = [first_locs.locs.Longitude]';
             loc_coords.lat = [first_locs.locs.Latitude]';
@@ -501,9 +544,6 @@ classdef misc_emissions_analysis
             for i_fn = 1:numel(all_fns)
                 changes.(all_fns{i_fn}) = default_mat;
                 for i_loc = 1:numel(first_locs.locs)
-                    if ~ismember(first_locs.locs(i_loc).SiteType, allowed_loc_types)
-                        continue
-                    end
                     
                     first_value = find_substruct_field(first_locs.locs(i_loc), all_fns{i_fn});
                     second_value = find_substruct_field(second_locs.locs(i_loc), all_fns{i_fn});
@@ -518,6 +558,14 @@ classdef misc_emissions_analysis
                 end
             end
             
+            if include_vcds
+                changes.vcds = default_mat;
+                changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
+                changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
+            end
+            
+            changes.Location = {first_locs.locs.Location}';
+            changes.ShortName = {first_locs.locs.ShortName}';
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -547,20 +595,21 @@ classdef misc_emissions_analysis
                 % should be the last group of upper case characters before
                 % the file extension, and some combination of U, M, T, W,
                 % R, F, S.
-                is_sectors_vec = regcmp(files, 'sectors');
-                winds_strings = regexp(files, 'winds-(lt|gt)\d', 'match', 'once');
+                [is_sectors_vec, winds_strings, is_wrf_vec, days_of_week] = misc_emissions_analysis.extract_info_from_file_names(files);
                 
                 dow_check_fxn = @(d, d1) isequal(d,d1);
-                days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
                 
                 if any(is_sectors_vec) && ~all(is_sectors_vec)
                     E.badinput('Some, but not all, of the files selected are by sectors');
+                elseif any(is_sectors_vec) && ~all(is_sectors_vec)
+                    E.badinput('Some, but not all, of the files selected are for BEHR data (as opposed to WRF)');
                 elseif ~all(strcmp(winds_strings, winds_strings{1}))
                     E.badinput('Some, but not all, of the files selected are using all winds');
                 elseif ~all(cellfun(@(x) dow_check_fxn(x, days_of_week{1}), days_of_week))
                     E.badinput('Not all of the files are for the same days of week (%s)', strjoin(days_of_week,' vs. '));
                 else
                     by_sectors = all(is_sectors_vec);
+                    wrf_bool = all(is_wrf_vec);
                     winds_op = regexp(winds_strings{1}, '(?<=winds\-)(lt|gt)','match','once');
                     winds_cutoff = str2double(regexp(winds_strings{1}, '(?<=winds\-[lg]t)\d','match','once'));
                     days_of_week = days_of_week{1};
@@ -605,7 +654,7 @@ classdef misc_emissions_analysis
             LD_all.locs = LD_all.locs(cut_down_vec);
             all_loc_inds = misc_emissions_analysis.find_loc_struct_inds(LD_all.locs);
             
-            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, winds_op, winds_cutoff, all_loc_inds, days_of_week);
+            new_save_name = misc_emissions_analysis.line_density_file_name(LD_all.dvec(1), LD_all.dvec(end), by_sectors, wrf_bool, winds_op, winds_cutoff, all_loc_inds, days_of_week);
             if exist(new_save_name, 'file')
                 if ~ask_yn(sprintf('%s exists. Overwrite? ', new_save_name))
                     return
@@ -747,7 +796,7 @@ classdef misc_emissions_analysis
                     % for that swath
                     fprintf('  %s, swath %d: Averaging to locations\n', datestr(dvec(d)), a);
                     for l=1:numel(locs)
-                        [xx,yy] = misc_emissions_analysis.find_indicies_in_loc_radius(locs(l), wrf_lon, wrf_lat, 1);
+                        [xx,yy] = misc_emissions_analysis.find_indicies_in_box_around_point(locs(l), wrf_lon, wrf_lat, 1);
                         Ubar = nanmean(reshape(U(xx,yy),[],1));
                         Vbar = nanmean(reshape(V(xx,yy),[],1)); 
                         
@@ -823,6 +872,7 @@ classdef misc_emissions_analysis
             p.addParameter('days_of_week', 'UMTWRFS');
             p.addParameter('winds_op', 'gt')
             p.addParameter('winds_cutoff', 3);
+            p.addParameter('use_wrf', false);
             
             p.parse(varargin{:});
             pout = p.AdvResults;
@@ -835,6 +885,7 @@ classdef misc_emissions_analysis
             days_of_week = pout.days_of_week;
             winds_op = pout.winds_op;
             winds_cutoff = pout.winds_cutoff;
+            wrf_bool = pout.use_wrf;
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
                 E.badinput('The parameter "loc_indicies" must be a numeric array with all values >= 1')
@@ -848,7 +899,7 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, winds_op, winds_cutoff, loc_indicies, days_of_week);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, wrf_bool, winds_op, winds_cutoff, loc_indicies, days_of_week);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -863,10 +914,19 @@ classdef misc_emissions_analysis
  
             % Find the list of BEHR files between the start and end dates
             [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily');
+            wind_reject_field = '';
+            if wrf_bool
+                for i_file = 1:numel(behr_files)
+                    behr_files(i_file).name = strrep(behr_files(i_file).name, 'OMI', 'WRF');
+                end
+                behr_dir = misc_emissions_analysis.wrf_vcd_dir;
+                wind_reject_field = 'WRFWindRejects';
+            end
             
             % Load the winds file with up-to-date box sizes and wind
             % sectors to reject
             winds = misc_emissions_analysis.load_winds_file(start_date, end_date);
+            winds.locs = misc_emissions_analysis.append_new_spreadsheet_fields(winds.locs);
             
             % Check that the dates match up with what we're expecting (it
             % should because we load the file with those dates)
@@ -923,7 +983,7 @@ classdef misc_emissions_analysis
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
                 else
-                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), winds_cutoff, winds_op);
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), winds_cutoff, winds_op, wind_reject_field);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, 'days_of_week', days_of_week);
                 end
@@ -950,6 +1010,7 @@ classdef misc_emissions_analysis
             p.addParameter('loc_indicies', []);
             p.addParameter('add_nei', true);
             p.addParameter('days_of_week', 'UMTWRFS');
+            p.addParameter('use_wrf', false);
             p.addParameter('do_overwrite', -1);
             % by default if it doesn't get it the second time, then it's
             % probably just going to randomly sample until it happens to
@@ -966,6 +1027,7 @@ classdef misc_emissions_analysis
             loc_indicies = pout.loc_indicies;
             add_nei = pout.add_nei;
             days_of_week = pout.days_of_week;
+            wrf_bool = pout.use_wrf;
             do_overwrite = pout.do_overwrite;
             max_fit_attempts = pout.max_fit_attempts;
             fatal_if_cannot_fit = pout.fatal_fit_fail;
@@ -992,7 +1054,7 @@ classdef misc_emissions_analysis
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, loc_indicies, days_of_week);
+            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_indicies, days_of_week);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -1009,7 +1071,7 @@ classdef misc_emissions_analysis
             % want the sectors line densities (first false) and usually
             % want the file with winds greater than 3 m/s. This may change
             % if I do the slow winds convolution approach.
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, 'gt', 3, loc_indicies, days_of_week);
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, wrf_bool, 'gt', 3, loc_indicies, days_of_week);
             if ~exist(ldens_file, 'file')
                 [~,ldens_basename] = fileparts(ldens_file);
                 % Use regular error function to have more control over the
@@ -1026,7 +1088,7 @@ classdef misc_emissions_analysis
             end
             
             if ~isempty(loc_indicies)
-                locs = line_densities.locs(loc_indicies);
+                locs = misc_emissions_analysis.cutdown_locs_by_index(line_densities.locs, loc_indicies); 
             else
                 locs = line_densities.locs;
             end
@@ -1089,7 +1151,13 @@ classdef misc_emissions_analysis
                     % intervals as the uncertainty. We need to restrict the
                     % winds to what should have been used to calculate the line
                     % densities.
-                    wind_logical = misc_emissions_analysis.set_wind_conditions(locs(a), misc_emissions_analysis.em_wind_spd, misc_emissions_analysis.em_wind_mode);
+                    [ ~, winds_strings ] = misc_emissions_analysis.extract_info_from_file_names(ldens_file);
+                    % Assuming that "winds_strings" is of the form
+                    % winds-lt# or winds-gt#, then
+                    % winds_strings(end-2:end-1) will give the wind mode
+                    % (less than or greater than) and converting
+                    % winds_strings(3) to a number will give the speed.
+                    wind_logical = misc_emissions_analysis.set_wind_conditions(locs(a), str2double(winds_strings(end)), winds_strings(end-2:end-1));
                     emis_tau = misc_emissions_analysis.calculate_emission_lifetime(locs(a).no2_sectors, locs(a).fit_info, locs(a).WindSpeed(wind_logical));
                     
                     if add_nei
@@ -1178,7 +1246,7 @@ classdef misc_emissions_analysis
             grid_del = abs(diff(avgs.monthly.lon(1,1:2)));
             radius_deg = locs(i_loc).Radius / 110;
             n_cells = ceil(radius_deg * 3 / grid_del);
-            [yy, xx] = misc_emissions_analysis.find_indicies_in_loc_radius(locs(i_loc), avgs.monthly.lon, avgs.monthly.lat, n_cells);
+            [yy, xx] = misc_emissions_analysis.find_indicies_in_box_around_point(locs(i_loc), avgs.monthly.lon, avgs.monthly.lat, n_cells);
             
             loc_longrid = avgs.monthly.lon(yy,xx);
             loc_latgrid = avgs.monthly.lat(yy,xx);
@@ -1413,18 +1481,21 @@ classdef misc_emissions_analysis
             [beg_start_date, beg_end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
             [end_start_date, end_end_date] = misc_emissions_analysis.select_start_end_dates('end');
             
+            
+            
             % Load the weekday, weekend, and all day fits files. Cut out
             % the memory intensive parts of the line density sub structure
             % to save memory.
-            loc_inds = 1:70;
+            [use_wrf, loc_inds] = misc_emissions_analysis.ask_to_use_wrf();
+            
             days_of_week = {'UMTWRFS', 'TWRF', 'US'};
             loc_prototype = struct('Location', '', 'x', [], 'linedens', [], 'emgfit', [], 'r2', []);
             beg_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
             end_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
             
             for i_dow = 1:numel(days_of_week)
-                beg_fits = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, loc_inds, days_of_week{i_dow}));
-                end_fits = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, loc_inds, days_of_week{i_dow}));
+                beg_fits = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, use_wrf, loc_inds, days_of_week{i_dow}));
+                end_fits = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, use_wrf, loc_inds, days_of_week{i_dow}));
                 for i_loc = 1:numel(beg_fits.locs)
                     beg_locs(i_loc, i_dow) = copy_structure_fields(beg_fits.locs(i_loc), loc_prototype, 'substructs');
                     end_locs(i_loc, i_dow) = copy_structure_fields(end_fits.locs(i_loc), loc_prototype, 'substructs');
@@ -1518,6 +1589,8 @@ classdef misc_emissions_analysis
                 loc_types = ask_multiselect('Select one or more site types to plot:', allowed_loc_types);
             end
             
+            error('Change in behavior: Need to convert loc_types to location indicies');
+            
             weekdays = 'TWRF';
             weekends = 'US';
             alldays = 'UMTWRFS';
@@ -1543,22 +1616,47 @@ classdef misc_emissions_analysis
         end
         
         function plot_lifetime_vs_mass(varargin)
+            % Plot lifetimes vs. some measure of NOx mass for each location
+            % separately. Parameters:
+            %   'loc_inds' - numeric indicies of which locations to
+            %   include.
+            %
+            %   'mass_value' - character array, either 'a' or 'vcds'.
+            %   'a' uses the fitting parameter a, 'vcds' uses the
+            %   average summer columns within the box width of the site.
+            E = JLLErrors;
+            
             p = inputParser;
             p.addParameter('loc_inds', nan);
+            p.addParameter('mass_value', '');
+            p.addParameter('use_wrf', nan);
             
             p.parse(varargin{:});
             pout = p.Results;
-            
+                        
             loc_inds = pout.loc_inds;
             if isnan(loc_inds)
                 loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
             end
             
+            mass_value = pout.mass_value;
+            allowed_mass_vals = {'a','vcds'};
+            if isempty(mass_value)
+                mass_value = ask_multichoice('Which quantity to use for mass of NOx?', allowed_mass_vals, 'list', true);
+            elseif ~ismember(mass_value, allowed_mass_vals)
+                E.badinput('MASS_VALUE must be one of: %s', strjoin(allowed_mass_vals, ', '));
+            end
+            
+            use_wrf = pout.use_wrf;
+            [use_wrf, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf);
+            
             locs = misc_emissions_analysis.read_locs_file();
             
-            decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds);
-            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds);
-            end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds);
+            vcds_bool = strcmpi(mass_value, 'vcds');
+            decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool);
+            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool);
+            end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool);
+            
             
             decadal_style = struct('marker', {'o','x'}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
             beginning_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {'c','m'},'markersize',10);
@@ -1567,19 +1665,89 @@ classdef misc_emissions_analysis
                 l = gobjects(6,1);
                 figure;
                 ax = gca;
-                l(1:2) = plot_changes(decadal_changes.a(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'parent', ax);
-                l(3:4) = plot_changes(beginning_changes.a(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'parent', ax);
-                l(5:6) = plot_changes(end_changes.a(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'parent', ax);
+                l(1:2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'parent', ax);
+                l(3:4) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'parent', ax);
+                l(5:6) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'parent', ax);
                 legend(l, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
                 set(ax,'fontsize',16);
-                xlabel('a (mol NO_2)');
+                if vcds_bool
+                    xlabel('Avg. NO_2 VCD (molec. cm^2)');
+                else
+                    xlabel('a (mol NO_2)');
+                end
                 ylabel('\tau (hours)');
                 title(locs(loc_inds(i_loc)).Location);
             end
         end
+        
+        function plot_wrf_emissions(varargin)
+            E = JLLErrors; 
+            p = inputParser;
+            p.addParameter('locs',nan); % default value of nan instead of empty because often I use empty to mean do not filter locations, but here nan means I need to ask about that
+            p.addParameter('years',[]);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            locs = pout.locs;
+            emis_years = pout.years;
+            
+            if isnan(locs)
+                if ask_yn('Plot around specific locations?')
+                    locs = misc_emissions_analysis.get_loc_inds_interactive();
+                else
+                    locs = [];
+                end
+            end
+            
+            if isnumeric(locs)
+                loc_inds = locs;
+                locs = misc_emissions_analysis.read_locs_file();
+                locs = locs(loc_inds);
+            elseif ~isstruct(locs)
+                E.badinput('"loc" must be a scalar number or structure');
+            end
+            
+            if isempty(emis_years)
+                emis_years = ask_number('Enter the years to map (separated by space if more than 1)', 'testfxn', @misc_emissions_analysis.is_year_valid, 'testmsg', 'Only years between 2005 and 2014 valid');
+            elseif ~isnumeric(emis_years) || ~misc_emissions_analysis.is_year_valid(emis_years)
+                [~, valid_years_str] = misc_emissions_analysis.is_year_valid([]);
+                E.badinput('"emis_years" must be numeric and in years %s', valid_years_str);
+            end
+            
+            [avg_nei_emissions, nei_lon, nei_lat] = misc_emissions_analysis.load_nei_by_year(emis_years);
+            
+            if isempty(locs)
+                figure;
+                pcolor(nei_lon, nei_lat, avg_nei_emissions);
+                shading flat
+                cb = colorbar;
+                cb.Label.String = 'NEI NO Emissions (Mg NO/hr)';
+                state_outlines('w');
+            else
+                % Need to convert the radius to degrees. Assume ~110 km per
+                % degree
+                km2deg = 1/110;
+                for i_loc = 1:numel(locs)
+                    [xx,yy] = misc_emissions_analysis.find_indices_box_by_loc_radius(locs(i_loc), locs(i_loc).Radius * km2deg * 3, nei_lon, nei_lat);
+                    figure;
+                    pcolor(nei_lon(xx,yy), nei_lat(xx,yy), avg_nei_emissions(xx,yy));
+                    line(locs(i_loc).Longitude, locs(i_loc).Latitude, 'color', 'w', 'marker', 'p');
+                    title(locs(i_loc).Location);
+                    cb = colorbar;
+                    cb.Label.String = 'NEI NO Emissions (Mg NO/hr)';
+                    state_outlines('w');
+                end
+            end
+            
+        end
     end
     
     methods(Static = true, Access = private)
+        function [bool, years_list] = is_year_valid(years_in)
+            bool = all(years_in == 2005 | (years_in >= 2007 & years_in <= 2009) | (years_in >= 2012 & years_in <= 2014));
+            years_list = '2005, 2007-09, 2012-14';
+        end
         
         function [first_time_period, second_time_period, first_weekdays, second_weekdays, loc_types, series_labels] = get_change_file_selection_input(varargin)
             allowed_change_types = {'decadal','weekend-weekday'};
@@ -1631,6 +1799,24 @@ classdef misc_emissions_analysis
             end
         end
         
+        function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week)
+            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
+            VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week));
+            lon_res = mean(diff(VCDs.daily.lon(1,:)));
+            lat_res = mean(diff(VCDs.daily.lat(:,1)));
+            if abs(lon_res - lat_res) > 1e-10
+                E.notimplemented('Different lon and lat resolutions');
+            end
+            avg_vcds = nan(size(locs));
+            for i_loc = 1:numel(locs)
+                % This will use the box width (from center to edge
+                % perpendicular to the wind direction) as the radius and
+                % find all grid points with centers within that radius.
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat);
+                avg_vcds(i_loc) = nanmean(VCDs.daily.no2(xx_radius));
+            end
+        end
         
         function plot_map_series(ax, map_series, varargin)
             ax.NextPlot = 'add';
@@ -1759,7 +1945,116 @@ classdef misc_emissions_analysis
                 E.badinput('DAYS_OF_WEEK must be a character array consisting only of the characters U, M, T, W, R, F, or S');
             end
         end
+        
+        function earth_area = calculate_total_omi_grid_area(lon, lat, resolution)
+            E = JLLErrors;
+            if numel(lon) ~= numel(lat)
+                E.badinput('LON and LAT must have the same number of elements');
+            end
+            if ~isscalar(resolution) || ~isnumeric(resolution)
+                E.badinput('RESOLUTION must be a scalar number');
+            end
+            
+            earth_area = nan(size(lon));
+            % The units of VCD are molec/cm^2, so we want area in cm^2.
+            % WGS84 is the reference used in GPS systems.
+            reference_ellip = referenceEllipsoid('wgs84','cm');
+            for i_pt = 1:numel(lon)
+                earth_area(i_pt) = areaquad(lat(i_pt)-resolution/2, lon(i_pt)-resolution/2, lat(i_pt)+resolution/2, lon(i_pt)+resolution/2, reference_ellip);
+            end
+        end
+        
+        function [xx,yy] = find_indices_box_by_loc_radius(location, radius, lon_grid, lat_grid )
+            % Convenience wrapper around find_indicies_in_box_around_point
+            % that converts a radius to a number of boxes.
+            
+            % Need to figure out the average grid spacing around the
+            % location. Check each of the four cardinal directions and
+            % average them.
+            [pt_ind(1), pt_ind(2)] = misc_emissions_analysis.find_lat_lon_index(location.Longitude, location.Latitude, lon_grid, lat_grid);
+            pt_moves = [-1 0; 1 0; 0 -1; 0 1];
+            grid_del = nan(size(pt_moves,1),1);
+            for i_pt = 1:size(pt_moves,1)
+                i1 = pt_ind(1);
+                j1 = pt_ind(2);
+                i2 = pt_ind(1) + pt_moves(1);
+                j2 = pt_ind(2) + pt_moves(2);
+                grid_del(i_pt) = sqrt((lon_grid(i1,j1) - lon_grid(i2,j2)).^2 + (lat_grid(i1,j1) - lat_grid(i2,j2)).^2);
+            end
+            
+            grid_del = nanmean(grid_del);
+            n_cells = ceil(radius / grid_del);
+            [xx, yy] = misc_emissions_analysis.find_indicies_in_box_around_point(location, lon_grid, lat_grid, n_cells);
+        end
+        
+        function [xx,yy] = find_lat_lon_index(lon_pt, lat_pt, lon_grid, lat_grid)
+            % Finds the index of the grid point closest to lon_pt and
+            % lat_pt
+            r = sqrt((lon_grid - lon_pt).^2 + (lat_grid - lat_pt).^2);
+            [~, i_min] = min(r(:));
+            [xx, yy] = ind2sub(size(lon_grid), i_min); 
+        end
+        
+        function locs = cutdown_locs_by_index(locs, loc_inds)
+            % Cuts down the structure LOCS to the locations specified by
+            % LOCS_INDS by matching the site names from LOCS against the
+            % location names in the structure read in from the spreadsheet.
+            
+            E = JLLErrors;
+            
+            locs_ss = misc_emissions_analysis.read_locs_file();
+            ss_names = {locs_ss(loc_inds).Location};
+            in_names = {locs.Location};
+            xx = ismember(in_names, ss_names);
+            if sum(xx) ~= numel(loc_inds)
+                E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
+            end
+            locs = locs(xx);
+        end
+        
+        function loc_inds = loc_types_to_inds(varargin)
+            locs = misc_emissions_analysis.read_locs_file();
+            loc_inds = false(size(locs));
+            for i_loc = 1:numel(locs)
+                loc_inds(i_loc) = ismember(locs(i_loc).SiteType, varargin);
+            end
+            loc_inds = find(loc_inds);
+        end
+        
+        function locs = append_new_spreadsheet_fields(locs)
+            % If I have added new values to the spreadsheet since the last
+            % time a particular step was run, this will ensure those values
+            % are includes in the locations structure given as input.
+            spreadsheet_locs = misc_emissions_analysis.read_locs_file();
+            locs = copy_structure_fields(spreadsheet_locs, locs, 'missing');
+        end
+        
+        
+        function [is_sectors_vec, winds_strings, is_wrf_vec, days_of_week] = extract_info_from_file_names(files)
+            E = JLLErrors;
+            if ~ischar(files) && ~iscellstr(files)
+                E.badinput('FILES must be a char array or cell array of such');
+            end
+            is_sectors_vec = regcmp(files, 'sectors');
+            winds_strings = regexp(files, 'winds-(lt|gt)\d', 'match', 'once');
+            is_wrf_vec = regcmp(files, '^WRF');
+            days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
+        end
+        
+        function [use_wrf, loc_inds] = ask_to_use_wrf(use_wrf)
+            % 26 Feb 2018: WRF line densities only completed for Chicago,
+            % so if using WRF line densities, we need to specify location
+            % indicies = 9 for the file name.
+            if nargin < 1 || isnan(use_wrf)
+                use_wrf = ask_yn('Use WRF line densities? (BEHR if no)');
+            end
+            
+            if use_wrf
+                loc_inds = 9;
+            else
+                loc_inds = 1:70;
+            end
+        end
     end
     
 end
-

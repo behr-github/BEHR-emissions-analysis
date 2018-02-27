@@ -41,6 +41,15 @@ for a=1:numel(sheets)
         raw(:,wind_reject_ind) = parse_wind_rejects(raw(:,wind_reject_ind), sheets{a});
     end
     
+    % Parse the WindRejects field so that it is an N-by-2 array giving each
+    % range to reject as a list of N ranges of wind headings, 
+    wrf_wind_reject_ind = strcmpi(header, 'WRFWindRejects');
+    if sum(wrf_wind_reject_ind) == 0
+        error('trend_locations:missing_category', 'The category "WRFWindRejects" is not present in the Excel file')
+    else
+        raw(:,wrf_wind_reject_ind) = parse_wind_rejects(raw(:,wrf_wind_reject_ind), sheets{a});
+    end
+    
     
     header{end+1} = 'SiteType';
     raw(:,end+1) = repmat({sheets{a}},size(raw,1),1);

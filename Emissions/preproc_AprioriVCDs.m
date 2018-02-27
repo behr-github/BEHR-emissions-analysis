@@ -104,6 +104,10 @@ end
 function fields = get_required_fields()
 behr_paths.SetPythonPath();
 fields = python2matlab(py.PSM_Main.behr_datasets('cvm'));
+% Date is needed by calc_line_density to pick day of week;
+% ViewingZenithAngle is needed by rotate_plume to remove grid cells at too
+% extreme a viewing angle. Swath is needed in psm_wrapper.
+fields = veccat(fields, {'Date', 'ViewingZenithAngle','Swath'},'column');
 end
 
 function save_name = make_save_name(curr_date, prof_mode, region)
