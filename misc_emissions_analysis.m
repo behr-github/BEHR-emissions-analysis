@@ -9,6 +9,11 @@ classdef misc_emissions_analysis
         % verification method, if it passes, this is set to true so that it
         % doesn't need to be checked again.
         git_check_complete = false;
+        
+        % These define which field in the locations spreadsheet/structure
+        % to use for which wind directions to reject
+        wind_reject_field_std = 'WindRejects';
+        wind_reject_field_wrf = 'WRFWindRejects';
     end
     
     methods(Static = true)
@@ -107,8 +112,6 @@ classdef misc_emissions_analysis
             filename = sprintf('%s_emg_fits_%s_%sto%s_%s.mat', product_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.emg_fit_dir, filename);
         end
-        
-        
         
         function filename = wrf_grid_area_file()
             filename = fullfile(misc_emissions_analysis.emis_wrf_dir, 'wrfgridarea_d01');
@@ -304,8 +307,8 @@ classdef misc_emissions_analysis
                 wind_reject_field = 'WindRejects';
             elseif ~ischar(wind_reject_field)
                 E.badinput('WIND_REJECT_FIELD must be a character array');
-            elseif ~isfield(location, wind_reject_field)
-                E.badinput('The WIND_REJECT_FIELD "%s" is not a field in LOCATION', wind_reject_field);
+            elseif ~isfield(location, wind_reject_field) && ~strcmpi(wind_reject_field, 'none')
+                E.badinput('The WIND_REJECT_FIELD "%s" is not a field in LOCATION and is not the string "none"', wind_reject_field);
             end
             
             wind_logical = true(size(location.WindDir));
@@ -321,15 +324,17 @@ classdef misc_emissions_analysis
             % than the second we use the typical "&" operation, otherwise
             % we use "|" (or) since e.g. all angles between +170 and -170
             % would be >170 or <-170.
-            for a=1:size(location.(wind_reject_field),1)
-                wind_dir_range = location.(wind_reject_field)(a,:);
-                if wind_dir_range(1) < wind_dir_range(2)
-                    xx = location.WindDir >= wind_dir_range(1) & location.WindDir < wind_dir_range(2);
-                else
-                    xx = location.WindDir >= wind_dir_range(1) | location.WindDir < wind_dir_range(2);
+            if ~strcmpi(wind_reject_field, 'none')
+                for a=1:size(location.(wind_reject_field),1)
+                    wind_dir_range = location.(wind_reject_field)(a,:);
+                    if wind_dir_range(1) < wind_dir_range(2)
+                        xx = location.WindDir >= wind_dir_range(1) & location.WindDir < wind_dir_range(2);
+                    else
+                        xx = location.WindDir >= wind_dir_range(1) | location.WindDir < wind_dir_range(2);
+                    end
+                    
+                    wind_logical(xx) = false;
                 end
-                
-                wind_logical(xx) = false;
             end
             
             % Handle wind speed filtering here
@@ -1691,6 +1696,8 @@ classdef misc_emissions_analysis
             p.addParameter('loc_inds', nan);
             p.addParameter('mass_value', '');
             p.addParameter('use_wrf', nan);
+            p.addParameter('single_plot', nan);
+            p.addParameter('days_of_week', '');
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -1711,6 +1718,29 @@ classdef misc_emissions_analysis
             use_wrf = pout.use_wrf;
             [use_wrf, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf);
             
+            single_plot_bool = pout.single_plot;
+            if isnan(single_plot_bool)
+                single_plot_bool = ask_yn('Plot all locations on a single plot?');
+            elseif ~isscalar(single_plot_bool) || ~islogical(single_plot_bool)
+                E.badinput('"single_plot" must be a scalar logical');
+            end
+            
+            days_of_week = pout.days_of_week; % only used in single plot mode
+            if single_plot_bool
+                allowed_dows = {'UMTWRFS','TWRF','US'};
+                if isempty(days_of_week)
+                    days_of_week = ask_multiselect('Choose which day-of-week subsets to include', allowed_dows);
+                elseif ~ismember(days_of_week, allowed_dows) && ~strcmpi(days_of_week, 'all')
+                    E.badinput('"days_of_week must be one of: "%s", or "all"', strjoin(allowed_dows, '", "'));
+                end
+                if strcmpi(days_of_week, 'all')
+                    days_of_week = allowed_dows;
+                elseif ischar(days_of_week)
+                    days_of_week = {days_of_week};
+                end
+            end
+            
+            
             locs = misc_emissions_analysis.read_locs_file();
             
             vcds_bool = strcmpi(mass_value, 'vcds');
@@ -1722,22 +1752,51 @@ classdef misc_emissions_analysis
             decadal_style = struct('marker', {'o','x'}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
             beginning_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {'c','m'},'markersize',10);
             end_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {[1 0.5 0], [0.5 0 0.5]},'markersize',10);
-            for i_loc = 1:numel(loc_inds)
-                l = gobjects(6,1);
-                figure;
-                ax = gca;
-                l(1:2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'parent', ax);
-                l(3:4) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'parent', ax);
-                l(5:6) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'parent', ax);
-                legend(l, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
-                set(ax,'fontsize',16);
-                if vcds_bool
-                    xlabel('Avg. NO_2 VCD (molec. cm^2)');
-                else
-                    xlabel('a (mol NO_2)');
+            
+            if vcds_bool
+                x_label_str = 'Avg. NO_2 VCD (molec. cm^2)';
+            else
+                x_label_str = 'a (mol NO_2)';
+            end
+            
+            if ~single_plot_bool
+                for i_loc = 1:numel(loc_inds)
+                    l = gobjects(6,1);
+                    figure;
+                    ax = gca;
+                    l(1:2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'parent', ax);
+                    l(3:4) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'parent', ax);
+                    l(5:6) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'parent', ax);
+                    legend(l, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
+                    set(ax,'fontsize',16);
+                    xlabel(x_label_str);
+                    ylabel('\tau (hours)');
+                    title(locs(loc_inds(i_loc)).Location);
                 end
+            else
+                l = gobjects(0);
+                legend_cell = {};
+                figure;
+                if ismember('UMTWRFS', days_of_week)
+                    l(end+1) = line(decadal_changes.(mass_value)(:,1), decadal_changes.tau(:,1), decadal_style(1));
+                    l(end+1) = line(decadal_changes.(mass_value)(:,2), decadal_changes.tau(:,2), decadal_style(2));
+                    legend_cell = veccat(legend_cell, {'UMTWRFS 2005-2007', 'UMTWRFS 2012-2013'});
+                end
+                if ismember('TWRF', days_of_week)
+                    l(end+1) = line(beginning_changes.(mass_value)(:,1), beginning_changes.tau(:,1), beginning_style(1));
+                    l(end+1) = line(end_changes.(mass_value)(:,1), end_changes.tau(:,1), end_style(1));
+                    legend_cell = veccat(legend_cell, {'TWRF 2005-2007', 'TWRF 2012-2013'});
+                end
+                if ismember('US', days_of_week)
+                    l(end+1) = line(beginning_changes.(mass_value)(:,2), beginning_changes.tau(:,2), beginning_style(2));
+                    l(end+1) = line(end_changes.(mass_value)(:,2), end_changes.tau(:,2), end_style(2));
+                    legend_cell = veccat(legend_cell, {'US 2005-2007', 'US 2012-2013'});
+                end
+                
+                legend(l(:), legend_cell);
+                set(gca,'xscale','log','fontsize',14);
+                xlabel(x_label_str);
                 ylabel('\tau (hours)');
-                title(locs(loc_inds(i_loc)).Location);
             end
         end
         
@@ -1801,6 +1860,70 @@ classdef misc_emissions_analysis
                 end
             end
             
+        end
+        
+        function plot_loc_wind_rose(varargin)
+            E=JLLErrors;
+            p = inputParser;
+            p.addParameter('time_period', '');
+            p.addParameter('loc_inds', nan);
+            p.addParameter('wind_op','');
+            p.addParameter('wind_speed',[]);
+            p.addParameter('convert_wind_def', true);
+            p.addParameter('keep_rejected_directions', nan);
+            p.addParameter('use_wrf', nan);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            time_period = pout.time_period;
+            loc_inds = pout.loc_inds;
+            wind_op = pout.wind_op;
+            wind_speed = pout.wind_speed;
+            convert_wind_def_bool = pout.convert_wind_def;
+            keep_rejected_directions_bool = pout.keep_rejected_directions;
+            use_wrf = pout.use_wrf;
+            
+            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            winds_file = misc_emissions_analysis.winds_file_name(start_dates{1}, end_dates{end});
+            W = load(winds_file);
+            W.locs = misc_emissions_analysis.append_new_spreadsheet_fields(W.locs);
+            
+            if isnan(loc_inds)
+                loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
+            end
+            if ~isempty(loc_inds)
+                W.locs = misc_emissions_analysis.cutdown_locs_by_index(W.locs, loc_inds);
+            end
+            
+            [wind_op, wind_speed] = misc_emissions_analysis.choose_wind_criteria(wind_op, wind_speed);
+            
+            if isnan(keep_rejected_directions_bool)
+                keep_rejected_directions_bool = ask_yn('Retain rejected wind directions for the wind rose?');
+            end
+            
+            if ~keep_rejected_directions_bool
+                [~, ~, wind_rej_field] = misc_emissions_analysis.ask_to_use_wrf(use_wrf);
+            else
+                wind_rej_field = 'none';
+            end
+            
+            
+            for i_loc = 1:numel(W.locs)
+                winds_logical = misc_emissions_analysis.set_wind_conditions(W.locs(i_loc), wind_speed, wind_op, wind_rej_field);
+                wind_dir = W.locs.WindDir(winds_logical);
+                wind_vel = W.locs.WindSpeed(winds_logical);
+                if convert_wind_def_bool
+                    E.notimplemented('Converting winds from vector-type definition to met definition (from N is 0 deg)')
+                else
+                    north_angle = 90;
+                    east_angle = 0;
+                    fprintf('!!! NOTE: wind rose plotting directions winds are blowing TOWARDS !!!\n');
+                end
+                
+                % Wind rose automatically creates a new figure
+                WindRose(wind_dir, wind_vel, 'anglenorth', north_angle, 'angleeast', east_angle);
+            end
         end
     end
     
@@ -2118,7 +2241,7 @@ classdef misc_emissions_analysis
             days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
         end
         
-        function [use_wrf, loc_inds] = ask_to_use_wrf(use_wrf)
+        function [use_wrf, loc_inds, wind_rej_field] = ask_to_use_wrf(use_wrf)
             % 26 Feb 2018: WRF line densities only completed for Chicago,
             % so if using WRF line densities, we need to specify location
             % indicies = 9 for the file name.
@@ -2128,10 +2251,33 @@ classdef misc_emissions_analysis
             
             if use_wrf
                 loc_inds = 9;
+                wind_rej_field = misc_emissions_analysis.wind_reject_field_wrf;
             else
                 loc_inds = 1:70;
+                wind_rej_field = misc_emissions_analysis.wind_reject_field_std;
+            end
+            
+        end
+        
+        function [wind_op, wind_speed] = choose_wind_criteria(wind_op, wind_speed)
+            E = JLLErrors;
+            
+            allowed_wind_ops = {'lt','gt'};
+            wind_op_names = {'less than', 'greater than'};
+            if isempty(wind_op)
+                i_op = ask_multichoice('Use winds that are what vs the criteria?', wind_op_names, 'list', true, 'index', true);
+                wind_op = allowed_wind_ops{i_op};
+            elseif ~ismember(wind_op, allowed_wind_ops)
+                E.badinput('WIND_OP must be one of %s', strjoin(allowed_wind_ops, ', '));
+            end
+            
+            if isempty(wind_speed)
+                wind_speed = ask_number('Enter the wind speed criterion in m/s', 'testfxn', @(x) isscalar(x) && x >= 0, 'testmsg', 'Enter a scalar positive number');
+            elseif ~isscalar(wind_speed) || ~isnumeric(wind_speed)
+                E.badinput('WIND_SPEED must be a scalar number >= 0');
             end
         end
+        
     end
     
 end
