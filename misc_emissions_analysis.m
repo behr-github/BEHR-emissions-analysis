@@ -1895,26 +1895,34 @@ classdef misc_emissions_analysis
                 x_val = locs_fast(i_loc).WindDirBinCenters; % this should be the same in both
                 y_label_string = '# orbits';
                 if as_fraction
-                    y_val_fast = y_val_fast ./ sum(locs_fast.WindDirBinCounts);
-                    y_val_slow = y_val_slow ./ sum(locs_slow.WindDirBinCounts);
+                    y_val_fast = y_val_fast ./ sum(locs_fast(i_loc).WindDirBinCounts);
+                    y_val_slow = y_val_slow ./ sum(locs_slow(i_loc).WindDirBinCounts);
                     y_label_string = 'Fraction of orbits';
                 end
+                
+                [~,~,~,fit_data] = calc_fit_line(y_val_slow, y_val_fast, 'regression', 'RMA');
                 
                 figure;
                 plot(x_val, y_val_slow, 'bo', x_val, y_val_fast, 'rx');
                 legend(sprintf('Wind speed < %d', speed_cutoff), sprintf('Wind speed > %d', speed_cutoff));
                 xlabel('Wind direction (degrees CCW of east)');
                 ylabel(y_label_string);
+                title(locs_fast(i_loc).Location);
+                x_limits = get(gca,'xlim');
+                y_limits = get(gca,'ylim');
+                text(interp1([0 1], x_limits, 0.8), interp1([0 1], y_limits, 0.8), sprintf('R^2 = %.2f', fit_data.R2), 'fontsize', 16);
             end
             
         end
         
         function locs = bin_wind_distribution(varargin)
+            E = JLLErrors;
             p = inputParser;
             p.addParameter('time_period','');
             p.addParameter('loc_inds',nan);
             p.addParameter('wind_op','');
             p.addParameter('wind_speed',[]);
+            p.addParameter('bin_width',45);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -1923,6 +1931,7 @@ classdef misc_emissions_analysis
             loc_inds = pout.loc_inds;
             wind_op = pout.wind_op;
             wind_speed = pout.wind_speed;
+            bin_width = pout.bin_width;
             
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             winds_file = misc_emissions_analysis.winds_file_name(start_dates{1}, end_dates{end});
@@ -1936,16 +1945,19 @@ classdef misc_emissions_analysis
                 W.locs = misc_emissions_analysis.cutdown_locs_by_index(W.locs, loc_inds);
             end
             
-            [wind_op, wind_speed] = misc_emissions_analysis.choose_wind_criteria(wind_op, wind_speed);
+            if ~isnumeric(bin_width) || ~isscalar(bin_width) || bin_width <= 0
+                E.badinput('''bin_width'' must be a positive scalar number');
+            end
             
-            winds_logical = misc_emissions_analysis.set_wind_conditions(W.locs,wind_speed,wind_op,'none');
+            [wind_op, wind_speed] = misc_emissions_analysis.choose_wind_criteria(wind_op, wind_speed);
             
             % TODO: find a way to extract winds actually used in the
             % analysis, i.e. those that match up with BEHR swaths that have
             % actual data
             for i_loc = 1:numel(W.locs)
+                winds_logical = misc_emissions_analysis.set_wind_conditions(W.locs(i_loc),wind_speed,wind_op,'none');
                 all_wind_directions = W.locs(i_loc).WindDir(winds_logical);
-                [bin_counts, bin_edges] = histcounts(all_wind_directions, 0:360);
+                [bin_counts, bin_edges] = histcounts(all_wind_directions, -180:bin_width:180);
                 W.locs(i_loc).WindDirBinCounts = bin_counts;
                 W.locs(i_loc).WindDirBinCenters = 0.5*(bin_edges(1:end-1)+bin_edges(2:end));
             end
