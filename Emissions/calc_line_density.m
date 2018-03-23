@@ -1,4 +1,4 @@
-function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density( fpath, fnames, center_lon, center_lat, theta, wind_logical, varargin )
+function [ no2_x, no2_linedens, no2_lindens_std, wind_used_bool, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density( fpath, fnames, center_lon, center_lat, theta, wind_logical, varargin )
 %[ NO2_X, NO2_LINEDENS, NO2_LINEDENS_STD, LON, LAT, NO2_MEAN, NO2_STD, NUM_VALID_OBS] = CALC_LINE_DENSITY( FPATH, FNAMES, CENTER_LON, CENTER_LAT, THETA )
 %   Calculate a wind-aligned line density for a given time period.
 %
@@ -106,6 +106,15 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       DO_KEEP_DAY_OF_WEEK() specifying which days to keep. Default is
 %       UMTWRFS, i.e. all days.
 %
+%       'wind_dir_weights' - a vector that gives a factor that VCDs from a
+%       certain wind direction should be weighted by in the average.
+%       Requires 'wind_weights_bins' as well. If not given, defaults to 1
+%       for all directions.
+%
+%       'wind_weights_bins' - A vector giving the edges of the bins for the
+%       weights given by 'wind_dir_weights'. If wind_dir_weights has N
+%       elements, this must have N+1. Must be in the same units as THETA.
+%
 %       'DEBUG_LEVEL' - level of output to console. Defaults to 1, 0 shuts
 %       off all output.
 %
@@ -123,6 +132,8 @@ p.addParameter('rel_box_corners',[]);
 p.addParameter('force_calc',false);
 p.addParameter('interp',true);
 p.addParameter('days_of_week', 'UMTWRFS');
+p.addParameter('wind_dir_weights',[]);
+p.addParameter('wind_weights_bins',[]);
 p.addParameter('DEBUG_LEVEL',1);
 
 p.parse(varargin{:});
@@ -133,6 +144,8 @@ rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
 interp_bool = pout.interp;
 days_of_week = pout.days_of_week;
+wind_dir_weights = pout.wind_dir_weights;
+wind_weights_bins = pout.wind_weights_bins;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 if ~ischar(fpath)
@@ -143,7 +156,7 @@ end
 
 if ischar(fnames)
     fnames_struct = dir(fullfile(fpath,fnames));
-elseif iscellstr(fnames);
+elseif iscellstr(fnames)
     fnames_struct = struct('name', repmat({''},size(fnames)));
     for f=1:numel(fnames)
         fnames_struct(f).name = fnames{f};
@@ -183,6 +196,19 @@ if ~isscalar(interp_bool) || ~islogical(interp_bool)
     E.badinput('interp must be a scalar logical')
 end
 
+if xor(isempty(wind_dir_weights), isempty(wind_weights_bins))
+    E.badinput('Both or neight of ''wind_dir_weights'' and ''wind_weights_bins'' must be given')
+elseif isempty(wind_dir_weights) % if we passed the xor() test if one is empty, both are
+    wind_dir_weights = 1;
+    wind_weights_bins = [-Inf Inf];
+elseif ~isnumeric(wind_dir_weights) || ~isnumeric(wind_weights_bins)
+    E.badinput('''wind_dir_weights'' and ''wind_weights_bins'' must both be numeric arrays')
+elseif numel(wind_dir_weights) ~= numel(wind_weights_bins) - 1
+    E.badinput('''wind_weights_bins'' must have one more element than ''wind_dir_weights''');
+elseif any(diff(wind_weights_bins(:)) < 0)
+    E.badinput('''wind_weights_bins'' must be monotonically increasing');
+end
+
 % Pixel reject structure for row anomaly, cloud fraction, etc.
 reject_details = struct('cloud_type', 'omi', 'cloud_frac', 0.2, 'row_anom_mode', 'XTrackFlags', 'check_behr_amf', true);
 
@@ -200,6 +226,7 @@ end
 %fid = fopen('index_date_and_swath.txt','w');
 
 create_array = true;
+wind_used_bool = false(size(theta));
 i = 0;
 for d=1:numel(fnames_struct)
     D = load(fullfile(fpath,fnames_struct(d).name),'Data');
@@ -233,6 +260,10 @@ for d=1:numel(fnames_struct)
             continue
         end
         
+        % If we've gotten here, we're using this date and orbits data, so
+        % mark that for the wind.
+        wind_used_bool(d,s) = true;
+        
         i = i+1;
         
         OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
@@ -265,14 +296,23 @@ for d=1:numel(fnames_struct)
             if DEBUG_LEVEL > 0; disp('Interpolating to fill in gaps in NO2 matrix'); end
             F = scatteredInterpolant(OMI.Longitude(xx), OMI.Latitude(xx), OMI.BEHRColumnAmountNO2Trop(xx));
             Faw = scatteredInterpolant(OMI.Longitude(xx), OMI.Latitude(xx), OMI.Areaweight(xx));
-            nox(:,:,i) = F(OMI.Longitude, OMI.Latitude)*nox_no2_scale;
-            aw(:,:,i) = Faw(OMI.Longitude, OMI.Latitude);
+            nox(:,:,i) = F(OMI.Longitude, OMI.Latitude) * nox_no2_scale;
+            aw(:,:,i) = Faw(OMI.Longitude, OMI.Latitude) * get_wind_dir_weight(theta(d,s), wind_dir_weights, wind_weights_bins);
         else
             
             OMI.BEHRColumnAmountNO2Trop(~xx) = nan;
             OMI.Areaweight(~xx) = nan;
-            nox(:,:,i) = OMI.BEHRColumnAmountNO2Trop*nox_no2_scale;
-            aw(:,:,i) = OMI.Areaweight;
+            % Multiply the weights by the wind direction weight, so that it
+            % weights the NOx average and gets normalized out along with
+            % the areaweight. The idea is that since I want to use slow
+            % wind speeds to generate a source function as in Liu et al.
+            % 2016 (doi: 10.5194/acp-16-5283-2016) but do it with rotated
+            % line densities, I should weight the slow line densities so
+            % that the different wind directions contribute to the line
+            % density in the same proportions as in the fast line
+            % densities.
+            nox(:,:,i) = OMI.BEHRColumnAmountNO2Trop * nox_no2_scale;
+            aw(:,:,i) = OMI.Areaweight * get_wind_dir_weight(theta(d,s), wind_dir_weights, wind_weights_bins);
         end
     end
 end
@@ -366,4 +406,13 @@ end
 n_neighbors = prod(sz-2)*8 + (prod(sz) - prod(sz-2) - 4) * 5 + 12;
 msum = sum(m(:));
 mfrac = msum / n_neighbors;
+end
+
+function weight = get_wind_dir_weight(this_theta, wind_dir_weights, wind_dir_weight_bins)
+idx = find(this_theta > wind_dir_weight_bins, 1, 'first');
+if isempty(idx)
+    E = JLLErrors;
+    E.callError('undefined_wind_dir_weight', 'No wind direction weight defined for theta = %.1f', this_theta);
+end
+weight = wind_dir_weights(idx);
 end
