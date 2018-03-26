@@ -1,4 +1,4 @@
-function [ no2_x, no2_linedens, no2_lindens_std, wind_used_bool, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density( fpath, fnames, center_lon, center_lat, theta, wind_logical, varargin )
+function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, num_valid_obs, nox, debug_cell ] = calc_line_density( fpath, fnames, center_lon, center_lat, theta, wind_logical, varargin )
 %[ NO2_X, NO2_LINEDENS, NO2_LINEDENS_STD, LON, LAT, NO2_MEAN, NO2_STD, NUM_VALID_OBS] = CALC_LINE_DENSITY( FPATH, FNAMES, CENTER_LON, CENTER_LAT, THETA )
 %   Calculate a wind-aligned line density for a given time period.
 %
@@ -226,7 +226,6 @@ end
 %fid = fopen('index_date_and_swath.txt','w');
 
 create_array = true;
-wind_used_bool = false(size(theta));
 i = 0;
 for d=1:numel(fnames_struct)
     D = load(fullfile(fpath,fnames_struct(d).name),'Data');
@@ -259,10 +258,6 @@ for d=1:numel(fnames_struct)
             if DEBUG_LEVEL > 0; fprintf('No grid cells in %s\n',fnames_struct(d).name); end 
             continue
         end
-        
-        % If we've gotten here, we're using this date and orbits data, so
-        % mark that for the wind.
-        wind_used_bool(d,s) = true;
         
         i = i+1;
         
@@ -409,7 +404,7 @@ mfrac = msum / n_neighbors;
 end
 
 function weight = get_wind_dir_weight(this_theta, wind_dir_weights, wind_dir_weight_bins)
-idx = find(this_theta > wind_dir_weight_bins, 1, 'first');
+idx = find(this_theta > wind_dir_weight_bins, 1, 'last');
 if isempty(idx)
     E = JLLErrors;
     E.callError('undefined_wind_dir_weight', 'No wind direction weight defined for theta = %.1f', this_theta);

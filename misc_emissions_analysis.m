@@ -846,9 +846,51 @@ classdef misc_emissions_analysis
                 end
             end
             
+            locs = misc_emissions_analysis.mark_which_winds_will_be_used(locs, dvec); %#ok<NASGU>
+            
             write_date = datestr(now); %#ok<NASGU>
             
             save(save_file, 'locs', 'dvec', 'write_date');
+        end
+        
+        function locs = mark_which_winds_will_be_used(locs, dvec)
+            % Iterate through the dates used for each location and estimate
+            % which winds will actually be used based on rotated_plume.
+            % This is used in order to weight the slow wind speed data to
+            % have the same fractional contribution to a given wind
+            % direction, for which we don't just want to count up all
+            % instances of wind falling in a directional bin, just those
+            % that have actual satellite data.
+            
+            % Copied from calc_line_density on 26 Mar 2018.
+            reject_details = struct('cloud_type', 'omi', 'cloud_frac', 0.2, 'row_anom_mode', 'XTrackFlags', 'check_behr_amf', true);
+            
+            % Initialize the WindUsedBool field for all locations
+            for i_loc = 1:numel(locs)
+                locs(i_loc).WindUsedBool = false(size(locs(i_loc).WindDir));
+            end
+            
+            % Iterate over dates in the outer loop since we need to load
+            % the BEHR file for each day.
+            for i_date = 1:numel(dvec)
+                fprintf('Marking useful winds for %s\n', datestr(dvec(i_date)));
+                Data = load_behr_file(dvec(i_date),'daily','us');
+                for i_orbit = 1:numel(Data)
+                    Data(i_orbit).Areaweight = ones(size(Data(i_orbit).Longitude));
+                    Data(i_orbit) = omi_pixel_reject(Data(i_orbit),'detailed',reject_details);
+                    for i_loc = 1:numel(locs)
+                        if strcmp(locs(i_loc).SiteType, 'RuralAreas')
+                            % Rural areas do not have boxes defined, so we
+                            % can't use rotate_plume here, but they aren't
+                            % used in this analysis anyway.
+                            continue
+                        end
+                        
+                        xx_pixels_used = rotate_plume(Data(i_orbit), locs(i_loc).Longitude, locs(i_loc).Latitude, locs(i_loc).WindDir(i_date, i_orbit), locs(i_loc).BoxSize, 'pixels_in_box', true);
+                        locs(i_loc).WindUsedBool(i_date, i_orbit) = any(Data(i_orbit).Areaweight(xx_pixels_used) > 0);
+                    end
+                end
+            end
         end
         
         function make_rotated_line_densities(varargin)
@@ -885,7 +927,7 @@ classdef misc_emissions_analysis
         end
         
         function make_rotated_fast_convolution_line_densities(varargin)
-            % MAKE_ROTATED_SLOW_CONVOLUTION_LINE_DENSITIES() will call
+            % MAKE_ROTATED_FAST_CONVOLUTION_LINE_DENSITIES() will call
             % make_line_densities() with the following parameters enforced:
             %
             %       'weight_wind_dirs' = false
@@ -1008,7 +1050,7 @@ classdef misc_emissions_analysis
             end
             
             if ~isempty(loc_indicies)
-                winds.locs = winds.locs(loc_indicies);
+                winds.locs = misc_emissions_analysis.cutdown_locs_by_index(winds.locs, loc_indicies);
             end
             % Rural sites aren't going to be that interesting
             xx = strcmpi('Cities', {winds.locs.SiteType}) | strcmpi('PowerPlants', {winds.locs.SiteType});
@@ -1026,18 +1068,22 @@ classdef misc_emissions_analysis
             % are slow vs. fast? If so, append the necessary arguments to
             % the call to calc_line_density. (Right now will not affect
             % sectors.)
-            opt_args = {};
+            
             if weight_wind_dirs
-                [wind_dir_weights, wind_dir_edges] = misc_emissions_analysis.calculate_wind_bin_weights(winds.locs, 'all_winds', winds_cutoff, false);
-                opt_args = veccat(opt_args, {'wind_dir_weights', wind_dir_weights, 'wind_weights_bins', wind_dir_edges});
+                [wind_dir_weights, wind_dir_edges] = misc_emissions_analysis.calculate_wind_bin_weights(winds.locs, winds_cutoff, 'all_winds', false);
             end
             
             parfor a=1:numel(winds.locs)
+                opt_args = {};
                 
                 box_size = winds_locs_distributed(a).BoxSize;
                 if any(isnan(box_size))
                     warning('NaN detected in box size. Setting to default %s for location %s', mat2str(default_box), winds_locs_distributed(a).ShortName)
                     box_size = default_box;
+                end
+                
+                if weight_wind_dirs && ~by_sectors
+                    opt_args = veccat(opt_args, {'wind_dir_weights', wind_dir_weights{a}, 'wind_weights_bins', wind_dir_edges{a}});
                 end
                 
                 % "wind_reject_field" will have been set to 'none' if
@@ -1048,19 +1094,16 @@ classdef misc_emissions_analysis
                 
                 if by_sectors
                     fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
-                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).wind_used_bool, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size);
+                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
+                        = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, opt_args{:});
                 else
                     fprintf('Calculating rotated line densities for %s\n', winds_locs_distributed(a).ShortName);
-                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).wind_used_bool, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
+                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
                         = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, 'days_of_week', days_of_week, opt_args{:});
                 end
             end
             
             for a=1:numel(winds.locs)
-                % Move WindUsedBool up so that it is a sibling field of
-                % WindDir and WindSpeed
-                winds.locs(a).WindUsedBool = no2(a).wind_used_bool;
                 winds.locs(a).no2_sectors = rmfield(no2(a), 'wind_used_bool');
             end
             
@@ -2006,13 +2049,21 @@ classdef misc_emissions_analysis
             use_all_winds = pout.all_winds;
             bin_width = pout.bin_width;
             
-            locs_tmp = bin_wind_distribution(locs, 'all_winds', use_all_winds, 'loc_inds', [], 'wind_op', 'lt', 'wind_speed', wind_speed, 'bin_width', bin_width);
-            slow_wind_counts = locs_tmp.WindDirBinCounts;
-            locs_tmp = bin_wind_distribution(locs, 'all_winds', use_all_winds, 'loc_inds', [], 'wind_op', 'gt', 'wind_speed', wind_speed, 'bin_width', bin_width);
-            fast_wind_counts = locs_tmp.WindDirBinCounts;
-            wind_bin_edges = locs_tmp.WindDirBinEdges;
+            wind_bin_weights = cell(size(locs));
+            wind_bin_edges = cell(size(locs));
+            for i_loc = 1:numel(locs)
+                % include 'loc_inds' = [] to indicate that we do not want
+                % to cut down the locations at all.
+                locs_tmp = misc_emissions_analysis.bin_wind_distribution(locs(i_loc), 'all_winds', use_all_winds, 'loc_inds', [], 'wind_op', 'lt', 'wind_speed', wind_speed, 'bin_width', bin_width);
+                slow_wind_counts = locs_tmp.WindDirBinCounts;
+                locs_tmp = misc_emissions_analysis.bin_wind_distribution(locs(i_loc), 'all_winds', use_all_winds, 'loc_inds', [], 'wind_op', 'gt', 'wind_speed', wind_speed, 'bin_width', bin_width);
+                fast_wind_counts = locs_tmp.WindDirBinCounts;
+                wind_bin_edges{i_loc} = locs_tmp.WindDirBinEdges;
+                
+                wind_bin_weights{i_loc} = fast_wind_counts ./ slow_wind_counts;
+            end
             
-            wind_bin_weights = fast_wind_counts ./ slow_wind_counts;
+            
         end
         
         function locs = bin_wind_distribution(winds_file, varargin)
@@ -2069,9 +2120,6 @@ classdef misc_emissions_analysis
                 W = load(winds_file);
                 locs = W.locs;
             elseif isstruct(winds_file)
-                if ~isfield(winds_file, 'locs')
-                    E.badinput('If giving WINDS_FILE as the structure loaded from a winds-containing file, it must be the structure resulting from e.g. winds_file=load() (i.e. it must have the field "locs"')
-                end
                 locs = winds_file;
             end
             if any(~isfield(locs, {'WindSpeed','WindDir'}))
@@ -2079,7 +2127,12 @@ classdef misc_emissions_analysis
             end
             
             if ~use_all_winds && ~isfield(locs, 'WindUsedBool')
-                E.callError('missing_wind_used', 'The file "%s" does not contain the field "WindUsedBool" in the locs structure. Pass "''all_wind'', true" if you need to bin a file that does not have this field', winds_file)
+                if ischar(winds_file)
+                    msg = sprintf('The file "%s" does not contain the field "WindUsedBool" in the locs structure. Pass "''all_wind'', true" if you need to bin a file that does not have this field', winds_file);
+                else
+                    msg = 'The given structure does not contain the field "WindUsedBool". Pass "''all_wind'', true" if you need to bin a file that does not have this field';
+                end
+                E.callError('missing_wind_used', msg)
             end
             
             if isnan(loc_inds)
@@ -2466,6 +2519,21 @@ classdef misc_emissions_analysis
                 E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
             end
             locs = locs(xx);
+        end
+        
+        function new_locs = match_locs_structs(new_locs, base_locs)
+            % Cut down NEW_LOCS to have the same locations as BASE_LOCS
+            E = JLLErrors;
+            new_loc_names = {new_locs.Location};
+            base_loc_names = {base_locs.Location};
+            xx = ismember(new_loc_names, base_loc_names);
+            new_locs(~xx) = [];
+            check_loc_names = {new_locs.Location};
+            if numel(check_loc_names) ~= numel(base_loc_names)
+                E.callError('locs_not_available', 'One or more locations in BASE_LOCS were not present in NEW_LOCS');
+            elseif any(~strcmp(check_loc_names, base_loc_names))
+                E.callError('locs_not_matched', 'Trouble matching the cutdown NEW_LOCS to BASE_LOCS, the locations may be out of order');
+            end
         end
         
         function loc_inds = loc_types_to_inds(varargin)

@@ -23,6 +23,18 @@ function [ OMI ] = rotate_plume( Data, center_lon, center_lat, theta, varargin )
 %       Defaults to [2 4 2 2], i.e. the box will be 6 deg E/W by 4 deg N/S
 %       offset so that it extends 2 deg further E than west.
 %
+%       vza_crit - maximum viewing zenith angle allowed (in degrees).
+%       Default is 60.
+%
+%       loncorn, latcorn - the field names in Data to use for longitude and
+%       latitude corners of the pixels. Defaults are 'FoV75CornerLongitude'
+%       and 'FoV75CornerLatitude' respectively.
+%
+%       pixels_in_box - if true, only returns the logical array (the same
+%       size as Data.Longitude and Data.Latitude) that indicates which
+%       pixels are inside the box and pass the VZA criterion.
+
+
 %   Original code from Luke Valin:
 %
 %         xBOX = [-2 4 4 -2];
@@ -74,11 +86,6 @@ function [ OMI ] = rotate_plume( Data, center_lon, center_lat, theta, varargin )
 %   careful identification of which pixels fall into the box and rotation
 %   of the pixel corners as well.
 %
-%   To identify which pixels fall into the box, we use another utility
-%   function I've written which checks if box A has any overlap with box B.
-%   This will capture any case of overlap.  Once the pixels contained in
-%   the rotated box are identified, their longitude and latitude centers
-%   and corners will be rotated and the gridded within the unrotated box.
 %
 %   Josh Laughner <joshlaugh5@gmail.com> 4 Feb 2016
 
@@ -91,6 +98,7 @@ p.addOptional('rel_box_corners',[]);
 p.addParameter('vza_crit',60);
 p.addParameter('loncorn', 'FoV75CornerLongitude');
 p.addParameter('latcorn', 'FoV75CornerLatitude');
+p.addParameter('pixels_in_box', false);
 p.addParameter('DEBUG_LEVEL', 2);
 
 p.parse(varargin{:});
@@ -99,6 +107,7 @@ rel_box_corners = pout.rel_box_corners;
 vza_crit = pout.vza_crit;
 loncorn_field = pout.loncorn;
 latcorn_field = pout.latcorn;
+only_pixels_in_box = pout.pixels_in_box;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 E = JLLErrors;
@@ -114,7 +123,9 @@ elseif ~isscalar(theta) || ~isnumeric(theta) || theta > 180 || theta < -180
     E.badinput('theta must be a scalar numeric value between -180 and +180')
 end
 
-if ~isempty(rel_box_corners)
+if any(isnan(rel_box_corners))
+    E.badinput('REL_BOX_CORNERS cannot contain NaNs')
+elseif ~isempty(rel_box_corners)
     if numel(rel_box_corners) ~= 4 || ~isnumeric(rel_box_corners) || ~isvector(rel_box_corners)
         E.badinput('rel_box_corners (if given) must be a 4 element numeric vector')
     end
@@ -145,13 +156,23 @@ for corner=1:4
 end
 
 % Check if this orbit has any pixels within the target box, if not, return
-% a dummy structure indicating that
+% a dummy structure indicating so
 in_check = inpolygon(Data.Longitude, Data.Latitude, x_box_rot, y_box_rot);
+
+% If there are no pixels in the box, then we can exit now. Format the
+% output appropriately whether the logical array or the gridded data
+% structure was requested.
 if ~any(in_check(:))
-    OMI.Longitude = [];
-    OMI.Latitude = [];
+    if only_pixels_in_box
+        OMI = in_check;
+    else
+        
+        OMI.Longitude = [];
+        OMI.Latitude = [];
+    end
     return;
 end
+
 
 % Remove pixels with VZA greater than the specified criteria which defaults
 % to 60 degrees. Do any data field that is the 2D shape, and avoid any flag
@@ -163,6 +184,15 @@ for f=1:numel(fns)
         Data.(fns{f})(vv) = nan;
     end
 end
+
+% If requested to just return which pixels will be used, combine the test
+% for which pixels are in the box and which pass the VZA crit test, then
+% return before doing the gridding.
+if only_pixels_in_box
+    OMI = in_check & ~vv;
+    return
+end
+
 
 % Rotate the pixels back to the x-axis (only need to change the lon/lat fields)
 R = [cosd(-theta), -sind(-theta); sind(-theta), cosd(-theta)];
