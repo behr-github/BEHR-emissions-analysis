@@ -43,12 +43,23 @@ function [ ffit, emgfit, param_stats, f0, history, fitresults, N, L ] = fit_line
 %       the same order as f0. If not given, these will be set within this
 %       function to physically realistic values.
 %
-%       'emgtype' - allows you to vary which one of 3 EMG functions are
+%       'emgtype' - allows you to vary which one of 4 EMG functions are
 %       used. There were slight differences between de Foy 2014 and Lu 2015
-%       regarding the form of the function; 'defoy' and 'lu' respectively
-%       select each paper's respective function. The only practical
-%       difference is in the definition of a: a_defoy = a_lu / x0. Defaults
-%       to 'lu.'
+%       regarding the form of the function:
+%
+%           * 'defoy' and 'lu' respectively select each paper's respective
+%           function. The only practical difference is in the definition of 
+%           a: a_defoy = a_lu / x0. 
+%
+%           * 'conv-gaussian' uses CONVOLVED_FIT_FUNCTION() with a gaussian
+%           as the slow line density.
+%
+%           * You can also give it a function handle directly; this
+%           function must take a vector of the five fitting parameters (a,
+%           x_0, mu_x, sigma_x, and B) as the first argument and the
+%           x-coordinates as the second argument.
+%
+%       Default is 'lu.'
 %
 %       'fittype' - allows you to decide the normalization of the fit
 %       function. 'ssresid' (default) makes the fit function simply the sum
@@ -87,7 +98,7 @@ function [ ffit, emgfit, param_stats, f0, history, fitresults, N, L ] = fit_line
 
 p = inputParser;
 p.addOptional('fmincon_output','iter',@(x) ismember(x,{'none','iter','final'}));
-p.addParameter('fixed_param','',@ischar);
+p.addParameter('fixed_param',{});
 p.addParameter('fixed_val',[]);
 p.addParameter('f0',[]);
 p.addParameter('lb',[]);
@@ -119,15 +130,24 @@ end
 if ~isvector(no2_ld) || ~isnumeric(no2_ld) || any(size(no2_ld) ~= size(no2_x))
     E.badinput('no2_ld must be a numeric vector the same size as no2_ld')
 end
-if ~isempty(fixed_param) && ~ismember(fixed_param,{'a','x0','mux','sx','B'})
-    E.badinput('fixed_param (if given) must be one of a, x0, mux, sx, or B')
+
+if ischar(fixed_param)
+    fixed_param = {fixed_param};
 end
-if ~isempty(fixed_val) && ~ischar(fixed_val) && ~isscalar(fixed_val)
-    E.badinput('fixed_val must be a scalar number')
+if ~isempty(fixed_param) && any(~ismember(fixed_param,{'a','x0','mux','sx','B'}))
+    E.badinput('fixed_param (if given) must contain only the strings a, x0, mux, sx, or B')
+end
+if ~isempty(fixed_val)
+    if ischar(fixed_val) && ~strcmp(fixed_val, 'f0')
+        E.badinput('If given as a string, only the string ''f0'' is allowed for fixed_val');
+    elseif isnumeric(fixed_val) && numel(fixed_val) ~= numel(fixed_param)
+        E.badinput('fixed_val must have the same number of elements as ''fixed_param''')
+    end
 end
 if xor(isempty(fixed_param),isempty(fixed_val))
     E.badinput('Both or neither of fixed_param and fixed_val must be set')
 end
+
 if ~isempty(f0in) && numel(f0in) ~= 5
     E.badinput('If an f0 is specified as input, it must have five elements')
 end
@@ -137,8 +157,10 @@ end
 if ~isempty(lbin) && numel(lbin) ~= 5
     E.badinput('If an lb is specified as input, it must have five elements')
 end
-if ~ismember(emgtype,{'defoy','lu'})
-    E.badinput('The parameter ''emgtype'' must be one of defoy or lu')
+
+allowed_emg_types = {'defoy','lu','conv-gaussian'};
+if (~ischar(emgtype) && ~isa(emgtype, 'function_handle')) || (ischar(emgtype) && ~ismember(emgtype, allowed_emg_types))
+    E.badinput('The parameter ''emgtype'' must be one of: %s or a function handle', strjoin(allowed_emg_types, ', '))
 end
 if ~ismember(fittype,{'ssresid','unexvar'})
     E.badinput('The parameter ''fittype'' must be one of ssresid or unexvar')
@@ -175,11 +197,26 @@ end
         e(isnan(e)) = Inf;
     end
 
-switch emgtype
-    case 'defoy'
-        emgfxn = @emgfxn_defoy;
-    case 'lu'
-        emgfxn = @emgfxn_lu;
+    function e = emgfxn_conv_gaussian(f, x)
+        sigma_x = f(4);
+        g = 1/(sqrt(2*pi)*sigma_x) * exp(-x.^2/(2.*sigma_x.^2));
+        conv_fxn = convolved_fit_function(x, g);
+        e = conv_fxn(f,x);
+    end
+
+if ischar(emgtype)
+    switch emgtype
+        case 'defoy'
+            emgfxn = @emgfxn_defoy;
+        case 'lu'
+            emgfxn = @emgfxn_lu;
+        case 'conv-gaussian'
+            emgfxn = @emgfxn_conv_gaussian;
+    end
+else
+    % We require in input checking that emgtype be a char or a function
+    % handle
+    emgfxn = emgtype;
 end
 
 if strcmp(fittype,'ssresid')
@@ -299,69 +336,13 @@ if ~isempty(lbin)
 end
 
 if ischar(fixed_val) && strcmpi(fixed_val, 'f0')
-    switch fixed_param
-        case 'a'
-            fixed_val = f0(1);
-        case 'x0'
-            fixed_val = f0(2);
-        case 'mux'
-            fixed_val = f0(3);
-        case 'sx'
-            fixed_val = f0(4);
-        case 'B'
-            fixed_val = f0(5);
-    end
-elseif ischar(fixed_val)
+    fixed_param = {'a','x0','mux','sx','B'};
+    fixed_val = f0;
+elseif ~isnumeric(fixed_val)
     E.badinput('fixed_val should be a number if not the string ''f0''')
 end
 
-switch fixed_param
-    case 'a'
-        if fixed_val < f_lb(1) || fixed_val > f_ub(1)
-            E.callCustomError('fixed_val_out_of_range');
-        end
-        inds=2:5;
-        nlcon = @(f) nonlin_constr([fixed_val, f]);
-        fitfxn_fix = @(f) fitfxn([fixed_val, f]);
-        emgfxn_fix = @(f,x) emgfxn([fixed_val, f],x);
-    case 'x0'
-        if fixed_val < f_lb(2) || fixed_val > f_ub(2)
-            E.callCustomError('fixed_val_out_of_range');
-        end
-        inds=[1,3,4,5];
-        nlcon = @(f) nonlin_constr([f(1), fixed_val, f(2:4)]);
-        fitfxn_fix = @(f) fitfxn([f(1), fixed_val, f(2:4)]);
-        emgfxn_fix = @(f,x) emgfxn([f(1), fixed_val, f(2:4)],x);
-    case 'mux'
-        if fixed_val < f_lb(3) || fixed_val > f_ub(3)
-            E.callCustomError('fixed_val_out_of_range');
-        end
-        inds=[1,2,4,5];
-        nlcon = @(f) nonlin_constr([f(1:2), fixed_val, f(3:4)]);
-        fitfxn_fix = @(f) fitfxn([f(1:2), fixed_val, f(3:4)]);
-        emgfxn_fix = @(f,x) emgfxn([f(1:2), fixed_val, f(3:4)],x);
-    case 'sx'
-        if fixed_val < f_lb(4) || fixed_val > f_ub(4)
-            E.callCustomError('fixed_val_out_of_range');
-        end
-        inds=[1,2,3,5];
-        nlcon = @(f) nonlin_constr([f(1:3), fixed_val, f(4)]);
-        fitfxn_fix = @(f) fitfxn([f(1:3), fixed_val, f(4)]);
-        emgfxn_fix = @(f,x) emgfxn([f(1:3), fixed_val, f(4)],x);
-    case 'B'
-        if fixed_val < f_lb(5) || fixed_val > f_ub(5)
-            E.callCustomError('fixed_val_out_of_range');
-        end
-        inds=1:4;
-        nlcon = @(f) nonlin_constr([f, fixed_val]);
-        fitfxn_fix = @(f) fitfxn([f, fixed_val]);
-        emgfxn_fix = @(f,x) emgfxn([f, fixed_val],x);
-    otherwise
-        inds = 1:5;
-        nlcon = @nonlin_constr;
-        fitfxn_fix = @(f) fitfxn(f);
-        emgfxn_fix = @(f,x) emgfxn(f,x);
-end
+[fitfxn_fix, emgfxn_fix, nlcon, inds] = setup_fixed_params(fixed_param, fixed_val, no2_x, fitfxn, emgfxn);
 f0 = f0(inds);
 f_lb = f_lb(inds);
 f_ub = f_ub(inds);
@@ -473,36 +454,62 @@ end
         end
     end
 
-    function [c,ceq] = nonlin_constr(f)
-        % Nonlinear constraint requires that the value of the exponential
-        % term not exceed 20.  Since the error function is bound to [-1, 1]
-        % and 1-erf is always on [0 2], this will hopefully keep the
-        % function from going to NaN which happens when the exponetial term
-        % goes to infinity while the 1-erf term goes to 0. This constraint
-        % is purely to force fmincon to behave, the only possible physical
-        % justification is that the a term should control the amount of
-        % mass in the plume and not the exponetial itself.
-        c = max((f(4)^2 / (2 * f(2)^2)) - (no2_x - f(3)) ./ f(2) - log(20));
-        ceq = [];
+    
+end
+
+function [fixed_fitfxn, fixed_emgfxn, fixed_nlcon, inds] = setup_fixed_params(fixed_params, fixed_vals, no2_x, fitfxn, emgfxn)
+[inds, fixed_inds] = get_fixed_and_var_inds(fixed_params);
+fixed_fitfxn = @fixed_param_fitfxn;
+fixed_emgfxn = @fixed_param_emgfxn;
+fixed_nlcon = @fixed_param_nonlin_con;
+
+    function val = fixed_param_fitfxn(f)
+        f_in = nan(5,1);
+        f_in(inds) = f;
+        f_in(fixed_inds) = fixed_vals;
+        val = fitfxn(f_in);
+    end
+
+    function val = fixed_param_emgfxn(f, x)
+        f_in = nan(5,1);
+        f_in(inds) = f;
+        f_in(fixed_inds) = fixed_vals;
+        val = emgfxn(f_in, x);
+    end
+
+    function [val, valeq] = fixed_param_nonlin_con(f)
+        f_in = nan(5,1);
+        f_in(inds) = f;
+        f_in(fixed_inds) = fixed_vals;
+        [val, valeq] = nonlin_constr(f_in, no2_x);
     end
 end
 
-function ffit = unfix_params(fitparams, fixed_param, fixed_val)
-
-switch fixed_param
-    case 'a'
-        ffinal = [fixed_val, fitparams];
-    case 'x0'
-        ffinal = [fitparams(1), fixed_val, fitparams(2:4)];
-    case 'mux'
-        ffinal = [fitparams(1:2), fixed_val, fitparams(3:4)];
-    case 'sx'
-        ffinal = [fitparams(1:3), fixed_val, fitparams(4)];
-    case 'B'
-        ffinal = [fitparams, fixed_val];
-    otherwise 
-        ffinal = fitparams;
+function [c,ceq] = nonlin_constr(f, no2_x)
+% Nonlinear constraint requires that the value of the exponential
+% term not exceed 20.  Since the error function is bound to [-1, 1]
+% and 1-erf is always on [0 2], this will hopefully keep the
+% function from going to NaN which happens when the exponetial term
+% goes to infinity while the 1-erf term goes to 0. This constraint
+% is purely to force fmincon to behave, the only possible physical
+% justification is that the a term should control the amount of
+% mass in the plume and not the exponetial itself.
+c = max((f(4)^2 / (2 * f(2)^2)) - (no2_x - f(3)) ./ f(2) - log(20));
+ceq = [];
 end
+
+function [variable_inds, fixed_inds] = get_fixed_and_var_inds(fixed_params)
+fixed_inds = find(ismember({'a','x0','mux','sx','B'}, fixed_params));
+variable_inds = 1:5;
+variable_inds(ismember(variable_inds, fixed_inds)) = [];
+end
+
+function ffit = unfix_params(fitparams, fixed_param, fixed_val)
+[var_inds, fixed_inds] = get_fixed_and_var_inds(fixed_param);
+ffinal = nan(5,1);
+ffinal(var_inds) = fitparams;
+ffinal(fixed_inds) = fixed_val;
+
 ffit.a = ffinal(1);
 ffit.x_0 = ffinal(2);
 ffit.mu_x = ffinal(3);

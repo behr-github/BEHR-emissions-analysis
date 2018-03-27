@@ -25,7 +25,7 @@ emgfxn = @convolved_fxn;
         
         exp_component = zeros(size(x));
         exp_component(x > mu_x) = exp( -(x(x>mu_x)-mu_x)/x_0 );
-        emg = a.* conv_trapz(x, exp_component, slow_ld) + B;
+        emg = a ./ x_0 .* conv_trapz(x, exp_component, slow_ld) + B;
     end
 
 end

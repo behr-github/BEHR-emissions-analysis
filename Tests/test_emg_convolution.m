@@ -21,11 +21,11 @@ function [x, convolved_emg, direct_emg] = test_emg_convolution(f)
 E = JLLErrors;
 
 if nargin < 1
-    init_fit.a = 1;%2;
+    init_fit.a = 3e4;%1;%2;
     init_fit.x_0 = 3*3600*5/1000; % x0 = tau * u, use a 3 hr (3*3600 sec) lifetime at 5 m/s winds in km
     init_fit.mu_x = 20;
     init_fit.sigma_x = 10;
-    init_fit.B = 0;%1;
+    init_fit.B = 1e3;%1;
     f = struct2array(init_fit);
 elseif ~isvector(f) || ~isnumeric(f) || numel(f) ~= 5
     E.badinput('F must be a 5 element numeric vector, if given');
@@ -34,24 +34,21 @@ else
 end
 
 % Define a decently large domain
-x = linspace(-100,200,60);
+x = linspace(-200,400,120);
 
 direct_emg = emgfxn_lu(f, x);
 conv_fxn = convolved_fit_function(x, gaussian_ld(x, f(4)));
 convolved_emg = conv_fxn(f, x);
 
-% Beirle doesn't have the x_0 in the prefactor - what happens if I take it
-% out of the Lu function?
-
 % Test what the fit says the parameters are
-[ffit_direct, fit_emg_direct] = fit_line_density(x, direct_emg,'none');
-[ffit_conv, fit_emg_conv] = fit_line_density(x, convolved_emg,'none');
-%[ffit_conv2, fit_emg_conv2] = fit_line_density(x, convolved_emg, 'none', 'emgtype', 'conv-gaussian');
+[ffit_direct, fit_emg_direct, stats_emg_direct, f0_emg_direct, history_emg_direct, fitresults_emg_direct] = fit_line_density(x, direct_emg,'none');
+[ffit_conv, fit_emg_conv, stats_emg_conv, f0_emg_conv, history_emg_conv, fitresults_emg_conv] = fit_line_density(x, convolved_emg,'none');
+[ffit_conv2, fit_emg_conv2, stats_emg_conv2, f0_emg_conv2, history_emg_conv2, fitresults_emg_conv2] = fit_line_density(x, convolved_emg, 'none', 'emgtype', conv_fxn, 'fixed_param', {'mux'}, 'fixed_val', 0);
 
 fprintf('Original fit params: %s\n', struct2string(init_fit));
 fprintf('Direct function fit params: %s\n', struct2string(ffit_direct));
 fprintf('Convolved function fit params: %s\n', struct2string(ffit_conv));
-%fprintf('Convolved function fit using same function in fitting: %s\n', struct2string(ffit_conv2));
+fprintf('Convolved function fit using same function in fitting: %s\n', struct2string(ffit_conv2));
 
 figure;
 plot(x, direct_emg, 'bo');
@@ -59,14 +56,14 @@ hold on
 plot(x, convolved_emg, 'ro');
 plot(x, fit_emg_direct, 'b--');
 plot(x, fit_emg_conv, 'r--');
-%plot(x, fit_emg_conv2, 'r-.');
-legend('Orig. direct', 'Orig. convolved','Fit direct','Fit convolved')%,'Fit convolved with convolved');
+plot(x, fit_emg_conv2, 'r-.');
+legend('Orig. direct', 'Orig. convolved','Fit direct','Fit convolved','Fit convolved with convolved');
 
 end
 
 % Copied from fit_line_density on 16 Mar 2018
 function e = emgfxn_lu(f,x)
-e = f(1)/2 .* exp( f(3) / f(2) + f(4).^2 / (2*f(2).^2) - x/f(2) )...
+e = f(1)/(2 .* f(2)).* exp( f(3) / f(2) + f(4).^2 / (2*f(2).^2) - x/f(2) )...
     .* erfc( -1/sqrt(2) * ((x-f(3))/f(4) - f(4)/f(2)) ) + f(5);
 e(isnan(e)) = Inf;
 end
