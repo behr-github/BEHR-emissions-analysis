@@ -1071,6 +1071,18 @@ classdef misc_emissions_analysis
             
             if weight_wind_dirs
                 [wind_dir_weights, wind_dir_edges] = misc_emissions_analysis.calculate_wind_bin_weights(winds.locs, winds_cutoff, 'all_winds', false);
+            else
+                % When we hit the parfor loop, Matlab will try to transmit 
+                % all variables needed in the loop to the workers. It does 
+                % not care that wind_dir_weights and wind_dir_edges aren't
+                % needed if weight_wind_dirs is false, so we have to give 
+                % these some fill value to avoid a "variable not defined"
+                % error. These are actually sliced variables in the parfor 
+                % loop, so they need to be the same size as winds.locs 
+                % because the parfor loop will try to send e.g. wind_dir_weights{20}
+                % to the worker doing a=20.
+                wind_dir_weights = cell(size(winds.locs));
+                wind_dir_edges = cell(size(winds.locs));
             end
             
             parfor a=1:numel(winds.locs)
@@ -1104,7 +1116,7 @@ classdef misc_emissions_analysis
             end
             
             for a=1:numel(winds.locs)
-                winds.locs(a).no2_sectors = rmfield(no2(a), 'wind_used_bool');
+                winds.locs(a).no2_sectors = no2(a);
             end
             
             locs = winds.locs;
