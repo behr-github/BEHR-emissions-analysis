@@ -230,11 +230,11 @@ classdef misc_emissions_analysis
             end_month = 9;
             
             if strcmpi(time_period, 'beginning')
-                start_dates = {datenum(2005, start_month, 1), datenum(2007, start_month, 1)};
-                end_dates = {eomdate(2005, end_month), eomdate(2007, end_month)};
+                start_dates = {datenum(2007, start_month, 1), datenum(2008, start_month, 1), datenum(2009, start_month, 1)};
+                end_dates = {eomdate(2007, end_month), eomdate(2008, end_month), eomdate(2009, end_month)};
             elseif strcmpi(time_period, 'end')
-                start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1)};
-                end_dates = {eomdate(2012, end_month), eomdate(2013, end_month)};
+                start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1), datenum(2014, start_month, 1)};
+                end_dates = {eomdate(2012, end_month), eomdate(2013, end_month), eomdate(2014, end_month)};
             else
                 E.badinput('TIME_PERIOD "%s" not recognized', time_period);
             end
