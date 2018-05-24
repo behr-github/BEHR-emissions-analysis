@@ -511,7 +511,7 @@ classdef misc_emissions_analysis
             loc_inds = find(strcmp(site_type, loc_types));
         end
         
-        function loc_inds = get_loc_inds_interactive(varargin)
+        function [loc_inds, file_loc_inds] = get_loc_inds_interactive(varargin)
             p = advInputParser;
             p.addFlag('one_loc');
             p.parse(varargin{:});
@@ -521,11 +521,20 @@ classdef misc_emissions_analysis
             
             locs = misc_emissions_analysis.read_locs_file();
             loc_names = {locs.ShortName};
+            loc_types = {locs.SiteType};
+            loc_names = loc_names(~strcmpi(loc_types,'RuralAreas'));
             if ~one_loc_flag
                 loc_inds = ask_multiselect('Choose the locations to use', loc_names, 'returnindex', true);
             else
                 loc_inds = ask_multichoice('Choose the location to use', loc_names, 'returnindex', true);
             end
+            
+            min_ind = 1;
+            max_ind = numel(loc_names);
+            default_inds = 1:numel(loc_names);
+            
+            file_loc_inds = ask_number('Enter the location indicies in the file name', 'default', default_inds,...
+                'testfxn', @(x) all(x >= min_ind & x <= max_ind), 'testmsg', sprintf('All values must be between %d and %d', min_ind, max_ind));
         end
         
         function fit_type_in = get_fit_type_interactive(varargin)
@@ -1951,7 +1960,7 @@ classdef misc_emissions_analysis
                         
             loc_inds = pout.loc_inds;
             if isnan(loc_inds)
-                loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
+                [loc_inds, file_loc_inds] = misc_emissions_analysis.get_loc_inds_interactive();
             end
             
             mass_value = pout.mass_value;
@@ -1963,7 +1972,7 @@ classdef misc_emissions_analysis
             end
             
             use_wrf = pout.use_wrf;
-            [use_wrf, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf, loc_inds);
+            [use_wrf, loc_inds, ~, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf, loc_inds, file_loc_inds);
             
             single_plot_bool = pout.single_plot;
             if isnan(single_plot_bool)
@@ -2707,7 +2716,7 @@ classdef misc_emissions_analysis
             days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
         end
         
-        function [use_wrf, loc_inds, wind_rej_field] = ask_to_use_wrf(use_wrf, default_loc_inds)
+        function [use_wrf, loc_inds, wind_rej_field, file_loc_inds] = ask_to_use_wrf(use_wrf, default_loc_inds, default_file_inds)
             % 26 Feb 2018: WRF line densities only completed for Chicago,
             % so if using WRF line densities, we need to specify location
             % indicies = 9 for the file name.
@@ -2718,12 +2727,17 @@ classdef misc_emissions_analysis
             if ~exist('default_loc_inds', 'var') || isempty(default_loc_inds)
                 default_loc_inds = 1:71;
             end
+            if ~exist('default_file_inds', 'var') || isempty(default_file_inds)
+                default_file_inds = default_loc_inds;
+            end
             
             if use_wrf
                 loc_inds = 9; % currently WRF data only available for Chicago
                 wind_rej_field = misc_emissions_analysis.wind_reject_field_wrf;
+                file_loc_inds = loc_inds;
             else
                 loc_inds = default_loc_inds;
+                file_loc_inds = default_file_inds;
                 wind_rej_field = misc_emissions_analysis.wind_reject_field_std;
             end
             
