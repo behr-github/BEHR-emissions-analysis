@@ -156,11 +156,12 @@ classdef misc_emissions_analysis
         function verify_git_state()
             if ~misc_emissions_analysis.git_check_complete
                 % This requires that validate_date and list_behr_files be able
-                % to handle discontinuous date ranges. Also requires that
-                % the sprintf_ranges and do_keep_day_of_week functions are
-                % available.
+                % to handle discontinuous date ranges and list_behr_files knows
+                % about the 'all' flag.
+                % Also requires that the sprintf_ranges and do_keep_day_of_week 
+                % functions are available.
                 G = GitChecker;
-                G.addReqCommits(behr_paths.behr_utils, 'd524710e');
+                G.addReqCommits(behr_paths.behr_utils, 'aad7763');
                 G.addReqCommits(behr_paths.utils, 'fc1cef0');
                 % checkState() by default will error if the repositories
                 % are not in the correct state.
@@ -230,11 +231,11 @@ classdef misc_emissions_analysis
             end_month = 9;
             
             if strcmpi(time_period, 'beginning')
-                start_dates = {datenum(2005, start_month, 1), datenum(2007, start_month, 1)};
-                end_dates = {eomdate(2005, end_month), eomdate(2007, end_month)};
+                start_dates = {datenum(2007, start_month, 1), datenum(2008, start_month, 1), datenum(2009, start_month, 1)};
+                end_dates = {eomdate(2007, end_month), eomdate(2008, end_month), eomdate(2009, end_month)};
             elseif strcmpi(time_period, 'end')
-                start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1)};
-                end_dates = {eomdate(2012, end_month), eomdate(2013, end_month)};
+                start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1), datenum(2014, start_month, 1)};
+                end_dates = {eomdate(2012, end_month), eomdate(2013, end_month), eomdate(2014, end_month)};
             else
                 E.badinput('TIME_PERIOD "%s" not recognized', time_period);
             end
@@ -793,14 +794,23 @@ classdef misc_emissions_analysis
                 % directory listing of the WRF directory again (because it
                 % should be organized by month and year).
                 fprintf('%s: Gathering WRF files\n', datestr(dvec(d)));
-                if month(dvec(d)) == last_month && year(dvec(d)) == last_year
-                    fprintf('     Using existing list of WRF files\n');
-                    wrf_files = misc_emissions_analysis.closest_wrf_file_in_time(dvec(d), all_months_wrf_files);
-                else
-                    fprintf('     New month: need to get the directory listing\n');
-                    [wrf_files, all_months_wrf_files] = misc_emissions_analysis.closest_wrf_file_in_time(dvec(d));
-                    last_month = month(dvec(d));
-                    last_year = year(dvec(d));
+                try
+                    if month(dvec(d)) == last_month && year(dvec(d)) == last_year
+                        fprintf('     Using existing list of WRF files\n');
+                        wrf_files = misc_emissions_analysis.closest_wrf_file_in_time(dvec(d), all_months_wrf_files);
+                    else
+                        fprintf('     New month: need to get the directory listing\n');
+                        [wrf_files, all_months_wrf_files] = misc_emissions_analysis.closest_wrf_file_in_time(dvec(d));
+                        last_month = month(dvec(d));
+                        last_year = year(dvec(d));
+                    end
+                catch err
+                    if strcmp(err.identifier, 'MATLAB:load:couldNotReadFile')
+                        fprintf('Cannot load file for %s, skipping\n', datestr(dvec(d)));
+                        continue
+                    else
+                        rethrow(err)
+                    end
                 end
                 
                 % Load the bottom five layers of U and V, plus COSALPHA and
@@ -873,6 +883,10 @@ classdef misc_emissions_analysis
             % Iterate over dates in the outer loop since we need to load
             % the BEHR file for each day.
             for i_date = 1:numel(dvec)
+                if all(isnan(locs(1).WindSpeed(i_date,:)))
+                    fprintf('No wind speeds defined for %s, so leaving all false\n', datestr(dvec(i_date)));
+                    continue
+                end
                 fprintf('Marking useful winds for %s\n', datestr(dvec(i_date)));
                 Data = load_behr_file(dvec(i_date),'daily','us');
                 for i_orbit = 1:numel(Data)
@@ -1003,7 +1017,7 @@ classdef misc_emissions_analysis
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
  
             % Find the list of BEHR files between the start and end dates
-            [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily');
+            [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily','all');
             wind_reject_field = '';
             if wrf_bool
                 for i_file = 1:numel(behr_files)
@@ -1043,12 +1057,18 @@ classdef misc_emissions_analysis
             
             
             % Check that the dates match up with what we're expecting (it
-            % should because we load the file with those dates)
+            % should because we load the file with those dates). Also check
+            % that it matches up with the BEHR filenames.
             check_dvec = misc_emissions_analysis.make_datevec(start_date, end_date);
             if ~isequal(check_dvec, winds.dvec)
                 E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s, %d dates)', winds_file, datestr(start_date(1)), datestr(end_date(end)), numel(check_dvec));
             end
             
+            behr_dvec = date_from_behr_filenames(behr_files);
+            if ~isequal(winds.dvec(:), behr_dvec(:))
+                E.callError('date_mismatch', 'Dates in the winds file (%s) do not match the BEHR files listed', winds_file)
+            end
+
             if ~isempty(loc_indicies)
                 winds.locs = misc_emissions_analysis.cutdown_locs_by_index(winds.locs, loc_indicies);
             end
@@ -1071,6 +1091,18 @@ classdef misc_emissions_analysis
             
             if weight_wind_dirs
                 [wind_dir_weights, wind_dir_edges] = misc_emissions_analysis.calculate_wind_bin_weights(winds.locs, winds_cutoff, 'all_winds', false);
+            else
+                % When we hit the parfor loop, Matlab will try to transmit 
+                % all variables needed in the loop to the workers. It does 
+                % not care that wind_dir_weights and wind_dir_edges aren't
+                % needed if weight_wind_dirs is false, so we have to give 
+                % these some fill value to avoid a "variable not defined"
+                % error. These are actually sliced variables in the parfor 
+                % loop, so they need to be the same size as winds.locs 
+                % because the parfor loop will try to send e.g. wind_dir_weights{20}
+                % to the worker doing a=20.
+                wind_dir_weights = cell(size(winds.locs));
+                wind_dir_edges = cell(size(winds.locs));
             end
             
             parfor a=1:numel(winds.locs)
@@ -1091,7 +1123,7 @@ classdef misc_emissions_analysis
                 % wind direction. This will always filter by wind speed
                 % though.
                 wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), winds_cutoff, winds_op, wind_reject_field);
-                
+
                 if by_sectors
                     fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
@@ -1104,7 +1136,7 @@ classdef misc_emissions_analysis
             end
             
             for a=1:numel(winds.locs)
-                winds.locs(a).no2_sectors = rmfield(no2(a), 'wind_used_bool');
+                winds.locs(a).no2_sectors = no2(a);
             end
             
             locs = winds.locs;

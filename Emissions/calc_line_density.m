@@ -228,7 +228,14 @@ end
 create_array = true;
 i = 0;
 for d=1:numel(fnames_struct)
-    D = load(fullfile(fpath,fnames_struct(d).name),'Data');
+    this_file = fullfile(fpath,fnames_struct(d).name);
+    % Some days are not produced in BEHR. Those days need to be skipped.
+    if exist(this_file, 'file')
+        D = load(this_file,'Data');
+    else
+        fprintf('%s does not exist, skipping\n', this_file);
+        continue
+    end
 
     if ~do_keep_day_of_week(D.Data(1).Date, days_of_week)
         if DEBUG_LEVEL > 0
@@ -247,6 +254,9 @@ for d=1:numel(fnames_struct)
             continue
         end
         
+        if isnan(theta(d,s))
+            E.notimplemented('No handling for NaN wind direction')
+        end
         
         if DEBUG_LEVEL > 0; disp('Rotating plume'); end
         if ~isempty(rel_box_corners)
