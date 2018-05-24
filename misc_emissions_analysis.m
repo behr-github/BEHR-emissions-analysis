@@ -15,6 +15,8 @@ classdef misc_emissions_analysis
         wind_reject_field_std = 'WindRejects';
         wind_reject_field_wrf = 'WRFWindRejects';
         
+        allowed_fit_types = {'lu','convolution'};
+        
         % This is the standard fast/slow separation (in meters/second) used
         % if generating slow and fast line densities for the convolution
         % approach.
@@ -112,7 +114,7 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
-        function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week)
+        function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week, fit_type)
             if using_wrf
                 product_string = 'WRF';
             else
@@ -126,7 +128,7 @@ classdef misc_emissions_analysis
             end
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
-            filename = sprintf('%s_emg_fits_%s_%sto%s_%s.mat', product_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
+            filename = sprintf('%s_emg_%s_fits_%s_%sto%s_%s.mat', product_string, fit_type, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.emg_fit_dir, filename);
         end
         
@@ -222,7 +224,7 @@ classdef misc_emissions_analysis
             % density functions are set up to take non-contiguous time
             % periods
             if nargin < 1 || isempty(time_period)
-                time_period = ask_multichoice('Which time period to use?', {'beginning (2005, 2007)', 'end (2012-13)'}, 'list', true);
+                time_period = ask_multichoice('Which time period to use?', {'beginning (2007-09)', 'end (2012-14)'}, 'list', true);
                 time_period = strsplit(time_period, ' ');
                 time_period = time_period{1};
             end
@@ -403,7 +405,7 @@ classdef misc_emissions_analysis
                 % The first three parts of the split path should be an empty
                 % string, Volumes, and the share. This will put a / at the
                 % beginning
-                wrf_share = strjoin(path_parts(1:3), '/');
+                wrf_share = strjoin(path_parts(1:4), '/');
                 
                 % Whichever share it's on, it should be in a consistent path
                 % there - except for 2012. I was having trouble getting the
@@ -413,6 +415,8 @@ classdef misc_emissions_analysis
                 inputs_path = fullfile(wrf_share, 'Inputs', num2str(nei_year(a)), 'IC-BC-Emis');
                 if nei_year(a) == 2012
                     inputs_path = fullfile(inputs_path, 'Months01-06');
+                elseif nei_year(a) == 2014
+                    inputs_path = fullfile(inputs_path, 'Jan-Aug');
                 end
                 
                 % We're going to average UTC 17-22, so we just need the second
@@ -524,6 +528,21 @@ classdef misc_emissions_analysis
             end
         end
         
+        function fit_type_in = get_fit_type_interactive(varargin)
+            if nargin > 0
+                fit_type_in = varargin{1};
+            else
+                fit_type_in = '';
+            end
+            
+            allowed_fit_types = misc_emissions_analysis.allowed_fit_types;
+            if isempty(fit_type_in)
+                fit_type_in = ask_multichoice('Which fitting method to use?', allowed_fit_types, 'list', true);
+            elseif ~ismember(fit_type_in, allowed_fit_types)
+                E.badinput('FIT_TYPE must be one of: %s', strjoin(allowed_fit_types, ', '));
+            end
+        end
+        
         function ld_file = get_line_dens_file_interactive()
             avail_files = dir(fullfile(misc_emissions_analysis.line_density_dir, '*.mat'));
             avail_files = {avail_files.name};
@@ -537,7 +556,8 @@ classdef misc_emissions_analysis
             p.addParameter('loc_inds', []);
             p.addParameter('include_vcds', true);
             p.addParameter('use_wrf', false);
-            p.addParameter('file_loc_inds', 1:70); % location indicies in the file name
+            p.addParameter('file_loc_inds', 1:71); % location indicies in the file name
+            p.addParameter('fit_type','');
             p.parse(varargin{:});
             pout = p.Results;
             
@@ -545,6 +565,7 @@ classdef misc_emissions_analysis
             include_vcds = pout.include_vcds;
             use_wrf = pout.use_wrf;
             file_loc_inds = pout.file_loc_inds;
+            fit_type = misc_emissions_analysis.get_fit_type_interactive(pout.fit_type);
             
             [first_dates_st, first_dates_end] = misc_emissions_analysis.select_start_end_dates(first_time_period);
             [second_dates_st, second_dates_end] = misc_emissions_analysis.select_start_end_dates(second_time_period);
@@ -554,8 +575,8 @@ classdef misc_emissions_analysis
             % rerun for the 3 year data anyway. Thus we only need to
             % override the default value if the fits files don't cover
             % sites 1-70.
-            first_locs = load(misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), use_wrf, file_loc_inds, first_weekdays));
-            second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), use_wrf, file_loc_inds, second_weekdays));
+            first_locs = load(misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), use_wrf, file_loc_inds, first_weekdays, fit_type));
+            second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), use_wrf, file_loc_inds, second_weekdays, fit_type));
             
             first_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(first_locs.locs, user_loc_inds);
             second_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(second_locs.locs, user_loc_inds);
@@ -1151,6 +1172,7 @@ classdef misc_emissions_analysis
             p = inputParser;
             p.addParameter('time_period', '');
             p.addParameter('loc_indicies', []);
+            p.addParameter('file_loc_indicies','match'); % if set to 'match' then this will be the same as loc_indicies.
             p.addParameter('add_nei', true);
             p.addParameter('days_of_week', 'UMTWRFS');
             p.addParameter('use_wrf', false);
@@ -1162,12 +1184,14 @@ classdef misc_emissions_analysis
             p.addParameter('max_fit_attempts', 2);  
             p.addParameter('fatal_fit_fail', true);
             p.addParameter('skip_linedens_errors', -1);
+            p.addParameter('fit_type', '');
             
             p.parse(varargin{:});
             pout = p.Results;
             
             time_period = pout.time_period;
             loc_indicies = pout.loc_indicies;
+            file_loc_indicies = pout.file_loc_indicies;
             add_nei = pout.add_nei;
             days_of_week = pout.days_of_week;
             wrf_bool = pout.use_wrf;
@@ -1175,11 +1199,17 @@ classdef misc_emissions_analysis
             max_fit_attempts = pout.max_fit_attempts;
             fatal_if_cannot_fit = pout.fatal_fit_fail;
             skip_linedens_errors = pout.skip_linedens_errors;
-            
+            fit_type_in = pout.fit_type;
             % time_period should be checked in select_start_end_dates
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
                 E.badinput('LOC_INDICIES must be a numeric array with all values >= 1')
+            end
+            
+            if strcmpi(file_loc_indicies, 'match')
+                file_loc_indicies = loc_indicies;
+            elseif ~isnumeric(file_loc_indicies) || any(file_loc_indicies(:) < 1)
+                E.badinput('FILE_LOC_INDICIES must be a numeric array with all values >= 1 or the string "match"')
             end
             
             if ~isscalar(add_nei) || (~islogical(add_nei) && ~isnumeric(add_nei))
@@ -1194,10 +1224,13 @@ classdef misc_emissions_analysis
                 E.badinput('DO_OVERWRITE must be a scalar logical or number')
             end
             
+            fit_type_in = misc_emissions_analysis.get_fit_type_interactive(fit_type_in);
+            
+            
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_indicies, days_of_week);
+            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_indicies, days_of_week, fit_type_in);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -1210,12 +1243,37 @@ classdef misc_emissions_analysis
                 end
             end
             
-            % Load the file with the line densities. For this, we never
-            % want the sectors line densities (first false) and usually
-            % want the file with winds greater than 3 m/s. This may change
-            % if I do the slow winds convolution approach.
-            E.notimplemented('MAKE_EMG_FITS not updated to the filtered/weighted file names')
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, wrf_bool, 'gt', 3, loc_indicies, days_of_week);
+            
+            if strcmpi(fit_type_in, 'convolution')
+                % For the convolution approach, we want the fast line
+                % densities to be unfiltered for wind direction (because in
+                % theory the convolution with the slow line densities will
+                % handle the downwind sources we had to filter out in the
+                % normal way) and unweighted (fast line densities should
+                % always be unweighted for wind diretion contribution).
+                filtered_bool = false;
+                weighted_bool = false;
+                % However for the slow line densities we do want them
+                % weighted for wind direction contribution so that they
+                % match the fast line densities.
+                slow_ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, true, wrf_bool, 'lt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week);
+                if ~exist(slow_ldens_file, 'file')
+                    [~,ldens_basename] = fileparts(slow_ldens_file);
+                    % Use regular error function to have more control over the
+                    % error identifier
+                    error('emis_analysis:no_linedens_file', 'Slow line density file %s not found, cannot fit EMG functions', ldens_basename);
+                end
+                slow_line_densities = load(slow_ldens_file);
+            else
+                % Load the file with the line densities. For this, we never
+                % want the sectors line densities (first false) and usually
+                % want the file with winds greater than the separation
+                % speed (3 m/s as of 27 Mar 2018).
+                filtered_bool = true;
+                weighted_bool = false;
+                slow_line_densities = [];
+            end
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, weighted_bool, wrf_bool, 'gt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week);
             if ~exist(ldens_file, 'file')
                 [~,ldens_basename] = fileparts(ldens_file);
                 % Use regular error function to have more control over the
@@ -1232,7 +1290,10 @@ classdef misc_emissions_analysis
             end
             
             if ~isempty(loc_indicies)
-                locs = misc_emissions_analysis.cutdown_locs_by_index(line_densities.locs, loc_indicies); 
+                locs = misc_emissions_analysis.cutdown_locs_by_index(line_densities.locs, loc_indicies);
+                if ~isempty(slow_line_densities)
+                    slow_line_densities.locs = misc_emissions_analysis.cutdown_locs_by_index(slow_line_densities.locs, loc_indicies);
+                end
             else
                 locs = line_densities.locs;
             end
@@ -1246,18 +1307,38 @@ classdef misc_emissions_analysis
             end
             % Specify even the default options so that if fit_line_density
             % changes, we know exactly what options we wanted.
-            common_opts = {'fmincon_output', 'none', 'emgtype', 'lu', 'fittype', 'ssresid', 'nattempts', 20};
+            common_opts = {'fmincon_output', 'none', 'fittype', 'ssresid', 'nattempts', 20};
+            if strcmpi(fit_type_in, 'convolution')
+                % In Liu 2016, when she applies the convolved line
+                % densities, the center offset in the exponential is set to
+                % 0. I assume this is because the slow line densities
+                % should already contain information about the true center
+                % point of the emission.
+                common_opts = veccat(common_opts, {'fixed_param','mux','fixed_val',0});
+                
+                % We also need to indicate that the mu_x and sigma_x
+                % parameters don't matter when checking if the two fitting
+                % attempts are the same
+                fit_check_inds = [1 2 5];
+            else
+                fit_check_inds = 1:5;
+            end
             
             for a=1:numel(locs)
                 fprintf('Fitting %s\n', locs(a).ShortName);
                 safety_count = 1;
                 while true
+                    if strcmpi(fit_type_in, 'convolution')
+                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens);
+                    else
+                        fit_type = fit_type_in;
+                    end
                     try
-                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
                         % Try this a second time - if it gives a different
                         % answer, we should re-run, since that suggests we
                         % didn't find the minimum one time.
-                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, common_opts{:});
+                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
                     catch err
                         msg = sprintf('Fitting %s failed with error:\n "%s"\nSkip this location and continue?', locs(a).ShortName, err.message);
                         if skip_linedens_errors > 0 || (skip_linedens_errors < 0 && ask_yn(msg))
@@ -1272,7 +1353,7 @@ classdef misc_emissions_analysis
                     % Check that the two are the same to within 1%
                     diff_tolerance = 0.01;
                     rdel = reldiff(struct2array(ffit_check), struct2array(ffit));
-                    if all(abs(rdel) < diff_tolerance)
+                    if all(abs(rdel(fit_check_inds)) < diff_tolerance)
                         locs(a).fit_info = struct('ffit',ffit,'emgfit',emgfit,'param_stats',param_stats,'f0',f0,'history',history,'fitresults',fitresults);
                         break
                     elseif safety_count > max_fit_attempts
@@ -1295,13 +1376,21 @@ classdef misc_emissions_analysis
                     % intervals as the uncertainty. We need to restrict the
                     % winds to what should have been used to calculate the line
                     % densities.
-                    [ ~, winds_strings ] = misc_emissions_analysis.extract_info_from_file_names(ldens_file);
+                    [ ~, ~, ~, winds_strings ] = misc_emissions_analysis.extract_info_from_file_names(ldens_file);
                     % Assuming that "winds_strings" is of the form
                     % winds-lt# or winds-gt#, then
                     % winds_strings(end-2:end-1) will give the wind mode
                     % (less than or greater than) and converting
                     % winds_strings(3) to a number will give the speed.
                     wind_logical = misc_emissions_analysis.set_wind_conditions(locs(a), str2double(winds_strings(end)), winds_strings(end-2:end-1));
+                    % We can use the WindUsedBool field if available to
+                    % further constrain the winds to those from times when
+                    % there were valid NO2 observations
+                    if isfield(locs(a),'WindUsedBool')
+                        wind_logical = wind_logical & locs(a).WindUsedBool;
+                    else
+                        warning('No "WindUsedBool" field detected; all winds that meet the speed criterion will be used in the lifetime/emissions calcuation');
+                    end
                     emis_tau = misc_emissions_analysis.calculate_emission_lifetime(locs(a).no2_sectors, locs(a).fit_info, locs(a).WindSpeed(wind_logical));
                     
                     if add_nei
@@ -1613,16 +1702,26 @@ classdef misc_emissions_analysis
             
         end
         
-        function plot_fits_interactive()
+        function plot_fits_interactive(varargin)
+            p = inputParser;
+            p.addParameter('loc_indicies', [])
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            loc_inds = pout.loc_indicies;
+            
             [beg_start_date, beg_end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
             [end_start_date, end_end_date] = misc_emissions_analysis.select_start_end_dates('end');
             
-            
+            fit_type = misc_emissions_analysis.get_fit_type_interactive();
             
             % Load the weekday, weekend, and all day fits files. Cut out
             % the memory intensive parts of the line density sub structure
             % to save memory.
-            [use_wrf, loc_inds] = misc_emissions_analysis.ask_to_use_wrf();
+            [use_wrf, loc_inds_wrf] = misc_emissions_analysis.ask_to_use_wrf();
+            if isempty(loc_inds)
+                loc_inds = loc_inds_wrf;
+            end
             
             days_of_week = {'UMTWRFS', 'TWRF', 'US'};
             loc_prototype = struct('Location', '', 'x', [], 'linedens', [], 'emgfit', [], 'r2', []);
@@ -1630,8 +1729,8 @@ classdef misc_emissions_analysis
             end_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
             
             for i_dow = 1:numel(days_of_week)
-                beg_fits = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, use_wrf, loc_inds, days_of_week{i_dow}));
-                end_fits = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, use_wrf, loc_inds, days_of_week{i_dow}));
+                beg_fits = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, use_wrf, loc_inds, days_of_week{i_dow}, fit_type));
+                end_fits = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, use_wrf, loc_inds, days_of_week{i_dow}, fit_type));
                 for i_loc = 1:numel(beg_fits.locs)
                     beg_locs(i_loc, i_dow) = copy_structure_fields(beg_fits.locs(i_loc), loc_prototype, 'substructs');
                     end_locs(i_loc, i_dow) = copy_structure_fields(end_fits.locs(i_loc), loc_prototype, 'substructs');
@@ -1842,6 +1941,7 @@ classdef misc_emissions_analysis
             p = inputParser;
             p.addParameter('loc_inds', nan);
             p.addParameter('mass_value', '');
+            p.addParameter('fit_type', '');
             p.addParameter('use_wrf', nan);
             p.addParameter('single_plot', nan);
             p.addParameter('days_of_week', '');
@@ -1863,7 +1963,7 @@ classdef misc_emissions_analysis
             end
             
             use_wrf = pout.use_wrf;
-            [use_wrf, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf);
+            [use_wrf, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf, loc_inds);
             
             single_plot_bool = pout.single_plot;
             if isnan(single_plot_bool)
@@ -1887,13 +1987,14 @@ classdef misc_emissions_analysis
                 end
             end
             
+            fit_type = misc_emissions_analysis.get_fit_type_interactive(pout.fit_type);
             
             locs = misc_emissions_analysis.read_locs_file();
             
             vcds_bool = strcmpi(mass_value, 'vcds');
-            decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool);
-            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool);
-            end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool);
+            decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+            end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
             
             
             decadal_style = struct('marker', {'o','x'}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
@@ -2410,6 +2511,13 @@ classdef misc_emissions_analysis
                 % freedom and square root. For the numbers of measurements,
                 % we need to add back in the 5 degrees of freedom removed
                 % in accounting for the fitting parameters.
+                %
+                % 23 Apr 2018 - strictly we could calculate the sum of
+                % squared residuals by taking sum((emgfit - linedens).^2),
+                % whereas doing sd^2 * n_dof includes the variance of the
+                % fit in there. However, I'm not sure which is better for
+                % the t-test.
+                error('Did you figure out if the SSR should be sum(emgfit - linedens) or sd^2 * n?');
                 [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
                     values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
                     sum(value_dofs(i_chng,:)), 'confidence', 0.95);
@@ -2599,7 +2707,7 @@ classdef misc_emissions_analysis
             days_of_week = regexp(files, '(?<=_)[UMTWRFS]+(?=\.mat)', 'match', 'once');
         end
         
-        function [use_wrf, loc_inds, wind_rej_field] = ask_to_use_wrf(use_wrf)
+        function [use_wrf, loc_inds, wind_rej_field] = ask_to_use_wrf(use_wrf, default_loc_inds)
             % 26 Feb 2018: WRF line densities only completed for Chicago,
             % so if using WRF line densities, we need to specify location
             % indicies = 9 for the file name.
@@ -2607,11 +2715,15 @@ classdef misc_emissions_analysis
                 use_wrf = ask_yn('Use WRF line densities? (BEHR if no)');
             end
             
+            if ~exist('default_loc_inds', 'var') || isempty(default_loc_inds)
+                default_loc_inds = 1:71;
+            end
+            
             if use_wrf
-                loc_inds = 9;
+                loc_inds = 9; % currently WRF data only available for Chicago
                 wind_rej_field = misc_emissions_analysis.wind_reject_field_wrf;
             else
-                loc_inds = 1:70;
+                loc_inds = default_loc_inds;
                 wind_rej_field = misc_emissions_analysis.wind_reject_field_std;
             end
             

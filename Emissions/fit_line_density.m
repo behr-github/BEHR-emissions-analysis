@@ -405,11 +405,15 @@ ffit = unfix_params(fitparams, fixed_param, fixed_val);
 %
 % http://www.mathworks.com/matlabcentral/answers/153414-estimator-standard-errors-using-fmincon-portfolio-optimization-context)
 % says that the fmincon Hessian can be inaccurate, hence we take it from
-% fminunc that is initialized at the solution from fmincon.
+% fminunc that is initialized at the solution from fmincon. Set the
+% standard deviation to 0 for any fixed parameter. This should propagate
+% through to the rest of the uncertainty values.
+param_stats.sd = zeros(5,1);
+
 n_ld = sum(~isnan(no2_x) & ~isnan(no2_ld));
 sse = nansum2((emgfit - no2_ld).^2) * 1/(n_ld - 5);
-param_stats.sd = sqrt(sse * diag(inv(unc_hessian)));
-param_stats.percentsd = param_stats.sd ./ abs(fitparams') * 100;
+param_stats.sd(inds) = sqrt(sse * diag(inv(unc_hessian)));
+param_stats.percentsd(inds) = param_stats.sd(inds) ./ abs(fitparams') * 100;
 
 % tinv gives the t value for a one-tailed distribution, we want two-tailed
 % so alpha must be halved, thus 97.5% certainty one-tailed is equivalent to
@@ -417,7 +421,7 @@ param_stats.percentsd = param_stats.sd ./ abs(fitparams') * 100;
 % degrees of freedom, one for each of the parameters fitted.
 student_t = tinv(0.975,n_ld-5);
 param_stats.ci95 = param_stats.sd .* student_t ./ sqrt(n_ld);
-param_stats.percent_ci95 = param_stats.ci95 ./ abs(fitparams') * 100;
+param_stats.percent_ci95(inds) = param_stats.ci95(inds) ./ abs(fitparams') * 100;
 fitresults.fminunc_soln = f_unc;
 fitresults.fminunc_hessian = unc_hessian;
 fitresults.fminunc_cov = sse * unc_hessian;
