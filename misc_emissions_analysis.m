@@ -220,11 +220,13 @@ classdef misc_emissions_analysis
         
         function [start_dates, end_dates, time_period] = select_start_end_dates(time_period)
             E = JLLErrors;
-            % Eventually these should change to cell arrays once the line
-            % density functions are set up to take non-contiguous time
-            % periods
+            % Returns the start and end dates as cell arrays of datenums.
+            % TIME_PERIOD may be 'beginning', 'end', 'beg_2yr', or
+            % 'end_2yr' specifying the standard start/end dates or a 2-by-N
+            % cell array of dates, where the first row will be used as the
+            % start dates and the second row as the end dates.
             if nargin < 1 || isempty(time_period)
-                time_period = ask_multichoice('Which time period to use?', {'beginning (2007-09)', 'end (2012-14)'}, 'list', true);
+                time_period = ask_multichoice('Which time period to use?', {'beginning (2007-09)', 'beg_2yr (2005,07)', 'end (2012-14)', 'end_2yr (2012-13)'}, 'list', true);
                 time_period = strsplit(time_period, ' ');
                 time_period = time_period{1};
             end
@@ -238,9 +240,22 @@ classdef misc_emissions_analysis
             elseif strcmpi(time_period, 'end')
                 start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1), datenum(2014, start_month, 1)};
                 end_dates = {eomdate(2012, end_month), eomdate(2013, end_month), eomdate(2014, end_month)};
+            elseif strcmpi(time_period, 'beg_2yr')
+                start_dates = {datenum(2005, start_month, 1), datenum(2007, start_month, 1)};
+                end_dates = {eomdate(2005, end_month), eomdate(2007, end_month)};
+            elseif strcmpi(time_period, 'end_2yr')
+                start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1)};
+                end_dates = {eomdate(2012, end_month), eomdate(2013, end_month)};
+            elseif iscell(time_period)
+                start_dates = validate_date(time_period(1,:));
+                end_dates = validate_date(time_period(2,:));
             else
                 E.badinput('TIME_PERIOD "%s" not recognized', time_period);
             end
+        end
+        
+        function dow = select_days_of_week(dow)
+            dow = opt_ask_multichoice('Select the days of week to use', {'UMTWRFS', 'TWRF', 'US'}, dow, 'days_of_week', 'list', true);
         end
         
         function inds = find_loc_struct_inds(locs)
@@ -579,13 +594,12 @@ classdef misc_emissions_analysis
             [first_dates_st, first_dates_end] = misc_emissions_analysis.select_start_end_dates(first_time_period);
             [second_dates_st, second_dates_end] = misc_emissions_analysis.select_start_end_dates(second_time_period);
             
-            % As of 13 Feb 2018, all of the fits files are for the first 70
-            % locations, which misses Valmy, but I can fix that when I
-            % rerun for the 3 year data anyway. Thus we only need to
-            % override the default value if the fits files don't cover
-            % sites 1-70.
-            first_locs = load(misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), use_wrf, file_loc_inds, first_weekdays, fit_type));
-            second_locs = load(misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), use_wrf, file_loc_inds, second_weekdays, fit_type));
+            first_file = misc_emissions_analysis.fits_file_name(first_dates_st(1), first_dates_end(end), use_wrf, file_loc_inds, first_weekdays, fit_type);
+            fprintf('Loading %s\n', first_file);
+            first_locs = load(first_file);
+            second_file = misc_emissions_analysis.fits_file_name(second_dates_st(1), second_dates_end(end), use_wrf, file_loc_inds, second_weekdays, fit_type);
+            fprintf('Loading %s\n', second_file);
+            second_locs = load(second_file);
             
             first_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(first_locs.locs, user_loc_inds);
             second_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(second_locs.locs, user_loc_inds);
@@ -728,6 +742,46 @@ classdef misc_emissions_analysis
             end
             fprintf('Saving merged file as %s\n', new_save_name);
             save(new_save_name, '-v7.3', '-struct', 'LD_all');
+        end
+        
+        function varargout = test_if_change_significant(varargin)
+            p = advInputParser;
+            p.addParameter('first_time_period','');
+            p.addParameter('second_time_period','');
+            p.addParameter('first_dow','');
+            p.addParameter('second_dow','');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            [~, ~, first_time_period] = misc_emissions_analysis.select_start_end_dates(pout.first_time_period);
+            first_dow = misc_emissions_analysis.select_days_of_week(pout.first_dow);
+            [~, ~, second_time_period] = misc_emissions_analysis.select_start_end_dates(pout.second_time_period);
+            second_dow = misc_emissions_analysis.select_days_of_week(pout.second_dow);
+            
+            % If we select a 2-year time period, those files only have 70
+            % sites
+            if regcmp(first_time_period, '2yr')
+                file_inds = 1:70;
+            else
+                file_inds = 1:71;
+            end
+            if regcmp(second_time_period, '2yr') ~= regcmp(first_time_period, '2yr')
+                E.notimplemented('Mix of 2 and 3 year files')
+            end
+            
+            loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
+            
+            [changes, loc_names] = misc_emissions_analysis.collect_changes(first_time_period, second_time_period, first_dow, second_dow, 'loc_inds', loc_inds, 'file_loc_inds', file_inds, 'include_vcds', false, 'fit_type', 'lu');
+            is_significant = misc_emissions_analysis.is_change_significant(changes.tau, changes.tau_sd, changes.n_dofs);
+            
+            if nargout > 0
+                varargout{1} = is_significant;
+            else
+                for i_loc = 1:numel(loc_names)
+                    fprintf('%s (%s %s -> %s %s): %d\n', loc_names{i_loc}, first_time_period, first_dow, second_time_period, second_dow, is_significant(i_loc));
+                end
+            end
         end
         
         %%%%%%%%%%%%%%%%%%%%%%
@@ -1953,6 +2007,7 @@ classdef misc_emissions_analysis
             p.addParameter('fit_type', '');
             p.addParameter('use_wrf', nan);
             p.addParameter('single_plot', nan);
+            p.addParameter('include_2years', nan);
             p.addParameter('days_of_week', '');
             
             p.parse(varargin{:});
@@ -1970,6 +2025,8 @@ classdef misc_emissions_analysis
             elseif ~ismember(mass_value, allowed_mass_vals)
                 E.badinput('MASS_VALUE must be one of: %s', strjoin(allowed_mass_vals, ', '));
             end
+            
+            include_2years = opt_ask_yn('Include the points from the 2 year runs?', pout.include_2years, '"include_2years"');
             
             use_wrf = pout.use_wrf;
             [use_wrf, loc_inds, ~, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf, loc_inds, file_loc_inds);
@@ -2004,11 +2061,35 @@ classdef misc_emissions_analysis
             decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
             beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
             end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+            lstr = {'2007-09 UMTWRFS','2012-14 UMTWRFS','2007-09 TWRF','2007-09 SU','2012-14 TWRF','2012-14 SU'};
             
+            % Avoid loading extra changes unless we need to to save memory.
+            % Since the old 2-year files only include 70 locations, we need
+            % to specify the file location inds as such. Lastly, don't plot
+            % the connecting lines for the changes in this case, it'll be
+            % too messy.
+            if include_2years
+                decadal_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                beginning_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'beg_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                end_2yr_changes = misc_emissions_analysis.collect_changes('end_2yr', 'end_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                connector_fmt = struct('linestyle','none');
+                lstr = veccat(lstr, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
+            else
+                connector_fmt = struct('color','k');
+            end
             
-            decadal_style = struct('marker', {'o','x'}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
-            beginning_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {'c','m'},'markersize',10);
-            end_style = struct('marker', {'^','*'}, 'linestyle', 'none', 'color', {[1 0.5 0], [0.5 0 0.5]},'markersize',10);
+            umtwrfs_marker = 'o';
+            twrf_marker = '^';
+            us_marker = '*';
+            marker_size = 10;
+            
+            decadal_style = struct('marker', {umtwrfs_marker,umtwrfs_marker}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
+            beginning_style = struct('marker', {twrf_marker,us_marker}, 'linestyle', 'none', 'color', {'b','b'},'markersize',10);
+            end_style = struct('marker', {twrf_marker,us_marker}, 'linestyle', 'none', 'color', {'r','r'},'markersize',10);
+            
+            decadal_2yr_style = struct('marker', {umtwrfs_marker, umtwrfs_marker}, 'linestyle', 'none', 'color', {[0 0.5 0], 'k'}, 'markersize', marker_size);
+            beginning_2yr_style = struct('marker', {twrf_marker, us_marker}, 'linestyle', 'none', 'color', {[0 0.5 0], [0 0.5 0]}, 'markersize', marker_size);
+            end_2yr_style = struct('marker', {twrf_marker, us_marker}, 'linestyle', 'none', 'color', {'k', 'k'}, 'markersize', marker_size);
             
             if vcds_bool
                 x_label_str = 'Avg. NO_2 VCD (molec. cm^2)';
@@ -2021,10 +2102,15 @@ classdef misc_emissions_analysis
                     l = gobjects(6,1);
                     figure;
                     ax = gca;
-                    l(1:2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'parent', ax);
-                    l(3:4) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'parent', ax);
-                    l(5:6) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'parent', ax);
-                    legend(l, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
+                    l(1:2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                    l(3:4) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                    l(5:6) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                    if include_2years
+                        l(7:8) = plot_changes(decadal_2yr_changes.(mass_value)(i_loc,:), decadal_2yr_changes.tau(i_loc,:), 'group_fmts', decadal_2yr_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                        l(9:10) = plot_changes(beginning_2yr_changes.(mass_value)(i_loc,:), beginning_2yr_changes.tau(i_loc,:), 'group_fmts', beginning_2yr_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                        l(11:12) = plot_changes(end_2yr_changes.(mass_value)(i_loc,:), end_2yr_changes.tau(i_loc,:), 'group_fmts', end_2yr_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                    end
+                    legend(l, lstr);
                     set(ax,'fontsize',16);
                     xlabel(x_label_str);
                     ylabel('\tau (hours)');
@@ -2471,6 +2557,19 @@ classdef misc_emissions_analysis
             end
         end
         
+        function difference_is_significant = is_change_significant(values, value_sds, value_dofs)
+            % Calculate whether the difference is significant at the 95%
+            % confidence level.
+            
+            difference_is_significant = false(size(values,1),1);
+            for i_chng = 1:size(values,1)
+                % The EMG fits have 5 fitting parameters.
+                [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
+                    values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
+                    sum(value_dofs(i_chng,:)), 'confidence', 0.95);
+            end
+        end
+        
         function plot_series = create_map_series(values, value_sds, value_dofs, value_r2, coords, corner, loc_names)
             % Helper function to set up the series with the right
             % coordinates and symbols based on their confidence and r2
@@ -2510,27 +2609,7 @@ classdef misc_emissions_analysis
             
             xx_bad_r2 = any(value_r2 < r2_criterion, 2);
             
-            difference_is_significant = false(size(values,1),1);
-            
-            % Calculate whether the difference is significant at the 95%
-            % confidence level.
-            for i_chng = 1:size(values,1)
-                % For SSR (sum of squared residuals), since SD = sqrt( SSR
-                % / n_dofs ) calculate SSR from number of degrees of
-                % freedom and square root. For the numbers of measurements,
-                % we need to add back in the 5 degrees of freedom removed
-                % in accounting for the fitting parameters.
-                %
-                % 23 Apr 2018 - strictly we could calculate the sum of
-                % squared residuals by taking sum((emgfit - linedens).^2),
-                % whereas doing sd^2 * n_dof includes the variance of the
-                % fit in there. However, I'm not sure which is better for
-                % the t-test.
-                error('Did you figure out if the SSR should be sum(emgfit - linedens) or sd^2 * n?');
-                [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
-                    values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
-                    sum(value_dofs(i_chng,:)), 'confidence', 0.95);
-            end
+            difference_is_significant = misc_emissions_analysis.is_change_significant(values, value_sds, value_dofs);
             
             xx_not_sig = ~difference_is_significant & ~xx_bad_r2;
             xx_sig = ~xx_not_sig & ~xx_bad_r2;
