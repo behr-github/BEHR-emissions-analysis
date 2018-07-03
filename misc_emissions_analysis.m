@@ -56,9 +56,15 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.emis_wrf_dir, 'WRF-VCDs');
         end
         
-        function filename = avg_file_name(year_in, days_of_week)
+        function filename = avg_file_name(year_in, days_of_week, varargin)
+            p = advInputParser;
+            p.addOptional('species', 'NO2');
+            p.parse(varargin{:});
+            pout = p.Results;
+            species = pout.species;
+            
             years_str = strjoin(sprintfmulti('%d', year_in),'_');
-            filename = sprintf('Summer_avg_%s_%s.mat', years_str, days_of_week);
+            filename = sprintf('Summer_avg_%s_%s_%s.mat', species, years_str, days_of_week);
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
@@ -611,21 +617,26 @@ classdef misc_emissions_analysis
             % n-by-2 arrays. Also get some metrics of the goodness of fit
             % and total mass
             
-            additional_fns = {'r2','a'};
+            additional_fns = {'r2','a','a_plus_B'};
             emis_tau_fns = fieldnames(first_locs.locs(1).emis_tau);
             all_fns = veccat(emis_tau_fns, additional_fns, 'column');
             default_mat = nan(numel(first_locs.locs), 2);
             for i_fn = 1:numel(all_fns)
                 changes.(all_fns{i_fn}) = default_mat;
                 for i_loc = 1:numel(first_locs.locs)
-                    
-                    first_value = find_substruct_field(first_locs.locs(i_loc), all_fns{i_fn});
-                    second_value = find_substruct_field(second_locs.locs(i_loc), all_fns{i_fn});
-                    if isempty(first_value)
-                        first_value = nan;
-                    end
-                    if isempty(second_value)
-                        second_value = nan;
+                    if strcmpi(all_fns{i_fn}, 'a_plus_B')
+                        first_value = a_plus_b(first_locs.locs(i_loc));
+                        second_value = a_plus_b(second_locs.locs(i_loc));
+                    else
+                        first_value = find_substruct_field(first_locs.locs(i_loc), all_fns{i_fn});
+                        second_value = find_substruct_field(second_locs.locs(i_loc), all_fns{i_fn});
+                        
+                        if isempty(first_value)
+                            first_value = nan;
+                        end
+                        if isempty(second_value)
+                            second_value = nan;
+                        end
                     end
                     
                     changes.(all_fns{i_fn})(i_loc, :) = [first_value, second_value];
@@ -640,6 +651,16 @@ classdef misc_emissions_analysis
             
             changes.Location = {first_locs.locs.Location}';
             changes.ShortName = {first_locs.locs.ShortName}';
+            
+            function aB = a_plus_b(locs)
+                a = find_substruct_field(locs, 'a');
+                B = find_substruct_field(locs, 'B');
+                if isempty(a) || isempty(B)
+                    aB = nan;
+                else
+                    aB = a + B;
+                end
+            end
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -792,11 +813,13 @@ classdef misc_emissions_analysis
             p = inputParser;
             p.addParameter('avg_year',[]);
             p.addParameter('days_of_week','');
+            p.addParameter('species','');
             p.parse(varargin{:});
             pout = p.Results;
             
             avg_year = pout.avg_year;
             days_of_week = pout.days_of_week;
+            species = pout.species;
             
             if isempty(avg_year)
                 avg_year = ask_number('Enter the year (or years separated by a space) to do a summer average for', 'testfxn', @(x) all(x >= 2005 & x <= 2015), 'testmsg', 'Year(s) must be between 2005 and 2015');
@@ -805,6 +828,7 @@ classdef misc_emissions_analysis
             end
             
             days_of_week = misc_emissions_analysis.choose_days_of_week(days_of_week);
+            species = opt_ask_multichoice('Which species to average?', {'NO2', 'HCHO'}, species, '"species"');
             
             start_date = cell(size(avg_year));
             end_date = cell(size(avg_year));
@@ -816,10 +840,16 @@ classdef misc_emissions_analysis
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
             common_opts = {'DEBUG_LEVEL', 1, 'dayofweek', days_of_week};
-            [monthly.no2, monthly.lon, monthly.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
-            [daily.no2, daily.lon, daily.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
+            switch species
+                case 'NO2'
+                    [monthly.no2, monthly.lon, monthly.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
+                    [daily.no2, daily.lon, daily.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
+                case 'HCHO'
+                    [monthly.hcho, monthly.lon, monthly.lat] = omhcho_time_average(start_date, end_date);
+                    daily = monthly;
+            end
             
-            save_name = misc_emissions_analysis.avg_file_name(avg_year, days_of_week);
+            save_name = misc_emissions_analysis.avg_file_name(avg_year, days_of_week, species);
             save(save_name, 'monthly', 'daily');
         end
         
@@ -1768,15 +1798,12 @@ classdef misc_emissions_analysis
         function plot_fits_interactive(varargin)
             p = inputParser;
             p.addParameter('loc_indicies', [])
+            p.addParameter('include_2yr', nan);
             
             p.parse(varargin{:});
             pout = p.Results;
             loc_inds = pout.loc_indicies;
-            
-            [beg_start_date, beg_end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
-            [end_start_date, end_end_date] = misc_emissions_analysis.select_start_end_dates('end');
-            
-            fit_type = misc_emissions_analysis.get_fit_type_interactive();
+            include_2yr = opt_ask_yn('Include 2yr periods?', pout.include_2yr, '"include_2yr"');
             
             % Load the weekday, weekend, and all day fits files. Cut out
             % the memory intensive parts of the line density sub structure
@@ -1786,59 +1813,62 @@ classdef misc_emissions_analysis
                 loc_inds = loc_inds_wrf;
             end
             
-            days_of_week = {'UMTWRFS', 'TWRF', 'US'};
-            loc_prototype = struct('Location', '', 'x', [], 'linedens', [], 'emgfit', [], 'r2', []);
-            beg_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
-            end_locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
-            
-            for i_dow = 1:numel(days_of_week)
-                beg_fits = load(misc_emissions_analysis.fits_file_name(beg_start_date, beg_end_date, use_wrf, loc_inds, days_of_week{i_dow}, fit_type));
-                end_fits = load(misc_emissions_analysis.fits_file_name(end_start_date, end_end_date, use_wrf, loc_inds, days_of_week{i_dow}, fit_type));
-                for i_loc = 1:numel(beg_fits.locs)
-                    beg_locs(i_loc, i_dow) = copy_structure_fields(beg_fits.locs(i_loc), loc_prototype, 'substructs');
-                    end_locs(i_loc, i_dow) = copy_structure_fields(end_fits.locs(i_loc), loc_prototype, 'substructs');
-                end
+            [periods.beg.start_date, periods.beg.end_date] = misc_emissions_analysis.select_start_end_dates('beginning');
+            periods.beg.loc_inds = loc_inds;
+            [periods.end.start_date, periods.end.end_date] = misc_emissions_analysis.select_start_end_dates('end');
+            periods.end.loc_inds = loc_inds;
+            if include_2yr
+                [periods.beg2yr.start_date, periods.beg2yr.end_date] = misc_emissions_analysis.select_start_end_dates('beg_2yr');
+                periods.beg2yr.loc_inds = 1:70;  % The 2-year files only have 70 locations
+                [periods.end2yr.start_date, periods.end2yr.end_date] = misc_emissions_analysis.select_start_end_dates('end_2yr');
+                periods.end2yr.loc_inds = 1:70;
             end
             
+            fit_type = misc_emissions_analysis.get_fit_type_interactive();
+            
+            
+            
+            periods_fns = fieldnames(periods);
+            for i_period = 1:numel(periods_fns)
+                per_fn = periods_fns{i_period};
+                days_of_week = {'UMTWRFS', 'TWRF', 'US'};
+                loc_prototype = struct('Location', '', 'x', [], 'linedens', [], 'emgfit', [], 'r2', []);
+                periods.(per_fn).locs = repmat(loc_prototype, numel(loc_inds), numel(days_of_week));
+                
+                for i_dow = 1:numel(days_of_week)
+                    the_fits = load(misc_emissions_analysis.fits_file_name(periods.(per_fn).start_date, periods.(per_fn).end_date, use_wrf, periods.(per_fn).loc_inds, days_of_week{i_dow}, fit_type));
+                    for i_loc = 1:numel(the_fits.locs)
+                        periods.(per_fn).locs(i_loc, i_dow) = copy_structure_fields(the_fits.locs(i_loc), loc_prototype, 'substructs');
+                    end
+                end
+            end
             % Now we can actually do the plotting. Make a list of the
             % available locations, then ask which one to plot until we quit
-            locs_list = {beg_locs(:,1).Location};
+            locs_list = {periods.(periods_fns{1}).locs(:,1).Location};
             colors = {[0.5 0.5 0.5], 'c', [1 0.5 0];...
                       'k'          , 'b', 'r'};
             while true
                 loc_ind = ask_multichoice('Plot which location?', locs_list, 'list', true, 'index', true);
-                beg_fig = figure;
-                l = gobjects(size(beg_locs,2),1);
-                for i_wkday = 1:size(beg_locs,2)
-                    l(i_wkday) = line(beg_locs(loc_ind, i_wkday).x, beg_locs(loc_ind, i_wkday).linedens, 'color', colors{1, i_wkday}, 'marker', 'o', 'linestyle', 'none');
-                    if ~isempty(beg_locs(loc_ind, i_wkday).emgfit)
-                        line(beg_locs(loc_ind, i_wkday).x, beg_locs(loc_ind, i_wkday).emgfit, 'color', colors{2, i_wkday}, 'linestyle', '--');
+                figs = gobjects(size(periods_fns));
+                for i_period = 1:numel(periods_fns)
+                    figs(i_period) = figure;
+                    this_period = periods.(periods_fns{i_period});
+                    l = gobjects(size(this_period.locs,2),1);
+                    for i_wkday = 1:size(this_period.locs,2)
+                        l(i_wkday) = line(this_period.locs(loc_ind, i_wkday).x, this_period.locs(loc_ind, i_wkday).linedens, 'color', colors{1, i_wkday}, 'marker', 'o', 'linestyle', 'none');
+                        if ~isempty(this_period.locs(loc_ind, i_wkday).emgfit)
+                            line(this_period.locs(loc_ind, i_wkday).x, this_period.locs(loc_ind, i_wkday).emgfit, 'color', colors{2, i_wkday}, 'linestyle', '--');
+                        end
                     end
+                    r2_array = {this_period.locs(loc_ind, :).r2};
+                    xx = iscellcontents(r2_array, @isempty);
+                    r2_array(xx) = {nan};
+                    legend(l, sprintfmulti('%s (R^2 = %.2f)', days_of_week, r2_array));
+                    title(sprintf('%s, %s', periods_fns{i_period}, this_period.locs(loc_ind, 1).Location));
                 end
-                r2_array = {beg_locs(loc_ind, :).r2};
-                xx = iscellcontents(r2_array, @isempty);
-                r2_array(xx) = {nan};
-                legend(l, sprintfmulti('%s (R^2 = %.2f)', days_of_week, r2_array));
-                title(sprintf('Beginning, %s', beg_locs(loc_ind, 1).Location)); 
-                
-                end_fig = figure;
-                l = gobjects(size(beg_locs,2),1);
-                for i_wkday = 1:size(beg_locs,2)
-                    l(i_wkday) = line(end_locs(loc_ind, i_wkday).x, end_locs(loc_ind, i_wkday).linedens, 'color', colors{1, i_wkday}, 'marker', 'o', 'linestyle', 'none');
-                    if ~isempty(end_locs(loc_ind, i_wkday).emgfit)
-                        line(end_locs(loc_ind, i_wkday).x, end_locs(loc_ind, i_wkday).emgfit, 'color', colors{2, i_wkday}, 'linestyle', '--');
-                    end
-                end
-                r2_array = {end_locs(loc_ind, :).r2};
-                xx = iscellcontents(r2_array, @isempty);
-                r2_array(xx) = {nan};
-                legend(l, sprintfmulti('%s (R^2 = %.2f)', days_of_week, r2_array));
-                title(sprintf('End, %s', end_locs(loc_ind, 1).Location));
-                tilefigs;
-                
                 input('Press ENTER to continue','s');
                 
-                close([beg_fig, end_fig]);
+                close(figs);
             end
         end
         
@@ -2009,6 +2039,7 @@ classdef misc_emissions_analysis
             p.addParameter('single_plot', nan);
             p.addParameter('include_2years', nan);
             p.addParameter('days_of_week', '');
+            p.addParameter('connect_wkend', nan);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -2019,7 +2050,7 @@ classdef misc_emissions_analysis
             end
             
             mass_value = pout.mass_value;
-            allowed_mass_vals = {'a','vcds'};
+            allowed_mass_vals = {'a','a_plus_B','vcds'};
             if isempty(mass_value)
                 mass_value = ask_multichoice('Which quantity to use for mass of NOx?', allowed_mass_vals, 'list', true);
             elseif ~ismember(mass_value, allowed_mass_vals)
@@ -2038,19 +2069,25 @@ classdef misc_emissions_analysis
                 E.badinput('"single_plot" must be a scalar logical');
             end
             
-            days_of_week = pout.days_of_week; % only used in single plot mode
-            if single_plot_bool
-                allowed_dows = {'UMTWRFS','TWRF','US'};
-                if isempty(days_of_week)
-                    days_of_week = ask_multiselect('Choose which day-of-week subsets to include', allowed_dows);
-                elseif ~ismember(days_of_week, allowed_dows) && ~strcmpi(days_of_week, 'all')
-                    E.badinput('"days_of_week must be one of: "%s", or "all"', strjoin(allowed_dows, '", "'));
+            allowed_dows = {'UMTWRFS','TWRF','US'};
+            days_of_week = opt_ask_multiselect('Choose which day-of-week subsets to include', [allowed_dows, 'all'], pout.days_of_week, '"days_of_week"');
+            if strcmpi(days_of_week, 'all')
+                days_of_week = allowed_dows;
+            elseif ischar(days_of_week)
+                days_of_week = {days_of_week};
+            end
+            
+            if ~single_plot_bool
+                include_decade = ismember('UMTWRFS', days_of_week);
+                include_wkday_wkend = all(ismember({'TWRF','US'}, days_of_week));
+                
+                if include_wkday_wkend
+                    do_connect_wkday_wkend = opt_ask_yn('Connect weekday/weekend points?', pout.connect_wkend, '"connect_wkend"');
+                elseif xor(ismember('TWRF', days_of_week), ismember('US', days_of_week))
+                    E.notimplemented('For non-single plot mode, having one but not both of "TWRF" and "US" are not supported')
                 end
-                if strcmpi(days_of_week, 'all')
-                    days_of_week = allowed_dows;
-                elseif ischar(days_of_week)
-                    days_of_week = {days_of_week};
-                end
+                
+                
             end
             
             fit_type = misc_emissions_analysis.get_fit_type_interactive(pout.fit_type);
@@ -2058,24 +2095,32 @@ classdef misc_emissions_analysis
             locs = misc_emissions_analysis.read_locs_file();
             
             vcds_bool = strcmpi(mass_value, 'vcds');
-            decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-            beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-            end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-            lstr = {'2007-09 UMTWRFS','2012-14 UMTWRFS','2007-09 TWRF','2007-09 SU','2012-14 TWRF','2012-14 SU'};
-            
+            if include_decade
+                decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+            end
+            if include_wkday_wkend
+                beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+            end
             % Avoid loading extra changes unless we need to to save memory.
             % Since the old 2-year files only include 70 locations, we need
             % to specify the file location inds as such. Lastly, don't plot
             % the connecting lines for the changes in this case, it'll be
             % too messy.
             if include_2years
-                decadal_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-                beginning_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'beg_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-                end_2yr_changes = misc_emissions_analysis.collect_changes('end_2yr', 'end_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-                connector_fmt = struct('linestyle','none');
-                lstr = veccat(lstr, {'2005-07 UMTWRFS','2012-13 UMTWRFS','2005-07 TWRF','2005-07 SU','2012-13 TWRF','2012-13 SU'});
+                if include_decade
+                    decadal_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                end
+                if include_wkday_wkend
+                    beginning_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'beg_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                    end_2yr_changes = misc_emissions_analysis.collect_changes('end_2yr', 'end_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                end
+            end
+            
+            if do_connect_wkday_wkend
+                conn_fmt_fxn = @make_connector_fmt;
             else
-                connector_fmt = struct('color','k');
+                conn_fmt_fxn = @(x) struct('linestyle', 'none');
             end
             
             umtwrfs_marker = 'o';
@@ -2098,19 +2143,39 @@ classdef misc_emissions_analysis
             end
             
             if ~single_plot_bool
+                legend_cell = {};
                 for i_loc = 1:numel(loc_inds)
-                    l = gobjects(6,1);
+                    l = gobjects(0,1);
                     figure;
                     ax = gca;
-                    l(1:2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'connector_fmt', connector_fmt, 'parent', ax);
-                    l(3:4) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'connector_fmt', connector_fmt, 'parent', ax);
-                    l(5:6) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'connector_fmt', connector_fmt, 'parent', ax);
-                    if include_2years
-                        l(7:8) = plot_changes(decadal_2yr_changes.(mass_value)(i_loc,:), decadal_2yr_changes.tau(i_loc,:), 'group_fmts', decadal_2yr_style, 'connector_fmt', connector_fmt, 'parent', ax);
-                        l(9:10) = plot_changes(beginning_2yr_changes.(mass_value)(i_loc,:), beginning_2yr_changes.tau(i_loc,:), 'group_fmts', beginning_2yr_style, 'connector_fmt', connector_fmt, 'parent', ax);
-                        l(11:12) = plot_changes(end_2yr_changes.(mass_value)(i_loc,:), end_2yr_changes.tau(i_loc,:), 'group_fmts', end_2yr_style, 'connector_fmt', connector_fmt, 'parent', ax);
+                    % Plot these in chronological order, even though that
+                    % requires some redundant if statements.
+                    if include_2years && include_decade
+                        l(end+1:end+2) = plot_changes(decadal_2yr_changes.(mass_value)(i_loc,:), decadal_2yr_changes.tau(i_loc,:), 'group_fmts', decadal_2yr_style, 'connector_fmt', conn_fmt_fxn(decadal_2yr_style), 'parent', ax);
+                        legend_cell(end+1:end+2) = {'2005-07 UMTWRFS', '2012-13 UMTWRFS'};
                     end
-                    legend(l, lstr);
+                    if include_decade
+                        l(end+1:end+2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'connector_fmt', conn_fmt_fxn(decadal_style), 'parent', ax);
+                        legend_cell(end+1:end+2) = {'2007-09 UMTWRFS', '2012-14 UMTWRFS'};
+                    end
+                    if include_2years && include_wkday_wkend
+                        l(end+1:end+2) = plot_changes(beginning_2yr_changes.(mass_value)(i_loc,:), beginning_2yr_changes.tau(i_loc,:), 'group_fmts', beginning_2yr_style, 'connector_fmt', conn_fmt_fxn(beginning_2yr_style), 'parent', ax);
+                        legend_cell(end+1:end+2) = {'2005-07 TWRF', '2005-07 US'};
+                    end
+                    if include_wkday_wkend
+                        l(end+1:end+2) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'connector_fmt', conn_fmt_fxn(beginning_style), 'parent', ax);
+                        legend_cell(end+1:end+2) = {'2007-09 TWRF', '2007-09 US'};
+                    end
+                    if include_2years && include_wkday_wkend
+                        l(end+1:end+2) = plot_changes(end_2yr_changes.(mass_value)(i_loc,:), end_2yr_changes.tau(i_loc,:), 'group_fmts', end_2yr_style, 'connector_fmt', conn_fmt_fxn(end_2yr_style), 'parent', ax);
+                        legend_cell(end+1:end+2) = {'2012-13 TWRF', '2012-13 US'};
+                    end
+                    if include_wkday_wkend
+                        l(end+1:end+2) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'connector_fmt', conn_fmt_fxn(end_style), 'parent', ax);
+                        legend_cell(end+1:end+2) = {'2012-14 TWRF', '2012-14 US'};
+                    end
+                    
+                    legend(l, legend_cell);
                     set(ax,'fontsize',16);
                     xlabel(x_label_str);
                     ylabel('\tau (hours)');
@@ -2140,6 +2205,16 @@ classdef misc_emissions_analysis
                 set(gca,'xscale','log','fontsize',14);
                 xlabel(x_label_str);
                 ylabel('\tau (hours)');
+            end
+            
+            function fmt = make_connector_fmt(group_fmt)
+                colors = {group_fmt.color};
+                if all(cellfun(@(x) isequal(x, colors{1}), colors))
+                    connector_color = colors{1};
+                else
+                    connector_color = 'k';
+                end
+                fmt = struct('color', connector_color, 'linestyle', '-');
             end
         end
         
@@ -2445,7 +2520,17 @@ classdef misc_emissions_analysis
                 wind_dir = W.locs.WindDir(winds_logical);
                 wind_vel = W.locs.WindSpeed(winds_logical);
                 if convert_wind_def_bool
-                    E.notimplemented('Converting winds from vector-type definition to met definition (from N is 0 deg)')
+                    % In my scheme, a wind direction of 0 degrees means the
+                    % wind is blowing to the east, 90 means to the north,
+                    % 180 to the west, and -90 to the south. Since a wind
+                    % rose traditionally represents the direction that the
+                    % wind is coming from, we need to flip this. That means
+                    % a wind coming from the north is blowing to the south,
+                    % so in my definition a northerly wind has an angle of
+                    % -90. An easterly has an angle of +/- 180 in my
+                    % definition.
+                    north_angle = -90;
+                    east_angle = -180;
                 else
                     north_angle = 90;
                     east_angle = 0;
