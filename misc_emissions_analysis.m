@@ -1088,6 +1088,72 @@ classdef misc_emissions_analysis
         end
         
         function make_line_densities(by_sectors, varargin)
+            % MAKE_LINE_DENSITIES Create line density output files.
+            %
+            %   MAKE_LINE_DENSITIES( BY_SECTORS )
+            %
+            %   Not really intended to be called directly, there are other
+            %   make_*_line_densities functions that will pass some of the
+            %   necessary arguments automatically to make sure this is set
+            %   up correctly. One required argument, BY_SECTORS, which must
+            %   be a scalar logical value, indicating if line densities
+            %   should be divided up into sectors (true), or rotated
+            %   (false).
+            %
+            %   Parameters:
+            %
+            %   'time_period' - which time period to calculate line
+            %   densities for. Must be a string recognized by
+            %   select_start_end_dates(). If empty, will prompt for the
+            %   time period (default).
+            %
+            %   'loc_indicies' - a numeric vector indicated which locations
+            %   to calculate line densities for by their index in the
+            %   locations spreadsheet. If empty (default) all are 
+            %   calculated.
+            %
+            %   'do_overwrite' - scalar logical that indicates whether
+            %   existing line density file should be overwritten. If -1
+            %   (default), will prompt.
+            %
+            %   'days_of_week' - which days of week to include in the line
+            %   density. Must be a string containing some subset of the
+            %   characters UMTWRFS. Default is all days of week.
+            %
+            %   'winds_op' - the string 'gt' (default) or 'lt', which in
+            %   conjunction with 'winds_cutoff' (next) determines the
+            %   criteria for wind speed. 'gt' = greater than, 'lt' = less
+            %   than
+            %
+            %   'winds_cutoff' - a scalar number indicating the wind speed
+            %   criteria that goes with 'winds_op'.
+            %
+            %   'use_wrf' - a scalar logical indicating whether to use VCDs
+            %   derived from WRF model simulation (using the
+            %   preproc_AprioriVCDs utility in this repository). By
+            %   default, this will use the WRFWindRejects field of the
+            %   locations spreadsheet to determine which wind directions to
+            %   ignore; that can be overridden by 'use_wrf_wind_rejects'.
+            %   This will also not filter the line densities for cloud or
+            %   row anomaly.
+            %
+            %   'use_wind_rejects' - a boolean that determines whether wind
+            %   directions listed in the locations spreadsheet should be
+            %   skipped. Default is true, false will use all wind
+            %   directions.
+            %
+            %   'use_wrf_wind_rejects' - if rejecting by wind direction,
+            %   this controls whether it uses the WindRejects (false) or
+            %   WRFWindRejects (true) field in the spreadsheet. By default
+            %   this is set to match 'use_wrf', but you may override that.
+            %
+            %   'weight_wind_dirs' - boolean, default false, that indicates
+            %   whether the contribution of each wind sector to the line
+            %   density should be weighted. Each sector is weighted by the
+            %   number of days in it that have fast winds divided by those
+            %   with slow winds; it is intended to be used to weight slow
+            %   wind conditions for use with the convolution algorithm.
+            
             E = JLLErrors;
             
             if ~islogical(by_sectors) || ~isscalar(by_sectors)
@@ -1103,6 +1169,7 @@ classdef misc_emissions_analysis
             p.addParameter('winds_cutoff', 3);
             p.addParameter('use_wrf', false);
             p.addParameter('use_wind_rejects',true);
+            p.addParameter('use_wrf_wind_rejects', nan);
             p.addParameter('weight_wind_dirs',false);
             
             p.parse(varargin{:});
@@ -1118,6 +1185,7 @@ classdef misc_emissions_analysis
             winds_cutoff = pout.winds_cutoff;
             wrf_bool = pout.use_wrf;
             use_wind_rejects = pout.use_wind_rejects;
+            use_wrf_rejects = pout.use_wrf_wind_rejects;
             weight_wind_dirs = pout.weight_wind_dirs;
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
@@ -1128,17 +1196,19 @@ classdef misc_emissions_analysis
                 E.badinput('The parameter "do_overwrite" must be a scalar logical or number')
             end
             
+            if isnan(use_wrf_rejects)
+                use_wrf_rejects = wrf_bool;
+            end
+            
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
  
             % Find the list of BEHR files between the start and end dates
             [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily','all');
-            wind_reject_field = '';
             if wrf_bool
                 for i_file = 1:numel(behr_files)
                     behr_files(i_file).name = strrep(behr_files(i_file).name, 'OMI', 'WRF');
                 end
                 behr_dir = misc_emissions_analysis.wrf_vcd_dir;
-                wind_reject_field = 'WRFWindRejects';
             end
             % If we're doing line densities by sector, then we don't want
             % to reject any wind directions. We also don't want to reject
@@ -1146,6 +1216,10 @@ classdef misc_emissions_analysis
             filter_by_wind_dir = use_wind_rejects && ~by_sectors;
             if ~filter_by_wind_dir
                 wind_reject_field = 'none';
+            elseif use_wrf_rejects
+                wind_reject_field = 'WRFWindRejects';
+            else
+                wind_reject_field = 'WindRejects';
             end
             
             % If overwrite not given and the save file exists, ask to
@@ -1230,6 +1304,10 @@ classdef misc_emissions_analysis
                 
                 if weight_wind_dirs && ~by_sectors
                     opt_args = veccat(opt_args, {'wind_dir_weights', wind_dir_weights{a}, 'wind_weights_bins', wind_dir_edges{a}});
+                end
+                
+                if wrf_bool
+                    opt_args = veccat(opt_args, {'no_reject', true});
                 end
                 
                 % "wind_reject_field" will have been set to 'none' if

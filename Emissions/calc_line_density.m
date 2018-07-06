@@ -90,17 +90,21 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       plume describing how large a box to use to circumscribe the plumes.
 %       See rotate_plume for more information.
 %
+%       'no_reject' - boolean, defaults to false. If true, skips rejecting
+%       pixels for cloud fraction, row anomaly, etc. Only recommended if
+%       the input data is model data.
+%
 %       'force_calc' - if true will override the criteria that rejects days
 %       with too many unfilled pixels and use all days that meet the
 %       windvel criterion. Defaults to false.
 %
-%       'interp' - boolean, defaults to true. If true, individual days are
-%       chosen if they have a sufficient number of viable observations to
-%       represent the entire domain well. Any missing elements are filled
-%       my interpolation.  If false, bad observations (cloud fraction or 
-%       row anomaly) are removed, but all days are averaged together. This
-%       mode is closer to how Lu et al. 2015 did their analysis, I believe.
-%       In the future, the default may change to false.
+%       'interp' - boolean, defaults to false (CHANGED 6 Jul 2018). If
+%       true, individual days are chosen if they have a sufficient number
+%       of viable observations to represent the entire domain well. Any
+%       missing elements are filled my interpolation.  If false, bad
+%       observations (cloud fraction or row anomaly) are removed, but all
+%       days are averaged together. This mode is closer to how Lu et al.
+%       2015 did their analysis, I believe.
 %
 %       'days_of_week' - string understood as the DAYS_OF_WEEK argument to
 %       DO_KEEP_DAY_OF_WEEK() specifying which days to keep. Default is
@@ -129,8 +133,9 @@ E = JLLErrors;
 p=inputParser;
 p.addOptional('nox_or_no2','no2',@(x) ismember(lower(x),{'nox','no2'}));
 p.addParameter('rel_box_corners',[]);
+p.addParameter('no_reject',false);
 p.addParameter('force_calc',false);
-p.addParameter('interp',true);
+p.addParameter('interp',false);
 p.addParameter('days_of_week', 'UMTWRFS');
 p.addParameter('wind_dir_weights',[]);
 p.addParameter('wind_weights_bins',[]);
@@ -142,6 +147,7 @@ pout=p.Results;
 nox_or_no2 = pout.nox_or_no2;
 rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
+no_reject = pout.no_reject;
 interp_bool = pout.interp;
 days_of_week = pout.days_of_week;
 wind_dir_weights = pout.wind_dir_weights;
@@ -271,8 +277,19 @@ for d=1:numel(fnames_struct)
         
         i = i+1;
         
-        OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
-        xx = OMI.Areaweight > 0;
+        if no_reject
+            if DEBUG_LEVEL > 1
+                fprintf('  Not rejecting pixels\n');
+            end
+            xx = true(size(OMI.Longitude)); 
+        else
+            if DEBUG_LEVEL > 1
+                fprintf('  Rejecting pixels\n');
+            end
+            OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
+            xx = OMI.Areaweight > 0;
+        end
+        
         if create_array
             nox = nan(size(OMI.Longitude,1), size(OMI.Longitude,2), numel(fnames_struct)*n_swath);
             aw = nan(size(OMI.Longitude,1), size(OMI.Longitude,2), numel(fnames_struct)*n_swath);

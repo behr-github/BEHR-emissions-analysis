@@ -69,17 +69,22 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       plume describing how large a box to use to circumscribe the plumes.
 %       See rotate_plume for more information.
 %
+%       'no_reject' - boolean, defaults to false. If true, skips rejecting
+%       pixels for cloud fraction, row anomaly, etc. Only recommended if
+%       the input data is model data.
+%
 %       'force_calc' - if true will override the criteria that rejects days
 %       with too many unfilled pixels and use all days that meet the
-%       windvel criterion. Defaults to false.
+%       windvel criterion. Defaults to false; only used if 'interp' is
+%       true.
 %
-%       'interp' - boolean, defaults to true. If true, individual days are
-%       chosen if they have a sufficient number of viable observations to
-%       represent the entire domain well. Any missing elements are filled
-%       my interpolation.  If false, bad observations (cloud fraction or 
-%       row anomaly) are removed, but all days are averaged together. This
-%       mode is closer to how Lu et al. 2015 did their analysis, I believe.
-%       In the future, the default may change to false.
+%       'interp' - boolean, defaults to false (CHANGED 6 Jul 2018). If
+%       true, individual days are chosen if they have a sufficient number
+%       of viable observations to represent the entire domain well. Any
+%       missing elements are filled my interpolation.  If false, bad
+%       observations (cloud fraction or row anomaly) are removed, but all
+%       days are averaged together. This mode is closer to how Lu et al.
+%       2015 did their analysis, I believe.
 %
 %       'DEBUG_LEVEL' - level of output to console. Defaults to 1, 0 shuts
 %       off all output.
@@ -96,7 +101,8 @@ p=inputParser;
 p.addOptional('nox_or_no2','no2',@(x) ismember(lower(x),{'nox','no2'}));
 p.addParameter('rel_box_corners',[]);
 p.addParameter('force_calc',false);
-p.addParameter('interp',true);
+p.addParameter('interp',false);
+p.addParameter('no_reject',false);
 p.addParameter('DEBUG_LEVEL',1);
 
 p.parse(varargin{:});
@@ -106,6 +112,7 @@ nox_or_no2 = pout.nox_or_no2;
 rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
 interp_bool = pout.interp;
+no_reject = pout.no_reject;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 if ~ischar(fpath)
@@ -202,8 +209,12 @@ for d=1:numel(fnames_struct)
         
         i = i+1;
         
-        OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
-        xx = OMI.Areaweight > 0;
+        if no_reject
+            xx = true(size(OMI.Longitude));
+        else
+            OMI = omi_pixel_reject(OMI, 'detailed', reject_details);
+            xx = OMI.Areaweight > 0;
+        end
         if create_array
             directions = {'W','SW','S','SE','E','NE','N','NW'};
             theta_bin_edges = [-180, -157.5, -112.5, -67.5, -22.5, 22.5, 67.5, 112.5, 157.5];
