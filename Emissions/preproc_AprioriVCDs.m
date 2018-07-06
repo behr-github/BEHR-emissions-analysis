@@ -9,6 +9,7 @@ p.addParameter('region','us');
 p.addParameter('prof_mode','daily');
 %p.addParameter('behr_mat_dir','');
 p.addParameter('overwrite',false);
+p.addParameter('n_workers', 0);
 p.addParameter('DEBUG_LEVEL',2);
 
 p.parse(varargin{:});
@@ -21,6 +22,7 @@ region = pout.region;
 prof_mode = pout.prof_mode;
 %behr_mat_dir = pout.behr_mat_dir;
 do_overwrite = pout.overwrite;
+n_workers = pout.n_workers;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 if ~ischar(save_path)
@@ -49,11 +51,15 @@ dvec = make_dvec(start_date, end_date);
 req_fields = get_required_fields();
 behr_mat_dir = behr_paths.BEHRMatSubdir(region, prof_mode);
 
-for i_day = 1:numel(dvec)
+parfor (i_day = 1:numel(dvec), n_workers)
     if DEBUG_LEVEL > 0
         fprintf('Working on %s\n', datestr(dvec(i_day)));
     end
-    LoadTmp = load(fullfile(behr_mat_dir, behr_filename(dvec(i_day), prof_mode, region)),'Data');
+    file_to_load = fullfile(behr_mat_dir, behr_filename(dvec(i_day), prof_mode, region));
+    if DEBUG_LEVEL > 1
+        fprintf('  Loading %s\n', file_to_load);
+    end
+    LoadTmp = load(file_to_load,'Data');
     DataBEHR = LoadTmp.Data;
     
     Data = make_empty_struct_from_cell(req_fields);
@@ -66,7 +72,8 @@ for i_day = 1:numel(dvec)
         Data(i_orbit) = copy_structure_fields(DataBEHR(i_orbit),Data(i_orbit));
         Data(i_orbit).BEHRColumnAmountNO2Trop = nan(size(Data(i_orbit).BEHRColumnAmountNO2Trop));
         for i_pix = 1:numel(Data(i_orbit).Longitude)
-            Data(i_orbit).BEHRColumnAmountNO2Trop(i_pix) = integrate_wrf_profile(DataBEHR(i_orbit).BEHRNO2apriori(:,i_pix), DataBEHR(i_orbit).BEHRPressureLevels(:,i_pix), DataBEHR(i_orbit).GLOBETerpres(i_pix));
+            Data(i_orbit).BEHRColumnAmountNO2Trop(i_pix) = integrate_wrf_profile(DataBEHR(i_orbit).BEHRNO2apriori(:,i_pix),...
+                DataBEHR(i_orbit).BEHRPressureLevels(:,i_pix), DataBEHR(i_orbit).BEHRSurfacePressure(i_pix), DataBEHR(i_orbit).BEHRTropopausePressure(i_pix));
         end
     end
     
@@ -74,12 +81,16 @@ for i_day = 1:numel(dvec)
     if DEBUG_LEVEL > 0
         fprintf('  Saving as %s\n', full_save_name);
     end
-    save(full_save_name, 'Data');
+    save_helper(full_save_name, 'Data');
 end
 
 end
 
-function vcd = integrate_wrf_profile(no2_prof, pres_levs, surf_pres)
+function save_helper(save_name, Data) %#ok<INUSD>
+save(save_name, 'Data');
+end
+
+function vcd = integrate_wrf_profile(no2_prof, pres_levs, surf_pres, trop_pres)
 xx = ~isnan(pres_levs);
 if sum(xx) < 2
     vcd = nan;
@@ -90,7 +101,7 @@ if surf_pres > max(pres_levs(xx)) && surf_pres <= max(behr_pres_levels())
     error('wrf_prof:nan_pres', 'Surface pressure is below the first non-NaN profile level');
 end
 
-vcd = integPr2(no2_prof(xx), pres_levs(xx), surf_pres);
+vcd = integPr2(no2_prof(xx), pres_levs(xx), surf_pres, trop_pres);
 
 end
 
