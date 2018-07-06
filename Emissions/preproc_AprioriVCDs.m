@@ -55,7 +55,18 @@ parfor (i_day = 1:numel(dvec), n_workers)
     if DEBUG_LEVEL > 0
         fprintf('Working on %s\n', datestr(dvec(i_day)));
     end
+    full_save_name = fullfile(save_path, make_save_name(dvec(i_day), prof_mode, region));
+    if exist(full_save_name, 'file') && ~do_overwrite
+        fprintf('Output file %s already exists, skipping\n', full_save_name);
+        continue
+    end
+
     file_to_load = fullfile(behr_mat_dir, behr_filename(dvec(i_day), prof_mode, region));
+    if ~exist(file_to_load, 'file')
+        fprintf('%s does not exist, skipping\n', file_to_load);
+        continue
+    end
+
     if DEBUG_LEVEL > 1
         fprintf('  Loading %s\n', file_to_load);
     end
@@ -77,11 +88,10 @@ parfor (i_day = 1:numel(dvec), n_workers)
         end
     end
     
-    full_save_name = fullfile(save_path, make_save_name(dvec(i_day), prof_mode, region));
     if DEBUG_LEVEL > 0
         fprintf('  Saving as %s\n', full_save_name);
     end
-    save_helper(full_save_name, 'Data');
+    save_helper(full_save_name, Data);
 end
 
 end
