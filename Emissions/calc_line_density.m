@@ -237,6 +237,7 @@ for d=1:numel(fnames_struct)
     this_file = fullfile(fpath,fnames_struct(d).name);
     % Some days are not produced in BEHR. Those days need to be skipped.
     if exist(this_file, 'file')
+        fprintf('Loading %s\n', this_file);
         D = load(this_file,'Data');
     else
         fprintf('%s does not exist, skipping\n', this_file);
