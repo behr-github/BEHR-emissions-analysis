@@ -607,8 +607,8 @@ classdef misc_emissions_analysis
             fprintf('Loading %s\n', second_file);
             second_locs = load(second_file);
             
-            first_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(first_locs.locs, user_loc_inds);
-            second_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(second_locs.locs, user_loc_inds);
+            first_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(first_locs.locs, user_loc_inds, 'keep_order');
+            second_locs.locs = misc_emissions_analysis.cutdown_locs_by_index(second_locs.locs, user_loc_inds, 'keep_order');
             loc_names = {first_locs.locs.Location};
             loc_coords.lon = [first_locs.locs.Longitude]';
             loc_coords.lat = [first_locs.locs.Latitude]';
@@ -840,11 +840,11 @@ classdef misc_emissions_analysis
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
             common_opts = {'DEBUG_LEVEL', 1, 'dayofweek', days_of_week};
-            switch species
-                case 'NO2'
+            switch lower(species)
+                case 'no2'
                     [monthly.no2, monthly.lon, monthly.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
                     [daily.no2, daily.lon, daily.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
-                case 'HCHO'
+                case 'hcho'
                     [monthly.hcho, monthly.lon, monthly.lat] = omhcho_time_average(start_date, end_date);
                     daily = monthly;
             end
@@ -1293,7 +1293,7 @@ classdef misc_emissions_analysis
                 wind_dir_edges = cell(size(winds.locs));
             end
             
-            parfor a=1:numel(winds.locs)
+            for a=1:numel(winds.locs)
                 opt_args = {};
                 
                 box_size = winds_locs_distributed(a).BoxSize;
@@ -2098,7 +2098,7 @@ classdef misc_emissions_analysis
             set(gca,'fontsize',16);
         end
         
-        function plot_lifetime_vs_mass(varargin)
+        function figs = plot_lifetime_vs_mass(varargin)
             % Plot lifetimes vs. some measure of NOx mass for each location
             % separately. Parameters:
             %   'loc_inds' - numeric indicies of which locations to
@@ -2113,18 +2113,24 @@ classdef misc_emissions_analysis
             p.addParameter('loc_inds', nan);
             p.addParameter('mass_value', '');
             p.addParameter('fit_type', '');
-            p.addParameter('use_wrf', nan);
+            p.addParameter('sat_or_model', {});
             p.addParameter('single_plot', nan);
             p.addParameter('include_2years', nan);
             p.addParameter('days_of_week', '');
             p.addParameter('connect_wkend', nan);
+            p.addParameter('legend', '');
+            p.addParameter('title', true); % if plotting interactively, we want the title. But provide the option to turn in off if not plotting interactively
             
             p.parse(varargin{:});
             pout = p.Results;
-                        
+            
+            include_title = pout.title;
+            
             loc_inds = pout.loc_inds;
             if isnan(loc_inds)
                 [loc_inds, file_loc_inds] = misc_emissions_analysis.get_loc_inds_interactive();
+            else
+                file_loc_inds = 1:71;
             end
             
             mass_value = pout.mass_value;
@@ -2137,15 +2143,9 @@ classdef misc_emissions_analysis
             
             include_2years = opt_ask_yn('Include the points from the 2 year runs?', pout.include_2years, '"include_2years"');
             
-            use_wrf = pout.use_wrf;
-            [use_wrf, loc_inds, ~, file_loc_inds] = misc_emissions_analysis.ask_to_use_wrf(use_wrf, loc_inds, file_loc_inds);
+            sat_or_model = opt_ask_multiselect('Which data source to use?', {'BEHR', 'WRF'}, pout.sat_or_model, '"sat_or_model"');
             
-            single_plot_bool = pout.single_plot;
-            if isnan(single_plot_bool)
-                single_plot_bool = ask_yn('Plot all locations on a single plot?');
-            elseif ~isscalar(single_plot_bool) || ~islogical(single_plot_bool)
-                E.badinput('"single_plot" must be a scalar logical');
-            end
+            single_plot_bool = opt_ask_yn('Plot all locations on a single plot?', pout.single_plot, '"single_plot"');
             
             allowed_dows = {'UMTWRFS','TWRF','US'};
             days_of_week = opt_ask_multiselect('Choose which day-of-week subsets to include', [allowed_dows, 'all'], pout.days_of_week, '"days_of_week"');
@@ -2155,64 +2155,80 @@ classdef misc_emissions_analysis
                 days_of_week = {days_of_week};
             end
             
+            do_connect_wkday_wkend = false;
+            include_decade = ismember('UMTWRFS', days_of_week);
+            include_wkday_wkend = all(ismember({'TWRF','US'}, days_of_week));
+            include_behr = ismember('BEHR', sat_or_model);
+            include_wrf = ismember('WRF', sat_or_model);
             if ~single_plot_bool
-                include_decade = ismember('UMTWRFS', days_of_week);
-                include_wkday_wkend = all(ismember({'TWRF','US'}, days_of_week));
-                
                 if include_wkday_wkend
                     do_connect_wkday_wkend = opt_ask_yn('Connect weekday/weekend points?', pout.connect_wkend, '"connect_wkend"');
                 elseif xor(ismember('TWRF', days_of_week), ismember('US', days_of_week))
                     E.notimplemented('For non-single plot mode, having one but not both of "TWRF" and "US" are not supported')
                 end
                 
-                
+                allowed_legend_figs = {'all', 'none', 'first', 'last'};
+            else
+                allowed_legend_figs = {'all', 'none'};
             end
+            where_to_put_legend = opt_ask_multichoice('Where to include a legend?', allowed_legend_figs, pout.legend, '"legend"', 'list', true);
             
             fit_type = misc_emissions_analysis.get_fit_type_interactive(pout.fit_type);
             
             locs = misc_emissions_analysis.read_locs_file();
             
             vcds_bool = strcmpi(mass_value, 'vcds');
-            if include_decade
-                decadal_changes = misc_emissions_analysis.collect_changes('beginning', 'end', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-            end
-            if include_wkday_wkend
-                beginning_changes = misc_emissions_analysis.collect_changes('beginning', 'beginning', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-                end_changes = misc_emissions_analysis.collect_changes('end', 'end', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', file_loc_inds, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-            end
-            % Avoid loading extra changes unless we need to to save memory.
-            % Since the old 2-year files only include 70 locations, we need
-            % to specify the file location inds as such. Lastly, don't plot
-            % the connecting lines for the changes in this case, it'll be
-            % too messy.
-            if include_2years
+            [~,~,~,wrf_file_inds] = misc_emissions_analysis.ask_to_use_wrf(true);
+            
+            % End input section %
+            
+            % These help keep the style consistent %
+            marker_size = 10;
+            marker_linewidth = 1.5;
+            connector_linewidth = 2;
+            dow_markers = struct('UMTWRFS', struct('marker', 'o', 'name', 'All days', 'used', false),...
+                'TWRF', struct('marker', '^', 'name', 'Weekdays', 'used', false),...
+                'US', struct('marker', 'h', 'name', 'Weekends', 'used', false));
+            
+            time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2005/07', 'used', false),...
+                'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
+                'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012/13', 'used', false),...
+                'end', struct('color', 'r', 'name', '2013*', 'used', false));
+            
+            % Now actually load the data
+            
+            all_changes = struct([]);
+            if include_behr
                 if include_decade
-                    decadal_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                    if include_2years
+                        load_change_group('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', 1:70);
+                    end
+                    
+                    load_change_group('beginning', 'end', 'UMTWRFS', 'UMTWRFS');
                 end
                 if include_wkday_wkend
-                    beginning_2yr_changes = misc_emissions_analysis.collect_changes('beg_2yr', 'beg_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-                    end_2yr_changes = misc_emissions_analysis.collect_changes('end_2yr', 'end_2yr', 'TWRF', 'US', 'loc_inds', loc_inds, 'file_loc_inds', 1:70, 'use_wrf', use_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                    if include_2years
+                        load_change_group('beg_2yr', 'beg_2yr', 'TWRF', 'US', 1:70);
+                        load_change_group('end_2yr', 'end_2yr', 'TWRF', 'US', 1:70);
+                    end
+                    load_change_group('beginning', 'beginning', 'TWRF', 'US');
+                    load_change_group('end', 'end', 'TWRF', 'US');
                 end
+            end
+            
+            if include_wrf
+                % WRF is only processed for all days because it cannot have
+                % a weekend effect, since the NEI emissions are just a 24
+                % hour cycle
+                load_change_group('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', wrf_file_inds, true);
+                load_change_group('beginning', 'end', 'UMTWRFS', 'UMTWRFS', wrf_file_inds, true);
             end
             
             if do_connect_wkday_wkend
                 conn_fmt_fxn = @make_connector_fmt;
             else
-                conn_fmt_fxn = @(x) struct('linestyle', 'none');
+                conn_fmt_fxn = @(x, y) struct('linestyle', 'none');
             end
-            
-            umtwrfs_marker = 'o';
-            twrf_marker = '^';
-            us_marker = '*';
-            marker_size = 10;
-            
-            decadal_style = struct('marker', {umtwrfs_marker,umtwrfs_marker}, 'linestyle', 'none', 'color', {'b','r'},'markersize',10);
-            beginning_style = struct('marker', {twrf_marker,us_marker}, 'linestyle', 'none', 'color', {'b','b'},'markersize',10);
-            end_style = struct('marker', {twrf_marker,us_marker}, 'linestyle', 'none', 'color', {'r','r'},'markersize',10);
-            
-            decadal_2yr_style = struct('marker', {umtwrfs_marker, umtwrfs_marker}, 'linestyle', 'none', 'color', {[0 0.5 0], 'k'}, 'markersize', marker_size);
-            beginning_2yr_style = struct('marker', {twrf_marker, us_marker}, 'linestyle', 'none', 'color', {[0 0.5 0], [0 0.5 0]}, 'markersize', marker_size);
-            end_2yr_style = struct('marker', {twrf_marker, us_marker}, 'linestyle', 'none', 'color', {'k', 'k'}, 'markersize', marker_size);
             
             if vcds_bool
                 x_label_str = 'Avg. NO_2 VCD (molec. cm^2)';
@@ -2221,79 +2237,134 @@ classdef misc_emissions_analysis
             end
             
             if ~single_plot_bool
-                legend_cell = {};
+                figs = gobjects(numel(loc_inds),1);
                 for i_loc = 1:numel(loc_inds)
-                    l = gobjects(0,1);
-                    figure;
+                    figs(i_loc) = figure;
                     ax = gca;
-                    % Plot these in chronological order, even though that
-                    % requires some redundant if statements.
-                    if include_2years && include_decade
-                        l(end+1:end+2) = plot_changes(decadal_2yr_changes.(mass_value)(i_loc,:), decadal_2yr_changes.tau(i_loc,:), 'group_fmts', decadal_2yr_style, 'connector_fmt', conn_fmt_fxn(decadal_2yr_style), 'parent', ax);
-                        legend_cell(end+1:end+2) = {'2005-07 UMTWRFS', '2012-13 UMTWRFS'};
-                    end
-                    if include_decade
-                        l(end+1:end+2) = plot_changes(decadal_changes.(mass_value)(i_loc,:), decadal_changes.tau(i_loc,:), 'group_fmts', decadal_style, 'connector_fmt', conn_fmt_fxn(decadal_style), 'parent', ax);
-                        legend_cell(end+1:end+2) = {'2007-09 UMTWRFS', '2012-14 UMTWRFS'};
-                    end
-                    if include_2years && include_wkday_wkend
-                        l(end+1:end+2) = plot_changes(beginning_2yr_changes.(mass_value)(i_loc,:), beginning_2yr_changes.tau(i_loc,:), 'group_fmts', beginning_2yr_style, 'connector_fmt', conn_fmt_fxn(beginning_2yr_style), 'parent', ax);
-                        legend_cell(end+1:end+2) = {'2005-07 TWRF', '2005-07 US'};
-                    end
-                    if include_wkday_wkend
-                        l(end+1:end+2) = plot_changes(beginning_changes.(mass_value)(i_loc,:), beginning_changes.tau(i_loc,:), 'group_fmts', beginning_style, 'connector_fmt', conn_fmt_fxn(beginning_style), 'parent', ax);
-                        legend_cell(end+1:end+2) = {'2007-09 TWRF', '2007-09 US'};
-                    end
-                    if include_2years && include_wkday_wkend
-                        l(end+1:end+2) = plot_changes(end_2yr_changes.(mass_value)(i_loc,:), end_2yr_changes.tau(i_loc,:), 'group_fmts', end_2yr_style, 'connector_fmt', conn_fmt_fxn(end_2yr_style), 'parent', ax);
-                        legend_cell(end+1:end+2) = {'2012-13 TWRF', '2012-13 US'};
-                    end
-                    if include_wkday_wkend
-                        l(end+1:end+2) = plot_changes(end_changes.(mass_value)(i_loc,:), end_changes.tau(i_loc,:), 'group_fmts', end_style, 'connector_fmt', conn_fmt_fxn(end_style), 'parent', ax);
-                        legend_cell(end+1:end+2) = {'2012-14 TWRF', '2012-14 US'};
+                    for i_change = 1:numel(all_changes)
+                        plot_changes(all_changes(i_change).(mass_value)(i_loc,:), all_changes(i_change).tau(i_loc,:),...
+                            'group_fmts', all_changes(i_change).style, 'connector_fmt', conn_fmt_fxn(all_changes(i_change).style, all_changes(i_change).is_significant(i_loc)), 'parent', ax);
                     end
                     
-                    legend(l, legend_cell);
+                    
+                    if strcmpi(where_to_put_legend, 'all') || (strcmpi(where_to_put_legend, 'first') && i_loc == 1) || (strcmpi(where_to_put_legend, 'last') && i_loc == numel(loc_inds))
+                        make_legend(ax);
+                    end
+                    if include_title
+                        title(locs(loc_inds(i_loc)).Location);
+                    end
+                    
                     set(ax,'fontsize',16);
                     xlabel(x_label_str);
                     ylabel('\tau (hours)');
-                    title(locs(loc_inds(i_loc)).Location);
                 end
             else
                 l = gobjects(0);
                 legend_cell = {};
                 figure;
-                if ismember('UMTWRFS', days_of_week)
-                    l(end+1) = line(decadal_changes.(mass_value)(:,1), decadal_changes.tau(:,1), decadal_style(1));
-                    l(end+1) = line(decadal_changes.(mass_value)(:,2), decadal_changes.tau(:,2), decadal_style(2));
-                    legend_cell = veccat(legend_cell, {'UMTWRFS 2005-2007', 'UMTWRFS 2012-2013'});
-                end
-                if ismember('TWRF', days_of_week)
-                    l(end+1) = line(beginning_changes.(mass_value)(:,1), beginning_changes.tau(:,1), beginning_style(1));
-                    l(end+1) = line(end_changes.(mass_value)(:,1), end_changes.tau(:,1), end_style(1));
-                    legend_cell = veccat(legend_cell, {'TWRF 2005-2007', 'TWRF 2012-2013'});
-                end
-                if ismember('US', days_of_week)
-                    l(end+1) = line(beginning_changes.(mass_value)(:,2), beginning_changes.tau(:,2), beginning_style(2));
-                    l(end+1) = line(end_changes.(mass_value)(:,2), end_changes.tau(:,2), end_style(2));
-                    legend_cell = veccat(legend_cell, {'US 2005-2007', 'US 2012-2013'});
+                for i_change = 1:numel(all_changes)
+                    line(all_changes(i_change).(mass_value)(:,1), all_changes(i_change).tau(:,1), all_changes(i_change).style(1));
+                    line(all_changes(i_change).(mass_value)(:,2), all_changes(i_change).tau(:,2), all_changes(i_change).style(2));
                 end
                 
-                legend(l(:), legend_cell);
+                if strcmpi(where_to_put_legend, 'all')
+                    make_legend(gca);
+                end
                 set(gca,'xscale','log','fontsize',14);
                 xlabel(x_label_str);
                 ylabel('\tau (hours)');
             end
             
-            function fmt = make_connector_fmt(group_fmt)
-                colors = {group_fmt.color};
-                if all(cellfun(@(x) isequal(x, colors{1}), colors))
-                    connector_color = colors{1};
+            %                                                     %
+            % Internal helper functions for plot_lifetime_vs_mass %
+            %                                                     %
+            
+            function load_change_group(time_period_1, time_period_2, days_of_week_1, days_of_week_2, varargin)
+                
+                if numel(varargin) >= 1
+                    load_loc_inds = varargin{1};
+                else
+                    load_loc_inds = 1:71;
+                end
+                
+                if numel(varargin) >= 2
+                    load_wrf = varargin{2};
+                else
+                    load_wrf = false;
+                end
+                
+                if load_wrf
+                    marker_fills = 'none';
+                else
+                    marker_fills = {time_period_colors.(time_period_1).color, time_period_colors.(time_period_2).color};
+                end
+                
+                changes = misc_emissions_analysis.collect_changes(time_period_1, time_period_2, days_of_week_1, days_of_week_2, 'loc_inds', loc_inds, 'file_loc_inds', load_loc_inds, 'use_wrf', load_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
+                changes.is_significant = misc_emissions_analysis.is_change_significant(changes.tau, changes.tau_sd, changes.n_dofs);
+                changes.style = struct('marker', {dow_markers.(days_of_week_1).marker, dow_markers.(days_of_week_2).marker},...
+                    'linestyle', 'none', 'color', {time_period_colors.(time_period_1).color, time_period_colors.(time_period_2).color},...
+                    'markersize',marker_size,'linewidth',marker_linewidth,'markerfacecolor',marker_fills);
+                dow_markers.(days_of_week_1).used = true;
+                dow_markers.(days_of_week_2).used = true;
+                time_period_colors.(time_period_1).used = true;
+                time_period_colors.(time_period_2).used = true;
+                
+                if isempty(all_changes)
+                    all_changes = changes;
+                else
+                    all_changes(end+1) = changes;
+                end
+            end
+            
+            function make_legend(parent)
+                % first the time periods
+                fns = fieldnames(time_period_colors);
+                l = gobjects(0,1);
+                legend_cell = {};
+                for i_fn = 1:numel(fns)
+                    this_tp = time_period_colors.(fns{i_fn});
+                    if this_tp.used
+                        l(end+1) = line(nan, nan, 'linewidth', connector_linewidth, 'color', this_tp.color, 'parent', parent);
+                        legend_cell{end+1} = this_tp.name;
+                    end
+                end
+                
+                fns = fieldnames(dow_markers);
+                for i_fn = 1:numel(fns)
+                    this_dow = dow_markers.(fns{i_fn});
+                    if this_dow.used
+                        l(end+1) = line(nan,nan,'marker', this_dow.marker, 'linestyle', 'none', 'color', 'k', 'linewidth', marker_linewidth, 'markersize', marker_size, 'parent', parent);
+                        legend_cell{end+1} = this_dow.name;
+                    end
+                end
+                legend(parent, l', legend_cell, 'location', 'best'); 
+            end
+            
+            function fmt = make_connector_fmt(group_fmt, is_change_sig)
+                these_time_period_colors = {group_fmt.color};
+                
+                if is_change_sig
+                    linestyle = '-';
+                else
+                    linestyle = '--';
+                end 
+                
+                if all(cellfun(@(x) isequal(x, these_time_period_colors{1}), these_time_period_colors))
+                    connector_color = these_time_period_colors{1};
                 else
                     connector_color = 'k';
+                    % Quick kludge to avoid connecting all days-of-week
+                    % points that don't have the same pairwise relationship
+                    % that weekend-weekdays do. Since color == time period,
+                    % if the colors differ, we don't connect.
+                    linestyle = 'none';
                 end
-                fmt = struct('color', connector_color, 'linestyle', '-');
+                
+                fmt = struct('color', connector_color, 'linestyle', linestyle, 'linewidth', connector_linewidth);
             end
+            %     %
+            % End %
+            %     %
         end
         
         function plot_wrf_emissions(varargin)
@@ -2727,9 +2798,13 @@ classdef misc_emissions_analysis
             difference_is_significant = false(size(values,1),1);
             for i_chng = 1:size(values,1)
                 % The EMG fits have 5 fitting parameters.
+                if any(isnan(values(i_chng,:))) || any(isnan(value_sds(i_chng,:))) || any(imag(value_sds(i_chng,:)) ~= 0) || any(isnan(value_dofs(i_chng,:)))
+                    difference_is_significant(i_chng) = false;
+                else
                 [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
                     values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
                     sum(value_dofs(i_chng,:)), 'confidence', 0.95);
+                end
             end
         end
         
@@ -2889,7 +2964,7 @@ classdef misc_emissions_analysis
             [xx, yy] = ind2sub(size(lon_grid), i_min); 
         end
         
-        function locs = cutdown_locs_by_index(locs, loc_inds)
+        function locs = cutdown_locs_by_index(locs, loc_inds, varargin)
             % Cuts down the structure LOCS to the locations specified by
             % LOCS_INDS by matching the site names from LOCS against the
             % location names in the structure read in from the spreadsheet.
@@ -2897,6 +2972,12 @@ classdef misc_emissions_analysis
             % at all.
             
             E = JLLErrors;
+            p = advInputParser;
+            p.addFlag('keep_order');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            keep_order = pout.keep_order;
             
             if isempty(loc_inds)
                 return 
@@ -2905,11 +2986,23 @@ classdef misc_emissions_analysis
             locs_ss = misc_emissions_analysis.read_locs_file();
             ss_names = {locs_ss(loc_inds).Location};
             in_names = {locs.Location};
-            xx = ismember(in_names, ss_names);
-            if sum(xx) ~= numel(loc_inds)
-                E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
+            if ~keep_order
+                xx = ismember(in_names, ss_names);
+                if sum(xx) ~= numel(loc_inds)
+                    E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
+                end
+            else
+                xx = nan(size(ss_names));
+                for i=1:numel(xx)
+                    xx_i = find(strcmp(ss_names{i}, in_names));
+                    if isempty(xx_i)
+                        E.callError('loc_lookup_error', 'Could not find "%s" in the given locs structure', ss_names{i});
+                    end
+                    xx(i) = xx_i;
+                end
             end
             locs = locs(xx);
+            
         end
         
         function new_locs = match_locs_structs(new_locs, base_locs)
@@ -2959,9 +3052,6 @@ classdef misc_emissions_analysis
         end
         
         function [use_wrf, loc_inds, wind_rej_field, file_loc_inds] = ask_to_use_wrf(use_wrf, default_loc_inds, default_file_inds)
-            % 26 Feb 2018: WRF line densities only completed for Chicago,
-            % so if using WRF line densities, we need to specify location
-            % indicies = 9 for the file name.
             if nargin < 1 || isnan(use_wrf)
                 use_wrf = ask_yn('Use WRF line densities? (BEHR if no)');
             end
@@ -2974,9 +3064,9 @@ classdef misc_emissions_analysis
             end
             
             if use_wrf
-                loc_inds = 9; % currently WRF data only available for Chicago
+                loc_inds = default_loc_inds(ismember(default_loc_inds, 1:71));
                 wind_rej_field = misc_emissions_analysis.wind_reject_field_wrf;
-                file_loc_inds = loc_inds;
+                file_loc_inds = 1:71;
             else
                 loc_inds = default_loc_inds;
                 file_loc_inds = default_file_inds;
