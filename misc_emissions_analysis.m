@@ -52,6 +52,10 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRFData');
         end
         
+        function value = table_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'Tables');
+        end
+        
         function value = wrf_vcd_dir
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.emis_wrf_dir, 'WRF-VCDs');
         end
@@ -177,8 +181,13 @@ classdef misc_emissions_analysis
             end
         end
         
-        function locs = read_locs_file()
+        function locs = read_locs_file(varargin)
             locs = read_loc_spreadsheet();
+            if ~isempty(varargin)
+                loc_types = {locs.SiteType};
+                xx = ismember(loc_types, varargin);
+                locs = locs(xx);
+            end
         end
         
         function winds = load_winds_file(start_date, end_date)
@@ -224,15 +233,22 @@ classdef misc_emissions_analysis
             end
         end
         
-        function [start_dates, end_dates, time_period] = select_start_end_dates(time_period)
+        function [start_dates, end_dates, time_period, legend_id] = select_start_end_dates(time_period, varargin)
             E = JLLErrors;
             % Returns the start and end dates as cell arrays of datenums.
             % TIME_PERIOD may be 'beginning', 'end', 'beg_2yr', or
             % 'end_2yr' specifying the standard start/end dates or a 2-by-N
             % cell array of dates, where the first row will be used as the
             % start dates and the second row as the end dates.
+            p = advInputParser;
+            p.addOptional('prompt', 'Which time period to use?');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            prompt = pout.prompt;
+            
             if nargin < 1 || isempty(time_period)
-                time_period = ask_multichoice('Which time period to use?', {'beginning (2007-09)', 'beg_2yr (2005,07)', 'end (2012-14)', 'end_2yr (2012-13)'}, 'list', true);
+                time_period = ask_multichoice(prompt, {'beginning (2007-09)', 'beg_2yr (2005,07)', 'end (2012-14)', 'end_2yr (2012-13)'}, 'list', true);
                 time_period = strsplit(time_period, ' ');
                 time_period = time_period{1};
             end
@@ -243,15 +259,19 @@ classdef misc_emissions_analysis
             if strcmpi(time_period, 'beginning')
                 start_dates = {datenum(2007, start_month, 1), datenum(2008, start_month, 1), datenum(2009, start_month, 1)};
                 end_dates = {eomdate(2007, end_month), eomdate(2008, end_month), eomdate(2009, end_month)};
+                legend_id = '2008*';
             elseif strcmpi(time_period, 'end')
                 start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1), datenum(2014, start_month, 1)};
                 end_dates = {eomdate(2012, end_month), eomdate(2013, end_month), eomdate(2014, end_month)};
+                legend_id = '2013*';
             elseif strcmpi(time_period, 'beg_2yr')
                 start_dates = {datenum(2005, start_month, 1), datenum(2007, start_month, 1)};
                 end_dates = {eomdate(2005, end_month), eomdate(2007, end_month)};
+                legend_id = '2006*';
             elseif strcmpi(time_period, 'end_2yr')
                 start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1)};
                 end_dates = {eomdate(2012, end_month), eomdate(2013, end_month)};
+                legend_id = '2012-13';
             elseif iscell(time_period)
                 start_dates = validate_date(time_period(1,:));
                 end_dates = validate_date(time_period(2,:));
@@ -260,8 +280,16 @@ classdef misc_emissions_analysis
             end
         end
         
-        function dow = select_days_of_week(dow)
-            dow = opt_ask_multichoice('Select the days of week to use', {'UMTWRFS', 'TWRF', 'US'}, dow, 'days_of_week', 'list', true);
+        function [dow, legend_id] = select_days_of_week(dow, varargin)
+            p = advInputParser;
+            p.addOptional('prompt', 'Select the days of week to use');
+            p.parse(varargin{:});
+            pout = p.Results;
+            prompt = pout.prompt;
+            dow = opt_ask_multichoice(prompt, {'UMTWRFS', 'TWRF', 'US'}, dow, 'days_of_week', 'list', true);
+            
+            legend_ids = struct('UMTWRFS', 'All', 'TWRF', 'Weekdays', 'US', 'Weekends');
+            legend_id = legend_ids.(dow);
         end
         
         function inds = find_loc_struct_inds(locs)
@@ -802,6 +830,23 @@ classdef misc_emissions_analysis
                 for i_loc = 1:numel(loc_names)
                     fprintf('%s (%s %s -> %s %s): %d\n', loc_names{i_loc}, first_time_period, first_dow, second_time_period, second_dow, is_significant(i_loc));
                 end
+            end
+        end
+        
+        function loc_inds = ask_for_loc_inds(loc_inds, varargin)
+            p = advInputParser;
+            p.addOptional('allowed_types', {'Cities', 'PowerPlants'});
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            allowed_types = pout.allowed_types;
+            
+            if nargin < 1 || isnan(loc_inds)
+                ss_locs = misc_emissions_analysis.read_locs_file();
+                loc_types = {ss_locs.SiteType};
+                xx = ismember(loc_types, allowed_types);
+                loc_names = {ss_locs(xx).Location};
+                loc_inds = ask_multiselect('Select the locations to use:', loc_names, 'returnindex', true);
             end
         end
         
@@ -1950,6 +1995,183 @@ classdef misc_emissions_analysis
             end
         end
         
+        function figs = plot_plume_differences(plot_type, varargin)
+            E = JLLErrors;
+            
+            p = advInputParser;
+            p.addParameter('time_period_1', '');
+            p.addParameter('time_period_2', '');
+            p.addParameter('days_of_week_1', '');
+            p.addParameter('days_of_week_2', '');
+            p.addParameter('use_wrf_1', nan);
+            p.addParameter('use_wrf_2', nan);
+            p.addParameter('loc_indicies', nan);
+            p.addParameter('separate_figs', false);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            separate_figs = pout.separate_figs;
+            
+            loc_inds = misc_emissions_analysis.ask_for_loc_inds(pout.loc_indicies);
+            
+            [start_1, end_1, ~, tp_1_legend] = misc_emissions_analysis.select_start_end_dates(pout.time_period_1, 'Select the time period for the first plume.');
+            [days_of_week_1, dow_1_legend] = misc_emissions_analysis.select_days_of_week(pout.days_of_week_1, 'Select the days of week for the first plume.');
+            use_wrf_1 = opt_ask_yn('Use WRF for the first plume? (BEHR if not)', pout.use_wrf_1);
+            tp_1_legend = sprintf('%s %s', tp_1_legend, dow_1_legend);
+            
+            [start_2, end_2, ~, tp_2_legend] = misc_emissions_analysis.select_start_end_dates(pout.time_period_2, 'Select the time period for the second plume.');
+            [days_of_week_2, dow_2_legend] = misc_emissions_analysis.select_days_of_week(pout.days_of_week_2, 'Select the days of week for the second plume.');
+            use_wrf_2 = opt_ask_yn('Use WRF for the second plume? (BEHR if not)', pout.use_wrf_2);
+            tp_2_legend = sprintf('%s %s', tp_2_legend, dow_2_legend);
+            
+            % I made symlinks to the 2-year periods that use locs1-71 in
+            % the name to make this easier.
+            file1 = misc_emissions_analysis.fits_file_name(start_1, end_1, use_wrf_1, 1:71, days_of_week_1, 'lu');
+            file2 = misc_emissions_analysis.fits_file_name(start_2, end_2, use_wrf_2, 1:71, days_of_week_2, 'lu');
+            
+            base = load(file1);
+            new = load(file2);
+            
+            base.locs = misc_emissions_analysis.cutdown_locs_by_index(base.locs, loc_inds);
+            new.locs = misc_emissions_analysis.cutdown_locs_by_index(new.locs, loc_inds);
+            
+            switch lower(plot_type)
+                case '2d'
+                    figs = misc_emissions_analysis.plot_plume_difference_2d(base, new, separate_figs);
+                case '1d'
+                    figs = misc_emissions_analysis.plot_plume_difference_1d(base, tp_1_legend, new, tp_2_legend, separate_figs);
+                otherwise
+                    E.notimplemented('No plotting action implemented for "%s"', plot_type)
+            end
+            
+        end
+        
+        function figs = plot_plume_difference_1d(base, base_legstr, new, new_legstr, separate_figs)
+            E = JLLErrors;
+            n_locs = numel(base.locs);
+            if n_locs ~= numel(new.locs)
+                E.badinput('BASE and NEW must have the same number of locations')
+            end
+            
+            if separate_figs
+                figs = gobjects(1, n_locs);
+            else
+                figs = figure;
+            end
+            
+            marker = 'o';
+            marker_size = 6;
+            marker_line_width = 1.5;
+            fit_line_width = 2;
+            
+            for i_loc = 1:n_locs
+                next_plot();
+                
+                base_x = base.locs(i_loc).no2_sectors.x;
+                base_ld = range_squeeze(base.locs(i_loc).no2_sectors.linedens, [0 1]);
+                base_fit = range_squeeze(base.locs(i_loc).fit_info.emgfit, [0 1]);
+                new_x = base.locs(i_loc).no2_sectors.x;
+                new_ld = range_squeeze(new.locs(i_loc).no2_sectors.linedens, [0 1]);
+                new_fit = range_squeeze(new.locs(i_loc).fit_info.emgfit, [0 1]);
+                
+                line(base_x, base_ld, 'color', [0 0.5 0], 'marker', marker, 'linewidth', marker_line_width, 'markersize', marker_size, 'linestyle', 'none');
+                line(base_x, base_fit, 'color', 'b', 'marker', 'none', 'linewidth', fit_line_width);
+                line(new_x, new_ld, 'color', [1 0.5 0], 'marker', marker, 'linewidth', marker_line_width, 'markersize', marker_size, 'linestyle', 'none');
+                line(new_x, new_fit, 'color', 'r', 'marker', 'none', 'linewidth', fit_line_width);
+                
+                legend(cprintf({'Line density (%s)', 'Fit (%s)', 'Line density (%s)', 'Fit (%s)'}, {base_legstr, base_legstr, new_legstr, new_legstr}));
+                set(gca,'fontsize', 12);
+                ylabel('Normalized NO_2');
+                xlabel('Distance from city (km)');
+            end
+            
+            
+            function ax = next_plot()
+                if separate_figs
+                    figs(i_loc) = figure;
+                    ax = gca;
+                else
+                    ax = subplot(1, n_locs, i_loc);
+                end
+            end
+        end
+        
+        function figs = plot_plume_difference_2d(base, new, separate_figs)
+            % Not intended to be called directly, but you can if you want.
+            % Plots the differences in the 2D plumes between the base and
+            % new times for each location in them. BASE and NEW are the
+            % structure resulting from loading one of the fits files,
+            % SEPARATE_FIGS is a boolean if you want each plot as a
+            % separate figure or all on one plot.
+            
+            E = JLLErrors;
+            n_locs = numel(base.locs);
+            if n_locs ~= numel(new.locs)
+                E.badinput('BASE and NEW must have the same number of locations')
+            end
+            
+            if separate_figs
+                figs = gobjects(3, n_locs);
+            else
+                figs = figure;
+            end
+            
+            abs_colormap = parula;
+            diff_colormap = blue_red_cmap;
+            
+            for i_loc = 1:n_locs
+                % Calculate the best limits for the absolute value plots
+                abs_clims = calc_plot_limits(veccat(base.locs(i_loc).no2_sectors.no2_mean(:), new.locs(i_loc).no2_sectors.no2_mean(:)), 1e15, 'zero');
+                
+                curr_ax = next_plot(1);
+                plot_plume(curr_ax, base.locs(i_loc));
+                
+                curr_ax = next_plot(2);
+                plot_plume(curr_ax, new.locs(i_loc));
+                
+                curr_ax = next_plot(3);
+                plot_plume(curr_ax, base.locs(i_loc), new.locs(i_loc));
+                
+            end
+            
+            function ax = next_plot(y)
+                if separate_figs
+                    figs(y,i_loc) = figure;
+                    ax = gca;
+                else
+                    idx = (y-1)*n_locs + i_loc;
+                    ax = subplot(3, n_locs, idx);
+                    %ax = subplot(y,i_loc,3*numel(loc_inds));
+                end
+            end
+            
+            function plot_plume(ax, loc, second_loc)
+                if nargin > 2
+                    if ~isequal(second_loc.no2_sectors.lon, loc.no2_sectors.lon) || ~isequal(second_loc.no2_sectors.lat, loc.no2_sectors.lat)
+                        E.badinput('loc and second_loc must have the same lat/lon')
+                    end
+                    
+                    plot_quantity = second_loc.no2_sectors.no2_mean - loc.no2_sectors.no2_mean;
+                    clims = calc_plot_limits(plot_quantity, 1e15, 'diff');
+                    cmap = diff_colormap;
+                    cb_label = '\Delta VCD (molec cm^{-2})';
+                else
+                    plot_quantity = loc.no2_sectors.no2_mean;
+                    clims = abs_clims;
+                    cmap = abs_colormap;
+                    cb_label = 'VCD (molec cm^{-2})';
+                end
+                pcolor(ax, loc.no2_sectors.lon, loc.no2_sectors.lat, plot_quantity);
+                line(loc.Longitude, loc.Latitude, 'linestyle', 'none', 'marker', 'p', 'color', 'w', 'markerfacecolor','w','markersize',16);
+                shading flat;
+                colormap(ax, cmap);
+                caxis(clims);
+                cb = colorbar;
+                cb.Label.String = cb_label;
+            end
+        end
+        
         function plot_emis_tau_changes(varargin)
             
             [first_time_period, second_time_period, first_weekdays, second_weekdays, loc_types, series_labels] = misc_emissions_analysis.get_change_file_selection_input(varargin{:});
@@ -2688,6 +2910,109 @@ classdef misc_emissions_analysis
                 
                 % Wind rose automatically creates a new figure
                 WindRose(wind_dir, wind_vel, 'anglenorth', north_angle, 'angleeast', east_angle);
+            end
+        end
+        
+        function save_tables()
+            time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
+            req_values = {'Correlation', 'R2', 'Tau', 'Tau percent uncertainty', 'E', 'E percent uncertainty'};
+            
+            common_opts = {'time_periods', time_periods, 'values', req_values};
+            BEHRTables = misc_emissions_analysis.tabulate_parameter_correlation(common_opts{:}, 'days_of_week', {'UMTWRFS','TWRF','US'}, 'data', 'BEHR');
+            WRFTables = misc_emissions_analysis.tabulate_parameter_correlation(common_opts{:}, 'days_of_week', {'UMTWRFS'}, 'data', 'BEHR');
+            savename = fullfile(misc_emissions_analysis.table_dir, sprintf('Tables%s.mat', datestr(today, 'yyyymmdd')));
+            save(savename, 'BEHRTables', 'WRFTables');
+        end
+        
+        function output_tables = tabulate_parameter_correlation(varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('time_periods', {});
+            p.addParameter('days_of_week', {});
+            p.addParameter('data', '')
+            p.addParameter('values', {});
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avail_time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
+            time_periods = opt_ask_multiselect('Which time periods to include?', avail_time_periods, pout.time_periods, '"time_periods"');
+            days_of_week = opt_ask_multiselect('Which days-of-week to include?', {'UMTWRFS','TWRF','US'}, pout.days_of_week, '"days_of_week"');
+            data_source = opt_ask_multichoice('Which data set to use?', {'BEHR', 'WRF'}, pout.data, '"data"', 'list', true);
+            requested_values = opt_ask_multiselect('Which values to tabulate?', {'Correlation', 'R2', 'Tau', 'Tau percent uncertainty', 'E', 'E percent uncertainty'}, pout.values, '"values"');
+            requested_values = cellfun(@capitalize_words, requested_values, 'uniform', false);
+            requested_values = regexprep(requested_values, '\s', '');
+            
+            wrf_bool = strcmpi(data_source, 'WRF');
+            quantity_fxns = struct('Correlation', @calc_correlation,...
+                'R2', @(this_loc) this_loc.fit_info.param_stats.r2,...
+                'E', @(this_loc) this_loc.emis_tau.emis,...
+                'EPercentUncertainty', @(this_loc) this_loc.emis_tau.emis_uncert / this_loc.emis_tau.emis * 100,...
+                'Tau', @(this_loc) this_loc.emis_tau.tau,...
+                'TauPercentUncertainty', @(this_loc) this_loc.emis_tau.tau_uncert / this_loc.emis_tau.tau * 100);
+            ss_locs = misc_emissions_analysis.read_locs_file('Cities','PowerPlants');
+            ss_loc_names = {ss_locs.ShortName};
+            n_locs = numel(ss_locs);
+            
+            n_columns = numel(time_periods)*numel(days_of_week);
+            values = nan(n_locs, n_columns);
+            colnames = cell(1, n_columns);
+            
+            output_tables = make_empty_struct_from_cell(requested_values, values);
+            
+            
+            i_column = 1;
+            for i_time = 1:numel(time_periods)
+                fprintf('Working on %s\n', time_periods{i_time});
+                if regcmp(time_periods{i_time}, '2yr') && ~wrf_bool
+                    loc_inds = 1:70;
+                else
+                    loc_inds = 1:71;
+                end
+                
+                for i_dow = 1:numel(days_of_week)
+                    fprintf('  Loading %s data\n', days_of_week{i_dow});
+                    
+                    [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_periods{i_time});
+                    Data = load(misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_inds, days_of_week{i_dow}, 'lu'));
+                    
+                    for i_val = 1:numel(requested_values)
+                        fprintf('  Computing %s\n', requested_values{i_val});
+                        for i_loc = 1:numel(Data.locs)
+                            this_loc = Data.locs(i_loc);
+                            if isempty(this_loc.fit_info.emgfit)
+                                fprintf('    Skipping %s because it looks like the fit didn''t work\n', this_loc.ShortName);
+                                continue
+                            end
+                            loc_ind = strcmp(this_loc.ShortName, ss_loc_names);
+                            
+                            output_tables.(requested_values{i_val})(loc_ind, i_column) = quantity_fxns.(requested_values{i_val})(this_loc);
+                        end
+                    end
+                    
+                    colnames{i_column} = sprintf('%s_%s', time_periods{i_time}, days_of_week{i_dow});
+                    i_column = i_column + 1;
+                end
+            end
+            
+            for i_val = 1:numel(requested_values)
+                output_tables.(requested_values{i_val}) = array2table(output_tables.(requested_values{i_val}), 'RowNames', ss_loc_names, 'VariableNames', colnames);
+            end
+            function corr_val = calc_correlation(this_loc)
+                % for now, just want correlation of a and x_0
+                var1_ind = 1;
+                var2_ind = 2;
+                try
+                    [~, corr_mat] = cov2corr(emg_cov_mat(this_loc.fit_info.fitresults.Hessian, this_loc.no2_sectors.x, this_loc.no2_sectors.linedens, this_loc.fit_info.emgfit));
+                    corr_val =  corr_mat(var1_ind, var2_ind);
+                catch err
+                    if strcmpi(err.identifier, 'finance:cov2corr:invalidCovMatrixSymmetry')
+                        fprintf('    Skipping %s due to problem calculating correlation matrix: "%s"\n', this_loc.ShortName, err.message);
+                        corr_val = nan;
+                    else
+                        rethrow(err)
+                    end
+                end
             end
         end
     end
