@@ -841,7 +841,7 @@ classdef misc_emissions_analysis
             
             allowed_types = pout.allowed_types;
             
-            if nargin < 1 || isnan(loc_inds)
+            if nargin < 1 || (isscalar(loc_inds) && isnan(loc_inds))
                 ss_locs = misc_emissions_analysis.read_locs_file();
                 loc_types = {ss_locs.SiteType};
                 xx = ismember(loc_types, allowed_types);
@@ -2117,7 +2117,7 @@ classdef misc_emissions_analysis
                 figs = figure;
             end
             
-            abs_colormap = parula;
+            abs_colormap = jet;
             diff_colormap = blue_red_cmap;
             
             for i_loc = 1:n_locs
@@ -2130,9 +2130,10 @@ classdef misc_emissions_analysis
                 curr_ax = next_plot(2);
                 plot_plume(curr_ax, new.locs(i_loc));
                 
-                curr_ax = next_plot(3);
-                plot_plume(curr_ax, base.locs(i_loc), new.locs(i_loc));
-                
+            end
+            
+            if ~separate_figs
+                label_subfigs(figs, 'xshift', 0.2);
             end
             
             function ax = next_plot(y)
@@ -2141,8 +2142,7 @@ classdef misc_emissions_analysis
                     ax = gca;
                 else
                     idx = (y-1)*n_locs + i_loc;
-                    ax = subplot(3, n_locs, idx);
-                    %ax = subplot(y,i_loc,3*numel(loc_inds));
+                    ax = subplot(2, n_locs, idx);
                 end
             end
             
@@ -2163,12 +2163,72 @@ classdef misc_emissions_analysis
                     cb_label = 'VCD (molec cm^{-2})';
                 end
                 pcolor(ax, loc.no2_sectors.lon, loc.no2_sectors.lat, plot_quantity);
-                line(loc.Longitude, loc.Latitude, 'linestyle', 'none', 'marker', 'p', 'color', 'w', 'markerfacecolor','w','markersize',16);
+                line(loc.Longitude, loc.Latitude, 'linestyle', 'none', 'marker', 'p', 'color', 'k', 'markerfacecolor','k','markersize',16);
                 shading flat;
                 colormap(ax, cmap);
                 caxis(clims);
                 cb = colorbar;
                 cb.Label.String = cb_label;
+                
+                % Also find, from the line densities where it drops to 1/e
+                % of the max value. Only do this where plotting a single
+                % plume, not a difference.
+                
+                x = loc.no2_sectors.x;
+                linedens = loc.no2_sectors.linedens;
+                linedens_boxcar_mean = movmean(linedens, 5);
+                
+                [max_ld, i_max] = max(linedens);
+                background_ld = loc.fit_info.ffit.B;
+                % Find the distance where the boxcar average first brackets
+                % the 1/e value. We'll interpolate then to get the exact
+                % distance.
+                i_x = 1:numel(linedens);
+                % We want the line density where the enhancement has
+                % dropped to 1/e of its original value, so we caculate 1/e
+                % of that and add it back into the background.
+                e_folding_ld = exp(-1) * (max_ld - background_ld) + background_ld;
+                e_idx = find(linedens_boxcar_mean < e_folding_ld & i_x > i_max, 1, 'first');
+                x_e_fold = interp1(linedens_boxcar_mean(e_idx-1:e_idx), x(e_idx-1:e_idx), e_folding_ld);
+                
+                % Now we need to draw a vertical line on the plot at the
+                % e-folding distance downwind (maybe should draw a line
+                % between the maximum and the e-folding distance?)
+                % First step is to convert the distances back to
+                % longitudes. 
+                
+                % m_fdist expects distances in meters, hence multiply x by
+                % 1000. m_fdist also returns longitude in degrees east (so
+                % [0, 360] instead of [-180, 180], so we need to convert
+                % that back.
+                lon_max = m_fdist(loc.Longitude, loc.Latitude, 90, x(i_max)*1000) - 360;
+                lon_efold = m_fdist(loc.Longitude, loc.Latitude, 90, x_e_fold*1000) - 360;
+                
+                % We'll put the line halfway towards the bottom of the plot
+                bottom_lat = min(ax.YLim);
+                line_lat = mean([bottom_lat, loc.Latitude]);
+                
+                line_grp = hggroup(ax);
+                line_args = {'color', 'w', 'linewidth', 4, 'parent', line_grp};
+                inner_line_args = {'color', 'k', 'linewidth', 2, 'parent', line_grp};
+                axis_line_args = {'color', 'k', 'linewidth', 1, 'linestyle', '--', 'parent', line_grp};
+                
+                % Also draw dashed lines down to the x-axis so people can
+                % compare the e-folding absolute distances more easily.
+                % Draw these first so they end up on the bottom
+                line([lon_max, lon_max], [line_lat, bottom_lat], axis_line_args{:});
+                line([lon_efold, lon_efold], [line_lat, bottom_lat], axis_line_args{:});
+                
+                line([lon_max, lon_efold], [line_lat, line_lat], line_args{:});
+                line([lon_max, lon_efold], [line_lat, line_lat], inner_line_args{:});
+                % Make tips on the end
+                tip_radius = diff(ax.YLim)/40;
+                line([lon_max, lon_max], [line_lat - tip_radius, line_lat + tip_radius], line_args{:});
+                line([lon_max, lon_max], [line_lat - tip_radius, line_lat + tip_radius], inner_line_args{:});
+                line([lon_efold, lon_efold], [line_lat - tip_radius, line_lat + tip_radius], line_args{:});
+                line([lon_efold, lon_efold], [line_lat - tip_radius, line_lat + tip_radius], inner_line_args{:});
+                
+                set(ax, 'fontsize', 14);
             end
         end
         
