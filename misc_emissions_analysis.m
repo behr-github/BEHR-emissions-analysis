@@ -146,6 +146,11 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.emis_wrf_dir, 'wrfgridarea_d01');
         end
         
+        function filename = wrf_avg_prof_file(start_date, end_date)
+            base_filename = sprintf('WRF_avg_profs_%s_to_%s.mat', datestr(start_date{1}, 'yyyy-mm-dd'), datestr(end_date{end}, 'yyyy-mm-dd'));
+            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, base_filename);
+        end
+        
         function fulldir = subdir_prep(root_dir, varargin)
             % Use this to setup sub-output directories. It will make sure
             % that the root directory exists (if not, it errors) and then
@@ -1634,12 +1639,95 @@ classdef misc_emissions_analysis
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
-        function make_avg_wrf_lifetimes(varargin)
-            % This will compute the average WRF lifetimes vs. HNO3, ANs,
-            % and total for WRF files across the specified time periods.
-            % Since RO2 species aren't stored in the output, we need to
-            % calculate them assuming steady state RO2 concentrations,
-            % i.e. P(RO2) = L(RO2).
+        function make_average_nox_profiles(varargin)
+            
+            p = advInputParser;
+            p.addParameter('time_period','');
+            p.addParameter('relevant_hours', 15:23);
+            p.addParameter('num_workers', nan);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            time_period = pout.time_period;
+            hours_to_load = pout.relevant_hours;
+            num_workers = pout.num_workers;
+            if isnan(num_workers)
+                active_pool = gcp('nocreate');
+                if isempty(active_pool)
+                    num_workers = 0;
+                else
+                    num_workers = active_pool.NumWorkers;
+                end
+            end
+            
+            if iscell(time_period)
+                start_dates = time_period(1,:);
+                end_dates = time_period(2,:);
+            else
+                [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            end
+            
+            dvec = make_datevec(start_dates, end_dates);
+            % This needs to be separate because we need a non-distributed
+            % version for use outside the spmd block.
+            distributed_dvec = distributed(dvec);
+            profile_running_avgs = Composite(num_workers);
+            vars_to_load = {'no','no2','pres'};
+            n_vars = numel(vars_to_load);
+            spmd(num_workers)
+                local_dvec = getLocalPart(distributed_dvec);
+                fprintf('Worker %d will do %s to %s\n', labindex, datestr(local_dvec(1)), datestr(local_dvec(end)));
+                local_avgs = cell(1, n_vars);
+                for i_var = 1:n_vars
+                    local_avgs{i_var} = RunningAverage();
+                end
+                
+                for i_date = 1:numel(local_dvec)
+                    fprintf('  Loading files from %s\n', datestr(local_dvec(i_date)));
+                    wrf_date = local_dvec(i_date);
+                    wrf_dir = find_wrf_path('us','daily',wrf_date);
+                    wrf_files = dir(fullfile(wrf_dir, sprintf('wrfout_*_%s*',datestr(wrf_date, 'yyyy-mm-dd'))));
+                    wrf_hours = hour(date_from_wrf_filenames(wrf_files));
+                    xx = ismember(wrf_hours, hours_to_load);
+                    wrf_files(~xx) = [];
+                    data = read_wrf_vars(wrf_dir, wrf_files, vars_to_load, 'squeeze', 0, 'as_struct');
+                    if i_date == 1
+                        xlon = ncread(fullfile(wrf_dir, wrf_files(1).name), 'XLONG');
+                    end
+                    
+                    for i_var = 1:n_vars
+                        tmp_var = wrf_day_weighted_average(xlon, 13.5, hours_to_load, data.(vars_to_load{i_var}));
+                        local_avgs{i_var}.addData(tmp_var{1});
+                    end
+                end
+                
+                % Setting the value of a composite variable inside and SPMD
+                % loop sets the value for this worker in the overall
+                % composite.
+                %
+                % We want to pass the running averages back out because we
+                % need to add up the running averages across all of the
+                % workers.
+                profile_running_avgs = local_avgs;
+            end
+            
+            data = make_empty_struct_from_cell(vars_to_load);
+            for i_var = 1:n_vars
+                var_avg = RunningAverage();
+                for i_worker = 1:numel(profile_running_avgs)
+                    sub_avg = profile_running_avgs{i_worker};
+                    var_avg.addData(sub_avg{i_var}.values, sub_avg{i_var}.weights);
+                end
+                data.(vars_to_load{i_var}) = var_avg.getWeightedAverage();
+            end
+            
+            % Add longitude and latitude
+            wrf_file = find_wrf_path('us','daily',dvec(1),'fullpath');
+            data.lon = ncread(wrf_file, 'XLONG');
+            data.lat = ncread(wrf_file, 'XLAT');
+            
+            save(misc_emissions_analysis.wrf_avg_prof_file(start_dates, end_dates), '-struct', 'data', '-v7.3');
         end
         
         %%%%%%%%%%%%%%%%%%%%
