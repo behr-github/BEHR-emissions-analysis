@@ -1652,13 +1652,15 @@ classdef misc_emissions_analysis
             time_period = pout.time_period;
             hours_to_load = pout.relevant_hours;
             num_workers = pout.num_workers;
+            active_pool = gcp('nocreate');
             if isnan(num_workers)
-                active_pool = gcp('nocreate');
                 if isempty(active_pool)
                     num_workers = 0;
                 else
                     num_workers = active_pool.NumWorkers;
                 end
+            elseif isempty(active_pool)
+                active_pool = parpool(num_workers);
             end
             
             if iscell(time_period)
