@@ -21,6 +21,15 @@ classdef misc_emissions_analysis
         % if generating slow and fast line densities for the convolution
         % approach.
         fast_slow_sep = 3;
+        
+        dow_markers = struct('UMTWRFS', struct('marker', 'o', 'name', 'All days', 'used', false),...
+            'TWRF', struct('marker', '^', 'name', 'Weekdays', 'used', false),...
+            'US', struct('marker', 'h', 'name', 'Weekends', 'used', false));
+            
+        time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2005/07', 'used', false),...
+            'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
+            'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012/13', 'used', false),...
+            'end', struct('color', 'r', 'name', '2013*', 'used', false));
     end
     
     methods(Static = true)
@@ -324,11 +333,22 @@ classdef misc_emissions_analysis
             yy = (yy - radius):(yy + radius);
         end
         
-        function [xx, radius] = find_indices_in_radius_around_loc(loc, lon, lat)
+        function [xx, radius] = find_indices_in_radius_around_loc(loc, lon, lat, varargin)
             % The Radius field is a carry over from Russell et al. 2012.
             % Now we use the boxes defined for the EMG fitting for
-            % consistency.
-            radius = mean(loc.BoxSize(3:4));
+            % consistency. Alternately, you may specify your own radius, in
+            % degrees
+            p = advInputParser;
+            p.addOptional('radius', []);
+            p.parse(varargin{:});
+            pout = p.Results;
+            user_radius = pout.radius;
+            
+            if isempty(user_radius)
+                radius = mean(loc.BoxSize(3:4));
+            else
+                radius = user_radius;
+            end
             r = sqrt((lon - loc.Longitude).^2 + (lat - loc.Latitude).^2);
             xx = r < radius;
         end
@@ -1719,7 +1739,12 @@ classdef misc_emissions_analysis
                 var_avg = RunningAverage();
                 for i_worker = 1:numel(profile_running_avgs)
                     sub_avg = profile_running_avgs{i_worker};
-                    var_avg.addData(sub_avg{i_var}.values, sub_avg{i_var}.weights);
+                    % since adding data to a running average multiplies it
+                    % by the weight, and getting the weighted average
+                    % divides by the weight, to "append" weighted averages
+                    % like this, we need to add the average, weighted by
+                    % its weights, or we end up double-counting the weights
+                    var_avg.addData(sub_avg{i_var}.getWeightedAverage(), sub_avg{i_var}.weights);
                 end
                 data.(vars_to_load{i_var}) = var_avg.getWeightedAverage();
             end
@@ -2301,7 +2326,7 @@ classdef misc_emissions_analysis
                 line_grp = hggroup(ax);
                 line_args = {'color', 'w', 'linewidth', 4, 'parent', line_grp};
                 inner_line_args = {'color', 'k', 'linewidth', 2, 'parent', line_grp};
-                axis_line_args = {'color', 'k', 'linewidth', 1, 'linestyle', '--', 'parent', line_grp};
+                axis_line_args = {'color', 'w', 'linewidth', 2, 'linestyle', '--', 'parent', line_grp};
                 
                 % Also draw dashed lines down to the x-axis so people can
                 % compare the e-folding absolute distances more easily.
@@ -2558,15 +2583,9 @@ classdef misc_emissions_analysis
             marker_size = 10;
             marker_linewidth = 1.5;
             connector_linewidth = 2;
-            dow_markers = struct('UMTWRFS', struct('marker', 'o', 'name', 'All days', 'used', false),...
-                'TWRF', struct('marker', '^', 'name', 'Weekdays', 'used', false),...
-                'US', struct('marker', 'h', 'name', 'Weekends', 'used', false));
+            dow_markers = misc_emissions_analysis.dow_markers;
             
-            time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2005/07', 'used', false),...
-                'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
-                'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012/13', 'used', false),...
-                'end', struct('color', 'r', 'name', '2013*', 'used', false));
-            
+            time_period_colors = misc_emissions_analysis.time_period_colors;
             % Now actually load the data
             
             all_changes = struct([]);
@@ -2737,6 +2756,132 @@ classdef misc_emissions_analysis
             %     %
             % End %
             %     %
+        end
+        
+        function [figs, info] = plot_vcd_vs_concentration(varargin)
+            % This plots the surface or boundary layer concentration
+            % inferred from average WRF-Chem profiles vs. BEHR VCDs. We
+            % will assume that the WRF-Chem profiles are representative of
+            % the all days-of-week average VCDs (since the NEI emissions do
+            % not have a weekend effect, I'm not sure at the moment if they
+            % represent an average of all days or are a representative
+            % weekday inventory). So to get at the TWRF and US VCD ->
+            % concentrations, we'll interpolate the NO2 profiles by their
+            % corresponding VCDs.
+            
+            p = advInputParser;
+            p.addParameter('loc_indices', 1:71);
+            p.addParameter('interp_method', 'linear');
+            p.addParameter('conc_type', 'boundary layer');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_ind = pout.loc_indices;
+            interp_method = pout.interp_method;
+            conc_type = pout.conc_type;
+            
+            locs = misc_emissions_analysis.read_locs_file;
+            % Since we're reading the locations directly from the
+            % spreadsheet, rather than a .mat file, we can cut it down
+            % directly.
+            locs = locs(loc_ind);
+            
+            time_periods = {'beg_2yr','beginning','end_2yr','end'};
+            days_of_week = {'UMTWRFS', 'TWRF', 'US'};
+            
+            n_time = numel(time_periods);
+            n_dow = numel(days_of_week);
+            n_locs = numel(locs);
+            n_levels = [];
+            
+            vcds = cell(n_time, n_dow);
+            profs = cell(n_time, n_dow);
+            pres = cell(n_time, n_dow);
+            
+            for i_time = 1:n_time
+                [profs{i_time, 1}, pres{i_time, 1}] = misc_emissions_analysis.avg_wrf_prof_around_loc(locs, time_periods{i_time}, 'nox_or_no2', 'nox', 'radius', 0.35);
+                for i_dow = 1:n_dow
+                    vcds{i_time, i_dow} = misc_emissions_analysis.avg_vcds_around_loc(locs, time_periods{i_time}, days_of_week{i_dow}, 'radius', 0.35);
+                    if i_dow > 1
+                        profs{i_time, i_dow} = nan(size(profs{i_time, 1}));
+                        pres{i_time, i_dow} = nan(size(pres{i_time, 1}));
+                    end
+                end
+                
+                if isempty(n_levels)
+                    n_levels = size(profs{i_time, 1},1);
+                else
+                    if size(profs{i_time, 1}, 1) ~= n_levels
+                        error('Different numbers of levels')
+                    end
+                end
+            end
+            
+            % Now we handle the interpolation and at the same time
+            % calculate the concentration, either averaged over the
+            % boundary layer or right at the surface
+            base_dow_ind = 1;
+            concentrations = cell(size(vcds));
+            concentrations(:) = {nan(1, n_locs)};
+            figs = gobjects(n_locs,1);
+            
+            dow_markers = misc_emissions_analysis.dow_markers;
+            time_period_colors = misc_emissions_analysis.time_period_colors;
+            
+            for i_loc = 1:n_locs
+                figs(i_loc) = figure;
+                loc_vcds = cellfun(@(v) v(i_loc), vcds);
+                loc_base_sfs = nan(n_levels, n_time);
+                %loc_base_pres = nan(n_levels, n_time);
+                for i_time = 1:n_time
+                    loc_base_sfs(:, i_time) = profs{i_time, base_dow_ind}(:, i_loc);
+                    %loc_base_pres(:, i_time) = pres{i_time, base_dow_ind}(:, i_loc);
+                end
+                
+                % For the days-of-week that we haven't declared equivalent
+                % to WRF, we need to interpolate to get their shape factors
+                for i_time = 1:n_time
+                    for i_dow = 1:n_dow
+                        if i_dow == base_dow_ind
+                            this_prof = profs{i_time, i_dow}(:, i_loc);
+                            %this_pres = pres{i_time, i_dow}(:, i_loc);
+                        else
+                            this_prof = interp_profiles(loc_vcds(:, base_dow_ind), loc_base_sfs, loc_vcds(i_time, i_dow), interp_method);
+                            %this_pres = interp_profiles(loc_vcds(:, base_dow_ind), loc_base_pres, loc_vcds(i_time, i_dow), 'nearest');
+                        end
+                        
+                        nox_conc_prof = this_prof .* loc_vcds(i_time, i_dow);
+                        if strcmpi(conc_type, 'boundary layer')
+                            concentrations{i_time, i_dow}(i_loc) = avg_bl_conc(nox_conc_prof);
+                        elseif strcmpi(conc_type, 'surface')
+                            concentrations{i_time, i_dow}(i_loc) = nox_conc_prof(1);
+                        end
+                        
+                        marker = dow_markers.(days_of_week{i_dow}).marker;
+                        color = time_period_colors.(time_periods{i_time}).color;
+                        line(loc_vcds(i_time, i_dow), concentrations{i_time, i_dow}(i_loc), 'color', color, 'marker', marker, 'linestyle', 'none', 'linewidth', 2, 'markersize', 16);
+                    end
+                end
+                
+                info.concentrations = concentrations;
+                info.vcds = vcds;
+                info.locs = locs;
+                
+            end
+            
+            function interp_profs = interp_profiles(base_vcds, base_profs, target_vcds, method)
+                interp_profs = nan(size(base_profs,1), 1);
+                for i_lev = 1:numel(interp_profs)
+                    interp_profs(i_lev) = interp1(base_vcds, base_profs(i_lev, :), target_vcds, method, 'extrap');
+                end
+            end
+            
+            function conc = avg_bl_conc(nox_prof)
+                % Assume the first ~10 model levels are in the BL, based on
+                % Chicago
+                conc = nanmean(nox_prof(1:10));
+            end
         end
         
         function plot_wrf_emissions(varargin)
@@ -3223,7 +3368,23 @@ classdef misc_emissions_analysis
             end
         end
         
-        function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week)
+        function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
+            p = advInputParser;
+            p.addParameter('radius', 'by_loc');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_radius = pout.radius;
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
             VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week));
@@ -3237,8 +3398,81 @@ classdef misc_emissions_analysis
                 % This will use the box width (from center to edge
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
-                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat);
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat, avg_radius);
                 avg_vcds(i_loc) = nanmean(VCDs.daily.no2(xx_radius));
+            end
+        end
+        
+        function [shape_factors, pres_levels] = avg_wrf_prof_around_loc(locs, time_period, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('nox_or_no2', 'nox');
+            p.addParameter('radius', 'by_loc');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            nox_or_no2 = pout.nox_or_no2;
+            avg_radius = pout.radius;
+            
+            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            prof_file = misc_emissions_analysis.wrf_avg_prof_file(start_dates, end_dates);
+            Profs = load(prof_file);
+            
+            dvec = make_datevec(start_dates, end_dates);
+            % My first run of average profiles added already weighted data
+            % to a weighted average when combining the different workers,
+            % so the weights were double counted. The weights in question
+            % were the number of days averaged on each worker (I used 2
+            % workers) so we need to divide by that to bring things back
+            % into line.
+            weight_correction = 1/(numel(dvec)/2);
+            warning('2018-07-16: Correcting average profiles for double-counting weights. For average profiles recalculated after 16 Jul 2018, this correction must be turned off');
+            
+            
+            fns = fieldnames(Profs);
+            for i_fn = 1:numel(fns)
+                this_fn = fns{i_fn};
+                if ismatrix(Profs.(this_fn))
+                    continue
+                elseif ndims(Profs.(this_fn) == 3)
+                    % Permute 3D arrays so that the first dimension is
+                    % vertical, this will make it easier to subset them.
+                    Profs.(this_fn) = permute(Profs.(this_fn), [3 1 2]) * weight_correction;
+                else
+                    E.notimplemented('Did not expect an array with ndims > 3')
+                end
+            end
+            
+            shape_factors = nan(size(Profs.pres,1), numel(locs));
+            pres_levels = nan(size(Profs.pres,1), numel(locs));
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            for i_loc = 1:numel(locs)
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), Profs.lon, Profs.lat, avg_radius);
+                this_no2 = nanmean(Profs.no2(:,xx_radius),2) * 1e-6;
+                this_no = nanmean(Profs.no(:,xx_radius),2) * 1e-6;
+                this_pres = nanmean(Profs.pres(:,xx_radius),2);
+                
+                
+                % Now we need to calculate the NO2 VCDs, then either the
+                % NOx or NO2 shape factors
+                no2_vcd = integPr2(this_no2, this_pres, this_pres(1), this_pres(end));
+                if strcmpi(nox_or_no2, 'nox')
+                    shape_factors(:, i_loc) = (this_no + this_no2) ./ no2_vcd;
+                elseif strcmpi(nox_or_no2, 'no2')
+                    shape_factors(:, i_loc) = this_no2 ./ no2_vcd;
+                else
+                    E.notimplemented('No method set for "nox_or_no2" == "%s"', nox_or_no2);
+                end
+                pres_levels(:, i_loc) = this_pres;
             end
         end
         
