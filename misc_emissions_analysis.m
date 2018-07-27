@@ -700,6 +700,8 @@ classdef misc_emissions_analysis
                 changes.vcds = default_mat;
                 changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
                 changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
+                changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'species', 'hcho');
+                changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'species', 'hcho');
             end
             
             changes.Location = {first_locs.locs.Location}';
@@ -2512,6 +2514,7 @@ classdef misc_emissions_analysis
             p.addParameter('fit_type', '');
             p.addParameter('sat_or_model', {});
             p.addParameter('single_plot', nan);
+            p.addParameter('single_plot_mode', '');
             p.addParameter('include_2years', nan);
             p.addParameter('days_of_week', '');
             p.addParameter('connect_wkend', nan);
@@ -2543,6 +2546,11 @@ classdef misc_emissions_analysis
             sat_or_model = opt_ask_multiselect('Which data source to use?', {'BEHR', 'WRF'}, pout.sat_or_model, '"sat_or_model"');
             
             single_plot_bool = opt_ask_yn('Plot all locations on a single plot?', pout.single_plot, '"single_plot"');
+            if single_plot_bool
+                single_plot_mode = opt_ask_multichoice('What should color represent in the plot?', {'Year','HCHO VCD'}, pout.single_plot_mode, '"single_plot_mode"');
+            else
+                single_plot_mode = '';
+            end
             
             allowed_dows = {'UMTWRFS','TWRF','US'};
             days_of_week = opt_ask_multiselect('Choose which day-of-week subsets to include', [allowed_dows, 'all'], pout.days_of_week, '"days_of_week"');
@@ -2653,10 +2661,22 @@ classdef misc_emissions_analysis
                 l = gobjects(0);
                 legend_cell = {};
                 figure;
-                for i_change = 1:numel(all_changes)
-                    line(all_changes(i_change).(mass_value)(:,1), all_changes(i_change).tau(:,1), all_changes(i_change).style(1));
-                    line(all_changes(i_change).(mass_value)(:,2), all_changes(i_change).tau(:,2), all_changes(i_change).style(2));
+                if strcmpi(single_plot_mode, 'Year')
+                    for i_change = 1:numel(all_changes)
+                        line(all_changes(i_change).(mass_value)(:,1), all_changes(i_change).tau(:,1), all_changes(i_change).style(1));
+                        line(all_changes(i_change).(mass_value)(:,2), all_changes(i_change).tau(:,2), all_changes(i_change).style(2));
+                    end
+                elseif strcmpi(single_plot_mode, 'HCHO VCD')
+                    no2_vcds = [all_changes.(mass_value)];
+                    hcho_vcds = [all_changes.hcho_vcds];
+                    tau = [all_changes.tau];
+                    scatter(no2_vcds(:), tau(:), 60, hcho_vcds(:), 'filled');
+                    cb = colorbar;
+                    cb.Label.String = 'HCHO VCD (molec. cm^{-2})';
+                    where_to_put_legend = 'none';
                 end
+                
+                
                 
                 if strcmpi(where_to_put_legend, 'all')
                     make_legend(gca);
@@ -3369,13 +3389,16 @@ classdef misc_emissions_analysis
         end
         
         function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
+            E = JLLErrors;
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
+            p.addParameter('species', 'no2');
             
             p.parse(varargin{:});
             pout = p.Results;
             
             avg_radius = pout.radius;
+            vcd_species = pout.species;
             
             if ischar(avg_radius)
                 if strcmpi(avg_radius, 'by_loc')
@@ -3385,9 +3408,24 @@ classdef misc_emissions_analysis
                 end
             end
             
+            allowed_species = {'no2','hcho'};
+            if ~ismember(vcd_species, allowed_species)
+                E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
+            elseif strcmp(vcd_species, 'hcho')
+                % currently I only have all day-of-week HCHO VCD averages
+                % because I don't expect large weekday-weekend difference
+                % (but might be worth checking) so for now we'll just force
+                % the HCHO VCDs to be from all days of week
+                
+                if ~strcmpi(days_of_week, 'UMTWRFS')
+                    warning('HCHO columns will be from all days of week, even if a different subset was specified');
+                end
+                days_of_week = 'UMTWRFS';
+            end
+            
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week));
+            VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week, vcd_species));
             lon_res = mean(diff(VCDs.daily.lon(1,:)));
             lat_res = mean(diff(VCDs.daily.lat(:,1)));
             if abs(lon_res - lat_res) > 1e-10
@@ -3399,7 +3437,7 @@ classdef misc_emissions_analysis
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
                 xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat, avg_radius);
-                avg_vcds(i_loc) = nanmean(VCDs.daily.no2(xx_radius));
+                avg_vcds(i_loc) = nanmean(VCDs.daily.(vcd_species)(xx_radius));
             end
         end
         
