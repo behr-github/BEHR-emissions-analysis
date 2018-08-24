@@ -21,6 +21,15 @@ classdef misc_emissions_analysis
         % if generating slow and fast line densities for the convolution
         % approach.
         fast_slow_sep = 3;
+        
+        dow_markers = struct('UMTWRFS', struct('marker', 'o', 'name', 'All days', 'used', false),...
+            'TWRF', struct('marker', '^', 'name', 'Weekdays', 'used', false),...
+            'US', struct('marker', 'h', 'name', 'Weekends', 'used', false));
+            
+        time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2005/07', 'used', false),...
+            'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
+            'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012/13', 'used', false),...
+            'end', struct('color', 'r', 'name', '2013*', 'used', false));
     end
     
     methods(Static = true)
@@ -324,11 +333,22 @@ classdef misc_emissions_analysis
             yy = (yy - radius):(yy + radius);
         end
         
-        function [xx, radius] = find_indices_in_radius_around_loc(loc, lon, lat)
+        function [xx, radius] = find_indices_in_radius_around_loc(loc, lon, lat, varargin)
             % The Radius field is a carry over from Russell et al. 2012.
             % Now we use the boxes defined for the EMG fitting for
-            % consistency.
-            radius = mean(loc.BoxSize(3:4));
+            % consistency. Alternately, you may specify your own radius, in
+            % degrees
+            p = advInputParser;
+            p.addOptional('radius', []);
+            p.parse(varargin{:});
+            pout = p.Results;
+            user_radius = pout.radius;
+            
+            if isempty(user_radius)
+                radius = mean(loc.BoxSize(3:4));
+            else
+                radius = user_radius;
+            end
             r = sqrt((lon - loc.Longitude).^2 + (lat - loc.Latitude).^2);
             xx = r < radius;
         end
@@ -678,8 +698,18 @@ classdef misc_emissions_analysis
             
             if include_vcds
                 changes.vcds = default_mat;
-                changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
-                changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
+                changes.hcho_vcds = default_mat;
+                if ~use_wrf
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
+                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'species', 'hcho');
+                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'species', 'hcho');
+                else
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'no2');
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'no2');
+                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'hcho');
+                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'hcho');
+                end
             end
             
             changes.Location = {first_locs.locs.Location}';
@@ -694,6 +724,83 @@ classdef misc_emissions_analysis
                     aB = a + B;
                 end
             end
+            
+        end
+        
+        function is_good = is_fit_good(x, linedens, fit_info, varargin)
+            p = advInputParser;
+            p.addParameter('any_num_pts', false);
+            p.addParameter('DEBUG_LEVEL', 0);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            allow_any_num_pts = pout.any_num_pts;
+            DEBUG_LEVEL = pout.DEBUG_LEVEL;
+            
+            is_good = false;
+            
+            % Criteria 0: are there enough non-NaN points to give a good
+            % fit? Testing with the box model shows that with only 31
+            % points, the fitting procedure has a hard time fitting more
+            % than a narrow range of lifetimes, but does better with 61.
+            if (sum(~isnan(linedens)) < 60 || sum(~isnan(linedens)) > 70) && ~allow_any_num_pts
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by too few line density points\n');
+                end
+                return
+            end
+            
+            % Criteria 1: is R2 high enough
+            if fit_info.param_stats.r2 < 0.8
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by R2\n');
+                end
+                return
+            end
+            
+            % Criteria 2: is there at least 1.5 lifetimes downwind of
+            % the plume center?
+            if misc_emissions_analysis.n_lifetimes_downwind(x, fit_info.ffit.x_0, fit_info.ffit.mu_x) < 1.5
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by number of lifetimes downwind\n');
+                end
+                return
+            end
+            
+            % Criteria 3: check for systematic bias in the fit
+            if any(misc_emissions_analysis.test_fit_for_bias(linedens, fit_info.emgfit, 'window', 20))
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by systematic bias test\n');
+                end
+                return
+            end
+            
+            % Criteria 4: reject if sigma > x_0, because that suggests that
+            % the width of the emission source might be obstructing the
+            % lifetime
+            if fit_info.ffit.sigma_x > fit_info.ffit.x_0
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by width of emissions\n');
+                end
+                return
+            end
+            
+            is_good = true;
+        end
+        
+        function is_good = is_fit_good_by_loc(loc, varargin)
+            E = JLLErrors;
+            if ~isscalar(loc) || ~isstruct(loc)
+                E.badinput('LOC must be a scalar structure')
+            end
+            
+            varargin = update_params(varargin, 'DEBUG_LEVEL', 1);
+            
+            is_good = misc_emissions_analysis.is_fit_good(loc.no2_sectors.x, loc.no2_sectors.linedens, loc.fit_info, varargin{:});
+        end
+        
+        function n_taus = n_lifetimes_downwind(x, x_0, mu_x)
+            n_taus = (max(x) - mu_x)./x_0;
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1639,7 +1746,7 @@ classdef misc_emissions_analysis
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
-        function make_average_nox_profiles(varargin)
+        function make_average_wrf_profiles(varargin)
             
             p = advInputParser;
             p.addParameter('time_period','');
@@ -1652,13 +1759,15 @@ classdef misc_emissions_analysis
             time_period = pout.time_period;
             hours_to_load = pout.relevant_hours;
             num_workers = pout.num_workers;
+            active_pool = gcp('nocreate');
             if isnan(num_workers)
-                active_pool = gcp('nocreate');
                 if isempty(active_pool)
                     num_workers = 0;
                 else
                     num_workers = active_pool.NumWorkers;
                 end
+            elseif isempty(active_pool)
+                active_pool = parpool(num_workers);
             end
             
             if iscell(time_period)
@@ -1673,7 +1782,7 @@ classdef misc_emissions_analysis
             % version for use outside the spmd block.
             distributed_dvec = distributed(dvec);
             profile_running_avgs = Composite(num_workers);
-            vars_to_load = {'no','no2','pres'};
+            vars_to_load = {'no','no2','hcho','pres'};
             n_vars = numel(vars_to_load);
             spmd(num_workers)
                 local_dvec = getLocalPart(distributed_dvec);
@@ -1717,7 +1826,12 @@ classdef misc_emissions_analysis
                 var_avg = RunningAverage();
                 for i_worker = 1:numel(profile_running_avgs)
                     sub_avg = profile_running_avgs{i_worker};
-                    var_avg.addData(sub_avg{i_var}.values, sub_avg{i_var}.weights);
+                    % since adding data to a running average multiplies it
+                    % by the weight, and getting the weighted average
+                    % divides by the weight, to "append" weighted averages
+                    % like this, we need to add the average, weighted by
+                    % its weights, or we end up double-counting the weights
+                    var_avg.addData(sub_avg{i_var}.getWeightedAverage(), sub_avg{i_var}.weights);
                 end
                 data.(vars_to_load{i_var}) = var_avg.getWeightedAverage();
             end
@@ -2299,7 +2413,7 @@ classdef misc_emissions_analysis
                 line_grp = hggroup(ax);
                 line_args = {'color', 'w', 'linewidth', 4, 'parent', line_grp};
                 inner_line_args = {'color', 'k', 'linewidth', 2, 'parent', line_grp};
-                axis_line_args = {'color', 'k', 'linewidth', 1, 'linestyle', '--', 'parent', line_grp};
+                axis_line_args = {'color', 'w', 'linewidth', 2, 'linestyle', '--', 'parent', line_grp};
                 
                 % Also draw dashed lines down to the x-axis so people can
                 % compare the e-folding absolute distances more easily.
@@ -2485,6 +2599,7 @@ classdef misc_emissions_analysis
             p.addParameter('fit_type', '');
             p.addParameter('sat_or_model', {});
             p.addParameter('single_plot', nan);
+            p.addParameter('single_plot_mode', '');
             p.addParameter('include_2years', nan);
             p.addParameter('days_of_week', '');
             p.addParameter('connect_wkend', nan);
@@ -2516,6 +2631,11 @@ classdef misc_emissions_analysis
             sat_or_model = opt_ask_multiselect('Which data source to use?', {'BEHR', 'WRF'}, pout.sat_or_model, '"sat_or_model"');
             
             single_plot_bool = opt_ask_yn('Plot all locations on a single plot?', pout.single_plot, '"single_plot"');
+            if single_plot_bool
+                single_plot_mode = opt_ask_multichoice('What should color represent in the plot?', {'Year','HCHO VCD'}, pout.single_plot_mode, '"single_plot_mode"', 'list', true);
+            else
+                single_plot_mode = '';
+            end
             
             allowed_dows = {'UMTWRFS','TWRF','US'};
             days_of_week = opt_ask_multiselect('Choose which day-of-week subsets to include', [allowed_dows, 'all'], pout.days_of_week, '"days_of_week"');
@@ -2556,15 +2676,11 @@ classdef misc_emissions_analysis
             marker_size = 10;
             marker_linewidth = 1.5;
             connector_linewidth = 2;
-            dow_markers = struct('UMTWRFS', struct('marker', 'o', 'name', 'All days', 'used', false),...
-                'TWRF', struct('marker', '^', 'name', 'Weekdays', 'used', false),...
-                'US', struct('marker', 'h', 'name', 'Weekends', 'used', false));
+            dow_markers = misc_emissions_analysis.dow_markers;
+            product_series = struct('behr', struct('used', false, 'name', 'BEHR', 'style', struct('marker', 'o', 'color', 'k', 'markerfacecolor', 'k', 'linestyle', 'none', 'linewidth', 2)),...
+                'wrf', struct('used', false, 'name', 'WRF', 'style', struct('marker', 'o', 'color', 'k', 'linestyle','none','linewidth',2)));
             
-            time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2005/07', 'used', false),...
-                'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
-                'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012/13', 'used', false),...
-                'end', struct('color', 'r', 'name', '2013*', 'used', false));
-            
+            time_period_colors = misc_emissions_analysis.time_period_colors;
             % Now actually load the data
             
             all_changes = struct([]);
@@ -2632,13 +2748,35 @@ classdef misc_emissions_analysis
                 l = gobjects(0);
                 legend_cell = {};
                 figure;
-                for i_change = 1:numel(all_changes)
-                    line(all_changes(i_change).(mass_value)(:,1), all_changes(i_change).tau(:,1), all_changes(i_change).style(1));
-                    line(all_changes(i_change).(mass_value)(:,2), all_changes(i_change).tau(:,2), all_changes(i_change).style(2));
+                if strcmpi(single_plot_mode, 'Year')
+                    for i_change = 1:numel(all_changes)
+                        line(all_changes(i_change).(mass_value)(:,1), all_changes(i_change).tau(:,1), all_changes(i_change).style(1));
+                        line(all_changes(i_change).(mass_value)(:,2), all_changes(i_change).tau(:,2), all_changes(i_change).style(2));
+                    end
+                    legend_flags = {};
+                elseif strcmpi(single_plot_mode, 'HCHO VCD')
+                    is_wrf = [all_changes.is_wrf];
+                    behr_no2_vcds = [all_changes(~is_wrf).(mass_value)];
+                    behr_hcho_vcds = [all_changes(~is_wrf).hcho_vcds];
+                    behr_tau = [all_changes(~is_wrf).tau];
+                    scatter(behr_no2_vcds(:), behr_tau(:), 60, behr_hcho_vcds(:), 'filled');
+                    
+                    hold on
+                    wrf_no2_vcds = [all_changes(is_wrf).(mass_value)];
+                    wrf_hcho_vcds = [all_changes(is_wrf).hcho_vcds];
+                    wrf_tau = [all_changes(is_wrf).tau];
+                    scatter(wrf_no2_vcds(:), wrf_tau(:), 60, wrf_hcho_vcds(:));
+                    
+                    cb = colorbar;
+                    cb.Label.String = 'HCHO VCD (molec. cm^{-2})';
+                    colormap jet
+                    legend_flags = {'no_dow', 'no_time_period'};
                 end
                 
+                
+                
                 if strcmpi(where_to_put_legend, 'all')
-                    make_legend(gca);
+                    make_legend(gca, legend_flags{:});
                 end
                 set(gca,'xscale','log','fontsize',14);
                 xlabel(x_label_str);
@@ -2674,10 +2812,17 @@ classdef misc_emissions_analysis
                 changes.style = struct('marker', {dow_markers.(days_of_week_1).marker, dow_markers.(days_of_week_2).marker},...
                     'linestyle', 'none', 'color', {time_period_colors.(time_period_1).color, time_period_colors.(time_period_2).color},...
                     'markersize',marker_size,'linewidth',marker_linewidth,'markerfacecolor',marker_fills);
+                changes.is_wrf = load_wrf;
                 dow_markers.(days_of_week_1).used = true;
                 dow_markers.(days_of_week_2).used = true;
+                if load_wrf
+                    product_series.wrf.used = true;
+                else
+                    product_series.behr.used = true;
+                end
                 time_period_colors.(time_period_1).used = true;
                 time_period_colors.(time_period_2).used = true;
+                
                 
                 if isempty(all_changes)
                     all_changes = changes;
@@ -2686,28 +2831,67 @@ classdef misc_emissions_analysis
                 end
             end
             
-            function make_legend(parent)
+            function make_legend(parent, varargin)
+                subp = advInputParser;
+                subp.addFlag('no_dow');
+                subp.addFlag('no_time_period');
+                subp.addFlag('no_product');
+                
+                subp.parse(varargin{:});
+                sub_pout = subp.Results;
+                
+                no_days_of_week = sub_pout.no_dow;
+                no_time_period = sub_pout.no_time_period;
+                no_product = sub_pout.no_product;
+                
                 % first the time periods
-                fns = fieldnames(time_period_colors);
                 l = gobjects(0,1);
                 legend_cell = {};
-                for i_fn = 1:numel(fns)
-                    this_tp = time_period_colors.(fns{i_fn});
-                    if this_tp.used
-                        l(end+1) = line(nan, nan, 'linewidth', connector_linewidth, 'color', this_tp.color, 'parent', parent);
-                        legend_cell{end+1} = this_tp.name;
+                if ~no_time_period
+                    fns = fieldnames(time_period_colors);
+                    for i_fn = 1:numel(fns)
+                        this_tp = time_period_colors.(fns{i_fn});
+                        if this_tp.used
+                            l(end+1) = line(nan, nan, 'linewidth', connector_linewidth, 'color', this_tp.color, 'parent', parent);
+                            legend_cell{end+1} = this_tp.name;
+                        end
                     end
                 end
                 
-                fns = fieldnames(dow_markers);
-                for i_fn = 1:numel(fns)
-                    this_dow = dow_markers.(fns{i_fn});
-                    if this_dow.used
-                        l(end+1) = line(nan,nan,'marker', this_dow.marker, 'linestyle', 'none', 'color', 'k', 'linewidth', marker_linewidth, 'markersize', marker_size, 'parent', parent);
-                        legend_cell{end+1} = this_dow.name;
+                if ~no_days_of_week
+                    fns = fieldnames(dow_markers);
+                    for i_fn = 1:numel(fns)
+                        this_dow = dow_markers.(fns{i_fn});
+                        if this_dow.used
+                            l(end+1) = line(nan,nan,'marker', this_dow.marker, 'linestyle', 'none', 'color', 'k', 'linewidth', marker_linewidth, 'markersize', marker_size, 'parent', parent);
+                            legend_cell{end+1} = this_dow.name;
+                        end
                     end
                 end
-                legend(parent, l', legend_cell, 'location', 'best'); 
+                
+                if ~no_product
+                    fns = fieldnames(product_series);
+                    which_products_used = nan(1, numel(fns));
+                    for i_fn = 1:numel(fns)
+                        which_products_used(i_fn) = product_series.(fns{i_fn}).used;
+                    end
+                    % We only want to indicate the different products in the
+                    % legend if more than one was used, otherwise it is
+                    % extraneous information
+                    if sum(which_products_used) > 1
+                        for i_fn = 1:numel(fns)
+                            this_product = product_series.(fns{i_fn});
+                            if this_product.used
+                                l(end+1) = line(nan,nan,this_product.style);
+                                legend_cell{end+1} = this_product.name;
+                            end
+                        end
+                    end
+                end
+                
+                if ~isempty(legend_cell)
+                    legend(parent, l', legend_cell, 'location', 'best'); 
+                end
             end
             
             function fmt = make_connector_fmt(group_fmt, is_change_sig)
@@ -2735,6 +2919,132 @@ classdef misc_emissions_analysis
             %     %
             % End %
             %     %
+        end
+        
+        function [figs, info] = plot_vcd_vs_concentration(varargin)
+            % This plots the surface or boundary layer concentration
+            % inferred from average WRF-Chem profiles vs. BEHR VCDs. We
+            % will assume that the WRF-Chem profiles are representative of
+            % the all days-of-week average VCDs (since the NEI emissions do
+            % not have a weekend effect, I'm not sure at the moment if they
+            % represent an average of all days or are a representative
+            % weekday inventory). So to get at the TWRF and US VCD ->
+            % concentrations, we'll interpolate the NO2 profiles by their
+            % corresponding VCDs.
+            
+            p = advInputParser;
+            p.addParameter('loc_indices', 1:71);
+            p.addParameter('interp_method', 'linear');
+            p.addParameter('conc_type', 'boundary layer');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_ind = pout.loc_indices;
+            interp_method = pout.interp_method;
+            conc_type = pout.conc_type;
+            
+            locs = misc_emissions_analysis.read_locs_file;
+            % Since we're reading the locations directly from the
+            % spreadsheet, rather than a .mat file, we can cut it down
+            % directly.
+            locs = locs(loc_ind);
+            
+            time_periods = {'beg_2yr','beginning','end_2yr','end'};
+            days_of_week = {'UMTWRFS', 'TWRF', 'US'};
+            
+            n_time = numel(time_periods);
+            n_dow = numel(days_of_week);
+            n_locs = numel(locs);
+            n_levels = [];
+            
+            vcds = cell(n_time, n_dow);
+            profs = cell(n_time, n_dow);
+            pres = cell(n_time, n_dow);
+            
+            for i_time = 1:n_time
+                [profs{i_time, 1}, pres{i_time, 1}] = misc_emissions_analysis.avg_wrf_prof_around_loc(locs, time_periods{i_time}, 'nox_or_no2', 'nox', 'radius', 0.35);
+                for i_dow = 1:n_dow
+                    vcds{i_time, i_dow} = misc_emissions_analysis.avg_vcds_around_loc(locs, time_periods{i_time}, days_of_week{i_dow}, 'radius', 0.35);
+                    if i_dow > 1
+                        profs{i_time, i_dow} = nan(size(profs{i_time, 1}));
+                        pres{i_time, i_dow} = nan(size(pres{i_time, 1}));
+                    end
+                end
+                
+                if isempty(n_levels)
+                    n_levels = size(profs{i_time, 1},1);
+                else
+                    if size(profs{i_time, 1}, 1) ~= n_levels
+                        error('Different numbers of levels')
+                    end
+                end
+            end
+            
+            % Now we handle the interpolation and at the same time
+            % calculate the concentration, either averaged over the
+            % boundary layer or right at the surface
+            base_dow_ind = 1;
+            concentrations = cell(size(vcds));
+            concentrations(:) = {nan(1, n_locs)};
+            figs = gobjects(n_locs,1);
+            
+            dow_markers = misc_emissions_analysis.dow_markers;
+            time_period_colors = misc_emissions_analysis.time_period_colors;
+            
+            for i_loc = 1:n_locs
+                figs(i_loc) = figure;
+                loc_vcds = cellfun(@(v) v(i_loc), vcds);
+                loc_base_sfs = nan(n_levels, n_time);
+                %loc_base_pres = nan(n_levels, n_time);
+                for i_time = 1:n_time
+                    loc_base_sfs(:, i_time) = profs{i_time, base_dow_ind}(:, i_loc);
+                    %loc_base_pres(:, i_time) = pres{i_time, base_dow_ind}(:, i_loc);
+                end
+                
+                % For the days-of-week that we haven't declared equivalent
+                % to WRF, we need to interpolate to get their shape factors
+                for i_time = 1:n_time
+                    for i_dow = 1:n_dow
+                        if i_dow == base_dow_ind
+                            this_prof = profs{i_time, i_dow}(:, i_loc);
+                            %this_pres = pres{i_time, i_dow}(:, i_loc);
+                        else
+                            this_prof = interp_profiles(loc_vcds(:, base_dow_ind), loc_base_sfs, loc_vcds(i_time, i_dow), interp_method);
+                            %this_pres = interp_profiles(loc_vcds(:, base_dow_ind), loc_base_pres, loc_vcds(i_time, i_dow), 'nearest');
+                        end
+                        
+                        nox_conc_prof = this_prof .* loc_vcds(i_time, i_dow);
+                        if strcmpi(conc_type, 'boundary layer')
+                            concentrations{i_time, i_dow}(i_loc) = avg_bl_conc(nox_conc_prof);
+                        elseif strcmpi(conc_type, 'surface')
+                            concentrations{i_time, i_dow}(i_loc) = nox_conc_prof(1);
+                        end
+                        
+                        marker = dow_markers.(days_of_week{i_dow}).marker;
+                        color = time_period_colors.(time_periods{i_time}).color;
+                        line(loc_vcds(i_time, i_dow), concentrations{i_time, i_dow}(i_loc), 'color', color, 'marker', marker, 'linestyle', 'none', 'linewidth', 2, 'markersize', 16);
+                    end
+                end
+                
+                info.concentrations = concentrations;
+                info.vcds = vcds;
+                info.locs = locs;
+                
+            end
+            
+            function interp_profs = interp_profiles(base_vcds, base_profs, target_vcds, method)
+                interp_profs = nan(size(base_profs,1), 1);
+                for i_lev = 1:numel(interp_profs)
+                    interp_profs(i_lev) = interp1(base_vcds, base_profs(i_lev, :), target_vcds, method, 'extrap');
+                end
+            end
+            
+            function conc = avg_bl_conc(nox_prof)
+                % Assume the first ~10 model levels are in the BL, based on
+                % Chicago
+                conc = nanmean(nox_prof(1:10));
+            end
         end
         
         function plot_wrf_emissions(varargin)
@@ -3063,7 +3373,7 @@ classdef misc_emissions_analysis
         
         function save_tables()
             time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
-            req_values = {'Correlation', 'R2', 'Tau', 'Tau percent uncertainty', 'E', 'E percent uncertainty'};
+            req_values = {'FitAccepted', 'Correlation', 'FracPtsBiasedWindow10', 'FracPtsBiasedWindow20', 'LifetimesDownwind', 'R2', 'Tau', 'TauPercentUncertainty', 'E', 'EPercentUncertainty'};
             
             common_opts = {'time_periods', time_periods, 'values', req_values};
             BEHRTables = misc_emissions_analysis.tabulate_parameter_correlation(common_opts{:}, 'days_of_week', {'UMTWRFS','TWRF','US'}, 'data', 'BEHR');
@@ -3083,21 +3393,26 @@ classdef misc_emissions_analysis
             p.parse(varargin{:});
             pout = p.Results;
             
-            avail_time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
-            time_periods = opt_ask_multiselect('Which time periods to include?', avail_time_periods, pout.time_periods, '"time_periods"');
-            days_of_week = opt_ask_multiselect('Which days-of-week to include?', {'UMTWRFS','TWRF','US'}, pout.days_of_week, '"days_of_week"');
-            data_source = opt_ask_multichoice('Which data set to use?', {'BEHR', 'WRF'}, pout.data, '"data"', 'list', true);
-            requested_values = opt_ask_multiselect('Which values to tabulate?', {'Correlation', 'R2', 'Tau', 'Tau percent uncertainty', 'E', 'E percent uncertainty'}, pout.values, '"values"');
-            requested_values = cellfun(@capitalize_words, requested_values, 'uniform', false);
-            requested_values = regexprep(requested_values, '\s', '');
-            
-            wrf_bool = strcmpi(data_source, 'WRF');
             quantity_fxns = struct('Correlation', @calc_correlation,...
+                'FitAccepted', @(this_loc) misc_emissions_analysis.is_fit_good_by_loc(this_loc),...
                 'R2', @(this_loc) this_loc.fit_info.param_stats.r2,...
+                'FracPtsBiasedWindow10', @(this_loc) mean(misc_emissions_analysis.test_fit_for_bias(this_loc.no2_sectors.linedens, this_loc.fit_info.emgfit, 'window', 10)),...
+                'FracPtsBiasedWindow20', @(this_loc) mean(misc_emissions_analysis.test_fit_for_bias(this_loc.no2_sectors.linedens, this_loc.fit_info.emgfit, 'window', 20)),...
+                'LifetimesDownwind', @(this_loc) misc_emissions_analysis.n_lifetimes_downwind(this_loc.no2_sectors.x, this_loc.fit_info.ffit.x_0, this_loc.fit_info.ffit.mu_x),...
                 'E', @(this_loc) this_loc.emis_tau.emis,...
                 'EPercentUncertainty', @(this_loc) this_loc.emis_tau.emis_uncert / this_loc.emis_tau.emis * 100,...
                 'Tau', @(this_loc) this_loc.emis_tau.tau,...
                 'TauPercentUncertainty', @(this_loc) this_loc.emis_tau.tau_uncert / this_loc.emis_tau.tau * 100);
+            
+            avail_time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
+            time_periods = opt_ask_multiselect('Which time periods to include?', avail_time_periods, pout.time_periods, '"time_periods"');
+            days_of_week = opt_ask_multiselect('Which days-of-week to include?', {'UMTWRFS','TWRF','US'}, pout.days_of_week, '"days_of_week"');
+            data_source = opt_ask_multichoice('Which data set to use?', {'BEHR', 'WRF'}, pout.data, '"data"', 'list', true);
+            requested_values = opt_ask_multiselect('Which values to tabulate?', fieldnames(quantity_fxns), pout.values, '"values"');
+            requested_values = cellfun(@capitalize_words, requested_values, 'uniform', false);
+            requested_values = regexprep(requested_values, '\s', '');
+            
+            wrf_bool = strcmpi(data_source, 'WRF');
             ss_locs = misc_emissions_analysis.read_locs_file('Cities','PowerPlants');
             ss_loc_names = {ss_locs.ShortName};
             n_locs = numel(ss_locs);
@@ -3146,6 +3461,7 @@ classdef misc_emissions_analysis
             for i_val = 1:numel(requested_values)
                 output_tables.(requested_values{i_val}) = array2table(output_tables.(requested_values{i_val}), 'RowNames', ss_loc_names, 'VariableNames', colnames);
             end
+            
             function corr_val = calc_correlation(this_loc)
                 % for now, just want correlation of a and x_0
                 var1_ind = 1;
@@ -3160,6 +3476,36 @@ classdef misc_emissions_analysis
                     else
                         rethrow(err)
                     end
+                end
+            end
+        end
+        
+        
+        function bias_found = test_fit_for_bias(line_dens, emgfit, varargin)
+            p = advInputParser;
+            p.addParameter('window', 10);
+            p.addParameter('confidence', 0.95);
+            
+            p.parse(varargin{:})
+            pout = p.Results;
+            
+            window = pout.window;
+            confidence = pout.confidence;
+            
+            % tinv assumes a one-sided distribution, the two sided one has
+            % half the alpha (1-p) value
+            alpha = 1 - confidence;
+            p = 1 - alpha/2;
+            t_value = tinv(p, window);
+            
+            bias_found = false(size(line_dens));
+            
+            for i_start = 1:(numel(line_dens) - window + 1)
+                i_end = i_start + window - 1;
+                mean_diff = abs(nanmean(emgfit(i_start:i_end)) - nanmean(line_dens(i_start:i_end)));
+                diff_crit = t_value * nanstd(line_dens(i_start:i_end)) / sqrt(window);
+                if mean_diff > diff_crit
+                    bias_found(i_start:i_end) = true;
                 end
             end
         end
@@ -3221,10 +3567,44 @@ classdef misc_emissions_analysis
             end
         end
         
-        function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week)
+        function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('radius', 'by_loc');
+            p.addParameter('species', 'no2');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_radius = pout.radius;
+            vcd_species = pout.species;
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            allowed_species = {'no2','hcho'};
+            if ~ismember(vcd_species, allowed_species)
+                E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
+            elseif strcmp(vcd_species, 'hcho')
+                % currently I only have all day-of-week HCHO VCD averages
+                % because I don't expect large weekday-weekend difference
+                % (but might be worth checking) so for now we'll just force
+                % the HCHO VCDs to be from all days of week
+                
+                if ~strcmpi(days_of_week, 'UMTWRFS')
+                    warning('HCHO columns will be from all days of week, even if a different subset was specified');
+                end
+                days_of_week = 'UMTWRFS';
+            end
+            
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week));
+            VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week, vcd_species));
             lon_res = mean(diff(VCDs.daily.lon(1,:)));
             lat_res = mean(diff(VCDs.daily.lat(:,1)));
             if abs(lon_res - lat_res) > 1e-10
@@ -3235,8 +3615,132 @@ classdef misc_emissions_analysis
                 % This will use the box width (from center to edge
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
-                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat);
-                avg_vcds(i_loc) = nanmean(VCDs.daily.no2(xx_radius));
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat, avg_radius);
+                avg_vcds(i_loc) = nanmean(VCDs.daily.(vcd_species)(xx_radius));
+            end
+        end
+        
+        function [shape_factors, pres_levels] = avg_wrf_prof_around_loc(locs, time_period, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('nox_or_no2', 'nox');
+            p.addParameter('radius', 'by_loc');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            nox_or_no2 = pout.nox_or_no2;
+            avg_radius = pout.radius;
+            
+            Profs = misc_emissions_analysis.load_time_averaged_wrf_profs(time_period);
+            
+            shape_factors = nan(size(Profs.pres,1), numel(locs));
+            pres_levels = nan(size(Profs.pres,1), numel(locs));
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            for i_loc = 1:numel(locs)
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), Profs.lon, Profs.lat, avg_radius);
+                this_no2 = nanmean(Profs.no2(:,xx_radius),2) * 1e-6;
+                this_no = nanmean(Profs.no(:,xx_radius),2) * 1e-6;
+                this_pres = nanmean(Profs.pres(:,xx_radius),2);
+                
+                
+                % Now we need to calculate the NO2 VCDs, then either the
+                % NOx or NO2 shape factors
+                no2_vcd = integPr2(this_no2, this_pres, this_pres(1), this_pres(end));
+                if strcmpi(nox_or_no2, 'nox')
+                    shape_factors(:, i_loc) = (this_no + this_no2) ./ no2_vcd;
+                elseif strcmpi(nox_or_no2, 'no2')
+                    shape_factors(:, i_loc) = this_no2 ./ no2_vcd;
+                else
+                    E.notimplemented('No method set for "nox_or_no2" == "%s"', nox_or_no2);
+                end
+                pres_levels(:, i_loc) = this_pres;
+            end
+        end
+        
+        function VCDs = avg_wrf_vcds_around_loc(locs, time_period, specie, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('radius', 'by_loc');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_radius = pout.radius;
+            
+            if ~ischar(specie)
+                E.badinput('SPECIE must be a char array')
+            end
+            
+            Profs = misc_emissions_analysis.load_time_averaged_wrf_profs(time_period);
+            xx_bad_species = ~ismember(specie, fieldnames(Profs));
+            if any(xx_bad_species)
+                E.badinput('The following species are not available in the time-averaged profile file: %s', strjoin(specie(xx_bad_species), ', '))
+            end
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            VCDs = nan(size(locs));
+            
+            for i_loc = 1:numel(locs)
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), Profs.lon, Profs.lat, avg_radius);
+                this_pres = Profs.pres(:,xx_radius);
+                this_profiles = Profs.(specie)(:,xx_radius);
+                these_vcds = nan(1, size(this_profiles, 2));
+                for i_prof = 1:numel(these_vcds)
+                    % The species concentrations in WRF are usually in
+                    % ppm and the time averaging doesn't change that.
+                    % integPr2 requires the straight mixing ratio
+                    % (parts-per-part)
+                    these_vcds(i_prof) = integPr2(this_profiles(:,i_prof)*1e-6, this_pres(:,i_prof), this_pres(1,i_prof), this_pres(end,i_prof));
+                end
+                VCDs(i_loc) = nanmean(these_vcds);
+            end
+        end
+        
+        
+        function Profs = load_time_averaged_wrf_profs(time_period)
+            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            prof_file = misc_emissions_analysis.wrf_avg_prof_file(start_dates, end_dates);
+            Profs = load(prof_file);
+            
+            dvec = make_datevec(start_dates, end_dates);
+            % My first run of average profiles added already weighted data
+            % to a weighted average when combining the different workers,
+            % so the weights were double counted. The weights in question
+            % were the number of days averaged on each worker (I used 2
+            % workers) so we need to divide by that to bring things back
+            % into line.
+            weight_correction = 1;%/(numel(dvec)/2);
+            %warning('2018-07-16: Correcting average profiles for double-counting weights. For average profiles recalculated after 16 Jul 2018, this correction must be turned off');
+            
+            
+            fns = fieldnames(Profs);
+            for i_fn = 1:numel(fns)
+                this_fn = fns{i_fn};
+                if ismatrix(Profs.(this_fn))
+                    % 2D arrays like lat and lon should not be rearranged
+                    continue
+                elseif ndims(Profs.(this_fn) == 3)
+                    % Permute 3D arrays so that the first dimension is
+                    % vertical, this will make it easier to subset them.
+                    Profs.(this_fn) = permute(Profs.(this_fn), [3 1 2]) * weight_correction;
+                else
+                    E.notimplemented('Did not expect an array with ndims > 3')
+                end
             end
         end
         
@@ -3385,6 +3889,8 @@ classdef misc_emissions_analysis
                 end
             elseif ~ischar(days_of_week) || any(~ismember(days_of_week, 'UMTWRFS'))
                 E.badinput('DAYS_OF_WEEK must be a character array consisting only of the characters U, M, T, W, R, F, or S');
+            else
+                dow = days_of_week;
             end
         end
         
