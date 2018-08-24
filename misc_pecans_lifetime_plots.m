@@ -42,7 +42,7 @@ classdef misc_pecans_lifetime_plots
         end
         
         function plot_each_pecans_fit()
-            taus = [1 2 3 6];
+            taus = 1:9;
             wind_speed_ms = 5;
             
             ld_fits_fig = figure;
@@ -294,9 +294,14 @@ classdef misc_pecans_lifetime_plots
         % Helper functions %
         %%%%%%%%%%%%%%%%%%%%
         
-        function data = read_pecans_for_tau(tau)
-            pecans_name = sprintf('pecans_output_tau%dh.nc', tau);
-            data = misc_pecans_lifetime_plots.read_pecans(fullfile(misc_pecans_lifetime_plots.pecans_dir, pecans_name));
+        function data = read_pecans_for_tau(tau, varargin)
+            p = advInputParser;
+            p.addOptional('emwidth', 3.0);
+            p.parse(varargin{:});
+            pout = p.Results;
+            emwidth = pout.emwidth;
+            pecans_name = sprintf('pecans_ens_tau-%.1fh_emwidth-%.1fkm.nc', tau, emwidth);
+            data = misc_pecans_lifetime_plots.read_pecans(fullfile(misc_pecans_lifetime_plots.pecans_dir, 'lifetime-ensemble', pecans_name));
             % convert x from meters to kilometers
             data.x = data.x/1000;
         end

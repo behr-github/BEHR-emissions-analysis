@@ -724,6 +724,83 @@ classdef misc_emissions_analysis
                     aB = a + B;
                 end
             end
+            
+        end
+        
+        function is_good = is_fit_good(x, linedens, fit_info, varargin)
+            p = advInputParser;
+            p.addParameter('any_num_pts', false);
+            p.addParameter('DEBUG_LEVEL', 0);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            allow_any_num_pts = pout.any_num_pts;
+            DEBUG_LEVEL = pout.DEBUG_LEVEL;
+            
+            is_good = false;
+            
+            % Criteria 0: are there enough non-NaN points to give a good
+            % fit? Testing with the box model shows that with only 31
+            % points, the fitting procedure has a hard time fitting more
+            % than a narrow range of lifetimes, but does better with 61.
+            if (sum(~isnan(linedens)) < 60 || sum(~isnan(linedens)) > 70) && ~allow_any_num_pts
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by too few line density points\n');
+                end
+                return
+            end
+            
+            % Criteria 1: is R2 high enough
+            if fit_info.param_stats.r2 < 0.8
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by R2\n');
+                end
+                return
+            end
+            
+            % Criteria 2: is there at least 1.5 lifetimes downwind of
+            % the plume center?
+            if misc_emissions_analysis.n_lifetimes_downwind(x, fit_info.ffit.x_0, fit_info.ffit.mu_x) < 1.5
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by number of lifetimes downwind\n');
+                end
+                return
+            end
+            
+            % Criteria 3: check for systematic bias in the fit
+            if any(misc_emissions_analysis.test_fit_for_bias(linedens, fit_info.emgfit, 'window', 20))
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by systematic bias test\n');
+                end
+                return
+            end
+            
+            % Criteria 4: reject if sigma > x_0, because that suggests that
+            % the width of the emission source might be obstructing the
+            % lifetime
+            if fit_info.ffit.sigma_x > fit_info.ffit.x_0
+                if DEBUG_LEVEL > 0
+                    fprintf('Fit rejected by width of emissions\n');
+                end
+                return
+            end
+            
+            is_good = true;
+        end
+        
+        function is_good = is_fit_good_by_loc(loc, varargin)
+            E = JLLErrors;
+            if ~isscalar(loc) || ~isstruct(loc)
+                E.badinput('LOC must be a scalar structure')
+            end
+            
+            varargin = update_params(varargin, 'DEBUG_LEVEL', 1);
+            
+            is_good = misc_emissions_analysis.is_fit_good(loc.no2_sectors.x, loc.no2_sectors.linedens, loc.fit_info, varargin{:});
+        end
+        
+        function n_taus = n_lifetimes_downwind(x, x_0, mu_x)
+            n_taus = (max(x) - mu_x)./x_0;
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -3296,7 +3373,7 @@ classdef misc_emissions_analysis
         
         function save_tables()
             time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
-            req_values = {'Correlation', 'R2', 'Tau', 'Tau percent uncertainty', 'E', 'E percent uncertainty'};
+            req_values = {'FitAccepted', 'Correlation', 'FracPtsBiasedWindow10', 'FracPtsBiasedWindow20', 'LifetimesDownwind', 'R2', 'Tau', 'TauPercentUncertainty', 'E', 'EPercentUncertainty'};
             
             common_opts = {'time_periods', time_periods, 'values', req_values};
             BEHRTables = misc_emissions_analysis.tabulate_parameter_correlation(common_opts{:}, 'days_of_week', {'UMTWRFS','TWRF','US'}, 'data', 'BEHR');
@@ -3316,21 +3393,26 @@ classdef misc_emissions_analysis
             p.parse(varargin{:});
             pout = p.Results;
             
-            avail_time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
-            time_periods = opt_ask_multiselect('Which time periods to include?', avail_time_periods, pout.time_periods, '"time_periods"');
-            days_of_week = opt_ask_multiselect('Which days-of-week to include?', {'UMTWRFS','TWRF','US'}, pout.days_of_week, '"days_of_week"');
-            data_source = opt_ask_multichoice('Which data set to use?', {'BEHR', 'WRF'}, pout.data, '"data"', 'list', true);
-            requested_values = opt_ask_multiselect('Which values to tabulate?', {'Correlation', 'R2', 'Tau', 'Tau percent uncertainty', 'E', 'E percent uncertainty'}, pout.values, '"values"');
-            requested_values = cellfun(@capitalize_words, requested_values, 'uniform', false);
-            requested_values = regexprep(requested_values, '\s', '');
-            
-            wrf_bool = strcmpi(data_source, 'WRF');
             quantity_fxns = struct('Correlation', @calc_correlation,...
+                'FitAccepted', @(this_loc) misc_emissions_analysis.is_fit_good_by_loc(this_loc),...
                 'R2', @(this_loc) this_loc.fit_info.param_stats.r2,...
+                'FracPtsBiasedWindow10', @(this_loc) mean(misc_emissions_analysis.test_fit_for_bias(this_loc.no2_sectors.linedens, this_loc.fit_info.emgfit, 'window', 10)),...
+                'FracPtsBiasedWindow20', @(this_loc) mean(misc_emissions_analysis.test_fit_for_bias(this_loc.no2_sectors.linedens, this_loc.fit_info.emgfit, 'window', 20)),...
+                'LifetimesDownwind', @(this_loc) misc_emissions_analysis.n_lifetimes_downwind(this_loc.no2_sectors.x, this_loc.fit_info.ffit.x_0, this_loc.fit_info.ffit.mu_x),...
                 'E', @(this_loc) this_loc.emis_tau.emis,...
                 'EPercentUncertainty', @(this_loc) this_loc.emis_tau.emis_uncert / this_loc.emis_tau.emis * 100,...
                 'Tau', @(this_loc) this_loc.emis_tau.tau,...
                 'TauPercentUncertainty', @(this_loc) this_loc.emis_tau.tau_uncert / this_loc.emis_tau.tau * 100);
+            
+            avail_time_periods = {'beg_2yr', 'beginning', 'end_2yr', 'end'};
+            time_periods = opt_ask_multiselect('Which time periods to include?', avail_time_periods, pout.time_periods, '"time_periods"');
+            days_of_week = opt_ask_multiselect('Which days-of-week to include?', {'UMTWRFS','TWRF','US'}, pout.days_of_week, '"days_of_week"');
+            data_source = opt_ask_multichoice('Which data set to use?', {'BEHR', 'WRF'}, pout.data, '"data"', 'list', true);
+            requested_values = opt_ask_multiselect('Which values to tabulate?', fieldnames(quantity_fxns), pout.values, '"values"');
+            requested_values = cellfun(@capitalize_words, requested_values, 'uniform', false);
+            requested_values = regexprep(requested_values, '\s', '');
+            
+            wrf_bool = strcmpi(data_source, 'WRF');
             ss_locs = misc_emissions_analysis.read_locs_file('Cities','PowerPlants');
             ss_loc_names = {ss_locs.ShortName};
             n_locs = numel(ss_locs);
@@ -3379,6 +3461,7 @@ classdef misc_emissions_analysis
             for i_val = 1:numel(requested_values)
                 output_tables.(requested_values{i_val}) = array2table(output_tables.(requested_values{i_val}), 'RowNames', ss_loc_names, 'VariableNames', colnames);
             end
+            
             function corr_val = calc_correlation(this_loc)
                 % for now, just want correlation of a and x_0
                 var1_ind = 1;
@@ -3393,6 +3476,36 @@ classdef misc_emissions_analysis
                     else
                         rethrow(err)
                     end
+                end
+            end
+        end
+        
+        
+        function bias_found = test_fit_for_bias(line_dens, emgfit, varargin)
+            p = advInputParser;
+            p.addParameter('window', 10);
+            p.addParameter('confidence', 0.95);
+            
+            p.parse(varargin{:})
+            pout = p.Results;
+            
+            window = pout.window;
+            confidence = pout.confidence;
+            
+            % tinv assumes a one-sided distribution, the two sided one has
+            % half the alpha (1-p) value
+            alpha = 1 - confidence;
+            p = 1 - alpha/2;
+            t_value = tinv(p, window);
+            
+            bias_found = false(size(line_dens));
+            
+            for i_start = 1:(numel(line_dens) - window + 1)
+                i_end = i_start + window - 1;
+                mean_diff = abs(nanmean(emgfit(i_start:i_end)) - nanmean(line_dens(i_start:i_end)));
+                diff_crit = t_value * nanstd(line_dens(i_start:i_end)) / sqrt(window);
+                if mean_diff > diff_crit
+                    bias_found(i_start:i_end) = true;
                 end
             end
         end
