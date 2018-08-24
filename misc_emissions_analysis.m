@@ -698,10 +698,18 @@ classdef misc_emissions_analysis
             
             if include_vcds
                 changes.vcds = default_mat;
-                changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
-                changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
-                changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'species', 'hcho');
-                changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'species', 'hcho');
+                changes.hcho_vcds = default_mat;
+                if ~use_wrf
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
+                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'species', 'hcho');
+                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'species', 'hcho');
+                else
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'no2');
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'no2');
+                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'hcho');
+                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'hcho');
+                end
             end
             
             changes.Location = {first_locs.locs.Location}';
@@ -1661,7 +1669,7 @@ classdef misc_emissions_analysis
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
         end
         
-        function make_average_nox_profiles(varargin)
+        function make_average_wrf_profiles(varargin)
             
             p = advInputParser;
             p.addParameter('time_period','');
@@ -1697,7 +1705,7 @@ classdef misc_emissions_analysis
             % version for use outside the spmd block.
             distributed_dvec = distributed(dvec);
             profile_running_avgs = Composite(num_workers);
-            vars_to_load = {'no','no2','pres'};
+            vars_to_load = {'no','no2','hcho','pres'};
             n_vars = numel(vars_to_load);
             spmd(num_workers)
                 local_dvec = getLocalPart(distributed_dvec);
@@ -2547,7 +2555,7 @@ classdef misc_emissions_analysis
             
             single_plot_bool = opt_ask_yn('Plot all locations on a single plot?', pout.single_plot, '"single_plot"');
             if single_plot_bool
-                single_plot_mode = opt_ask_multichoice('What should color represent in the plot?', {'Year','HCHO VCD'}, pout.single_plot_mode, '"single_plot_mode"');
+                single_plot_mode = opt_ask_multichoice('What should color represent in the plot?', {'Year','HCHO VCD'}, pout.single_plot_mode, '"single_plot_mode"', 'list', true);
             else
                 single_plot_mode = '';
             end
@@ -2592,6 +2600,8 @@ classdef misc_emissions_analysis
             marker_linewidth = 1.5;
             connector_linewidth = 2;
             dow_markers = misc_emissions_analysis.dow_markers;
+            product_series = struct('behr', struct('used', false, 'name', 'BEHR', 'style', struct('marker', 'o', 'color', 'k', 'markerfacecolor', 'k', 'linestyle', 'none', 'linewidth', 2)),...
+                'wrf', struct('used', false, 'name', 'WRF', 'style', struct('marker', 'o', 'color', 'k', 'linestyle','none','linewidth',2)));
             
             time_period_colors = misc_emissions_analysis.time_period_colors;
             % Now actually load the data
@@ -2666,20 +2676,30 @@ classdef misc_emissions_analysis
                         line(all_changes(i_change).(mass_value)(:,1), all_changes(i_change).tau(:,1), all_changes(i_change).style(1));
                         line(all_changes(i_change).(mass_value)(:,2), all_changes(i_change).tau(:,2), all_changes(i_change).style(2));
                     end
+                    legend_flags = {};
                 elseif strcmpi(single_plot_mode, 'HCHO VCD')
-                    no2_vcds = [all_changes.(mass_value)];
-                    hcho_vcds = [all_changes.hcho_vcds];
-                    tau = [all_changes.tau];
-                    scatter(no2_vcds(:), tau(:), 60, hcho_vcds(:), 'filled');
+                    is_wrf = [all_changes.is_wrf];
+                    behr_no2_vcds = [all_changes(~is_wrf).(mass_value)];
+                    behr_hcho_vcds = [all_changes(~is_wrf).hcho_vcds];
+                    behr_tau = [all_changes(~is_wrf).tau];
+                    scatter(behr_no2_vcds(:), behr_tau(:), 60, behr_hcho_vcds(:), 'filled');
+                    
+                    hold on
+                    wrf_no2_vcds = [all_changes(is_wrf).(mass_value)];
+                    wrf_hcho_vcds = [all_changes(is_wrf).hcho_vcds];
+                    wrf_tau = [all_changes(is_wrf).tau];
+                    scatter(wrf_no2_vcds(:), wrf_tau(:), 60, wrf_hcho_vcds(:));
+                    
                     cb = colorbar;
                     cb.Label.String = 'HCHO VCD (molec. cm^{-2})';
-                    where_to_put_legend = 'none';
+                    colormap jet
+                    legend_flags = {'no_dow', 'no_time_period'};
                 end
                 
                 
                 
                 if strcmpi(where_to_put_legend, 'all')
-                    make_legend(gca);
+                    make_legend(gca, legend_flags{:});
                 end
                 set(gca,'xscale','log','fontsize',14);
                 xlabel(x_label_str);
@@ -2715,10 +2735,17 @@ classdef misc_emissions_analysis
                 changes.style = struct('marker', {dow_markers.(days_of_week_1).marker, dow_markers.(days_of_week_2).marker},...
                     'linestyle', 'none', 'color', {time_period_colors.(time_period_1).color, time_period_colors.(time_period_2).color},...
                     'markersize',marker_size,'linewidth',marker_linewidth,'markerfacecolor',marker_fills);
+                changes.is_wrf = load_wrf;
                 dow_markers.(days_of_week_1).used = true;
                 dow_markers.(days_of_week_2).used = true;
+                if load_wrf
+                    product_series.wrf.used = true;
+                else
+                    product_series.behr.used = true;
+                end
                 time_period_colors.(time_period_1).used = true;
                 time_period_colors.(time_period_2).used = true;
+                
                 
                 if isempty(all_changes)
                     all_changes = changes;
@@ -2727,28 +2754,67 @@ classdef misc_emissions_analysis
                 end
             end
             
-            function make_legend(parent)
+            function make_legend(parent, varargin)
+                subp = advInputParser;
+                subp.addFlag('no_dow');
+                subp.addFlag('no_time_period');
+                subp.addFlag('no_product');
+                
+                subp.parse(varargin{:});
+                sub_pout = subp.Results;
+                
+                no_days_of_week = sub_pout.no_dow;
+                no_time_period = sub_pout.no_time_period;
+                no_product = sub_pout.no_product;
+                
                 % first the time periods
-                fns = fieldnames(time_period_colors);
                 l = gobjects(0,1);
                 legend_cell = {};
-                for i_fn = 1:numel(fns)
-                    this_tp = time_period_colors.(fns{i_fn});
-                    if this_tp.used
-                        l(end+1) = line(nan, nan, 'linewidth', connector_linewidth, 'color', this_tp.color, 'parent', parent);
-                        legend_cell{end+1} = this_tp.name;
+                if ~no_time_period
+                    fns = fieldnames(time_period_colors);
+                    for i_fn = 1:numel(fns)
+                        this_tp = time_period_colors.(fns{i_fn});
+                        if this_tp.used
+                            l(end+1) = line(nan, nan, 'linewidth', connector_linewidth, 'color', this_tp.color, 'parent', parent);
+                            legend_cell{end+1} = this_tp.name;
+                        end
                     end
                 end
                 
-                fns = fieldnames(dow_markers);
-                for i_fn = 1:numel(fns)
-                    this_dow = dow_markers.(fns{i_fn});
-                    if this_dow.used
-                        l(end+1) = line(nan,nan,'marker', this_dow.marker, 'linestyle', 'none', 'color', 'k', 'linewidth', marker_linewidth, 'markersize', marker_size, 'parent', parent);
-                        legend_cell{end+1} = this_dow.name;
+                if ~no_days_of_week
+                    fns = fieldnames(dow_markers);
+                    for i_fn = 1:numel(fns)
+                        this_dow = dow_markers.(fns{i_fn});
+                        if this_dow.used
+                            l(end+1) = line(nan,nan,'marker', this_dow.marker, 'linestyle', 'none', 'color', 'k', 'linewidth', marker_linewidth, 'markersize', marker_size, 'parent', parent);
+                            legend_cell{end+1} = this_dow.name;
+                        end
                     end
                 end
-                legend(parent, l', legend_cell, 'location', 'best'); 
+                
+                if ~no_product
+                    fns = fieldnames(product_series);
+                    which_products_used = nan(1, numel(fns));
+                    for i_fn = 1:numel(fns)
+                        which_products_used(i_fn) = product_series.(fns{i_fn}).used;
+                    end
+                    % We only want to indicate the different products in the
+                    % legend if more than one was used, otherwise it is
+                    % extraneous information
+                    if sum(which_products_used) > 1
+                        for i_fn = 1:numel(fns)
+                            this_product = product_series.(fns{i_fn});
+                            if this_product.used
+                                l(end+1) = line(nan,nan,this_product.style);
+                                legend_cell{end+1} = this_product.name;
+                            end
+                        end
+                    end
+                end
+                
+                if ~isempty(legend_cell)
+                    legend(parent, l', legend_cell, 'location', 'best'); 
+                end
             end
             
             function fmt = make_connector_fmt(group_fmt, is_change_sig)
@@ -3453,34 +3519,7 @@ classdef misc_emissions_analysis
             nox_or_no2 = pout.nox_or_no2;
             avg_radius = pout.radius;
             
-            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
-            prof_file = misc_emissions_analysis.wrf_avg_prof_file(start_dates, end_dates);
-            Profs = load(prof_file);
-            
-            dvec = make_datevec(start_dates, end_dates);
-            % My first run of average profiles added already weighted data
-            % to a weighted average when combining the different workers,
-            % so the weights were double counted. The weights in question
-            % were the number of days averaged on each worker (I used 2
-            % workers) so we need to divide by that to bring things back
-            % into line.
-            weight_correction = 1/(numel(dvec)/2);
-            warning('2018-07-16: Correcting average profiles for double-counting weights. For average profiles recalculated after 16 Jul 2018, this correction must be turned off');
-            
-            
-            fns = fieldnames(Profs);
-            for i_fn = 1:numel(fns)
-                this_fn = fns{i_fn};
-                if ismatrix(Profs.(this_fn))
-                    continue
-                elseif ndims(Profs.(this_fn) == 3)
-                    % Permute 3D arrays so that the first dimension is
-                    % vertical, this will make it easier to subset them.
-                    Profs.(this_fn) = permute(Profs.(this_fn), [3 1 2]) * weight_correction;
-                else
-                    E.notimplemented('Did not expect an array with ndims > 3')
-                end
-            end
+            Profs = misc_emissions_analysis.load_time_averaged_wrf_profs(time_period);
             
             shape_factors = nan(size(Profs.pres,1), numel(locs));
             pres_levels = nan(size(Profs.pres,1), numel(locs));
@@ -3511,6 +3550,84 @@ classdef misc_emissions_analysis
                     E.notimplemented('No method set for "nox_or_no2" == "%s"', nox_or_no2);
                 end
                 pres_levels(:, i_loc) = this_pres;
+            end
+        end
+        
+        function VCDs = avg_wrf_vcds_around_loc(locs, time_period, specie, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('radius', 'by_loc');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_radius = pout.radius;
+            
+            if ~ischar(specie)
+                E.badinput('SPECIE must be a char array')
+            end
+            
+            Profs = misc_emissions_analysis.load_time_averaged_wrf_profs(time_period);
+            xx_bad_species = ~ismember(specie, fieldnames(Profs));
+            if any(xx_bad_species)
+                E.badinput('The following species are not available in the time-averaged profile file: %s', strjoin(specie(xx_bad_species), ', '))
+            end
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            VCDs = nan(size(locs));
+            
+            for i_loc = 1:numel(locs)
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), Profs.lon, Profs.lat, avg_radius);
+                this_pres = Profs.pres(:,xx_radius);
+                this_profiles = Profs.(specie)(:,xx_radius);
+                these_vcds = nan(1, size(this_profiles, 2));
+                for i_prof = 1:numel(these_vcds)
+                    % The species concentrations in WRF are usually in
+                    % ppm and the time averaging doesn't change that.
+                    % integPr2 requires the straight mixing ratio
+                    % (parts-per-part)
+                    these_vcds(i_prof) = integPr2(this_profiles(:,i_prof)*1e-6, this_pres(:,i_prof), this_pres(1,i_prof), this_pres(end,i_prof));
+                end
+                VCDs(i_loc) = nanmean(these_vcds);
+            end
+        end
+        
+        
+        function Profs = load_time_averaged_wrf_profs(time_period)
+            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            prof_file = misc_emissions_analysis.wrf_avg_prof_file(start_dates, end_dates);
+            Profs = load(prof_file);
+            
+            dvec = make_datevec(start_dates, end_dates);
+            % My first run of average profiles added already weighted data
+            % to a weighted average when combining the different workers,
+            % so the weights were double counted. The weights in question
+            % were the number of days averaged on each worker (I used 2
+            % workers) so we need to divide by that to bring things back
+            % into line.
+            weight_correction = 1;%/(numel(dvec)/2);
+            %warning('2018-07-16: Correcting average profiles for double-counting weights. For average profiles recalculated after 16 Jul 2018, this correction must be turned off');
+            
+            
+            fns = fieldnames(Profs);
+            for i_fn = 1:numel(fns)
+                this_fn = fns{i_fn};
+                if ismatrix(Profs.(this_fn))
+                    % 2D arrays like lat and lon should not be rearranged
+                    continue
+                elseif ndims(Profs.(this_fn) == 3)
+                    % Permute 3D arrays so that the first dimension is
+                    % vertical, this will make it easier to subset them.
+                    Profs.(this_fn) = permute(Profs.(this_fn), [3 1 2]) * weight_correction;
+                else
+                    E.notimplemented('Did not expect an array with ndims > 3')
+                end
             end
         end
         
@@ -3659,6 +3776,8 @@ classdef misc_emissions_analysis
                 end
             elseif ~ischar(days_of_week) || any(~ismember(days_of_week, 'UMTWRFS'))
                 E.badinput('DAYS_OF_WEEK must be a character array consisting only of the characters U, M, T, W, R, F, or S');
+            else
+                dow = days_of_week;
             end
         end
         
