@@ -1450,7 +1450,7 @@ classdef misc_emissions_analysis
                 wind_dir_edges = cell(size(winds.locs));
             end
             
-            for a=1:numel(winds.locs)
+            parfor a=1:numel(winds.locs)
                 opt_args = {};
                 
                 box_size = winds_locs_distributed(a).BoxSize;
