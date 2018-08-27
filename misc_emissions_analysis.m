@@ -279,8 +279,8 @@ classdef misc_emissions_analysis
                 end_dates = {eomdate(2012, end_month), eomdate(2013, end_month), eomdate(2014, end_month)};
                 legend_id = '2013*';
             elseif strcmpi(time_period, 'beg_2yr')
-                start_dates = {datenum(2005, start_month, 1), datenum(2007, start_month, 1)};
-                end_dates = {eomdate(2005, end_month), eomdate(2007, end_month)};
+                start_dates = {datenum(2005, start_month, 1), datenum(2006, start_month, 1), datenum(2007, start_month, 1)};
+                end_dates = {eomdate(2005, end_month), eomdate(2006, end_month), eomdate(2007, end_month)};
                 legend_id = '2006*';
             elseif strcmpi(time_period, 'end_2yr')
                 start_dates = {datenum(2012, start_month, 1), datenum(2013, start_month, 1)};
@@ -1453,7 +1453,7 @@ classdef misc_emissions_analysis
                 wind_dir_edges = cell(size(winds.locs));
             end
             
-            for a=1:numel(winds.locs)
+            parfor a=1:numel(winds.locs)
                 opt_args = {};
                 
                 box_size = winds_locs_distributed(a).BoxSize;
