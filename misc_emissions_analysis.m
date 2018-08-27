@@ -670,7 +670,7 @@ classdef misc_emissions_analysis
             % n-by-2 arrays. Also get some metrics of the goodness of fit
             % and total mass
             
-            additional_fns = {'r2','a','a_plus_B'};
+            additional_fns = {'r2','a','a_plus_B','is_fit_good'};
             emis_tau_fns = fieldnames(first_locs.locs(1).emis_tau);
             all_fns = veccat(emis_tau_fns, additional_fns, 'column');
             default_mat = nan(numel(first_locs.locs), 2);
@@ -680,6 +680,9 @@ classdef misc_emissions_analysis
                     if strcmpi(all_fns{i_fn}, 'a_plus_B')
                         first_value = a_plus_b(first_locs.locs(i_loc));
                         second_value = a_plus_b(second_locs.locs(i_loc));
+                    elseif strcmpi(all_fns{i_fn}, 'is_fit_good')
+                        first_value = misc_emissions_analysis.is_fit_good_by_loc(first_locs.locs(i_loc));
+                        second_value = misc_emissions_analysis.is_fit_good_by_loc(second_locs.locs(i_loc));
                     else
                         first_value = find_substruct_field(first_locs.locs(i_loc), all_fns{i_fn});
                         second_value = find_substruct_field(second_locs.locs(i_loc), all_fns{i_fn});
@@ -1406,7 +1409,7 @@ classdef misc_emissions_analysis
             % that it matches up with the BEHR filenames.
             check_dvec = misc_emissions_analysis.make_datevec(start_date, end_date);
             if ~isequal(check_dvec, winds.dvec)
-                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s, %d dates)', winds_file, datestr(start_date(1)), datestr(end_date(end)), numel(check_dvec));
+                E.callError('date_mismatch', 'Dates in winds file do not match required (%s to %s, %d dates)', datestr(start_date(1)), datestr(end_date(end)), numel(check_dvec));
             end
             
             behr_dvec = date_from_behr_filenames(behr_files);
@@ -2603,6 +2606,7 @@ classdef misc_emissions_analysis
             p.addParameter('include_2years', nan);
             p.addParameter('days_of_week', '');
             p.addParameter('connect_wkend', nan);
+            p.addParameter('bad_fit_display','');
             p.addParameter('legend', '');
             p.addParameter('title', true); % if plotting interactively, we want the title. But provide the option to turn in off if not plotting interactively
             
@@ -2662,6 +2666,8 @@ classdef misc_emissions_analysis
                 allowed_legend_figs = {'all', 'none'};
             end
             where_to_put_legend = opt_ask_multichoice('Where to include a legend?', allowed_legend_figs, pout.legend, '"legend"', 'list', true);
+            
+            bad_fit_display = opt_ask_multichoice('Plot bad fits?', {'no','grey'}, pout.bad_fit_display, '"bad_fit_display"', 'list', true');
             
             fit_type = misc_emissions_analysis.get_fit_type_interactive(pout.fit_type);
             
@@ -2728,8 +2734,10 @@ classdef misc_emissions_analysis
                     figs(i_loc) = figure;
                     ax = gca;
                     for i_change = 1:numel(all_changes)
+                        this_group_style = make_group_fmt(all_changes(i_change).style, all_changes(i_change).is_fit_good(i_loc, :));
+                        this_connector_style = conn_fmt_fxn(all_changes(i_change).style, all_changes(i_change).is_significant(i_loc), all_changes(i_change).is_fit_good(i_loc,:));
                         plot_changes(all_changes(i_change).(mass_value)(i_loc,:), all_changes(i_change).tau(i_loc,:),...
-                            'group_fmts', all_changes(i_change).style, 'connector_fmt', conn_fmt_fxn(all_changes(i_change).style, all_changes(i_change).is_significant(i_loc)), 'parent', ax);
+                            'group_fmts', this_group_style, 'connector_fmt', this_connector_style, 'parent', ax);
                     end
                     
                     
@@ -2894,7 +2902,7 @@ classdef misc_emissions_analysis
                 end
             end
             
-            function fmt = make_connector_fmt(group_fmt, is_change_sig)
+            function fmt = make_connector_fmt(group_fmt, is_change_sig, are_fits_good)
                 these_time_period_colors = {group_fmt.color};
                 
                 if is_change_sig
@@ -2914,7 +2922,35 @@ classdef misc_emissions_analysis
                     linestyle = 'none';
                 end
                 
+                % If one or both fits are bad, we should hide this line if
+                % the plotting is set to not display bad fits, otherwise
+                % leave it, since the point will be plotted in gray.
+                if any(~are_fits_good)
+                    if strcmpi(bad_fit_display, 'no')
+                        linestyle = 'none';
+                    else
+                        linestyle = ':';
+                    end
+                end
+                
                 fmt = struct('color', connector_color, 'linestyle', linestyle, 'linewidth', connector_linewidth);
+            end
+            
+            function group_fmt = make_group_fmt(group_fmt, are_fits_good)
+                if strcmpi(bad_fit_display, 'no')
+                    fmt_field = 'marker';
+                    fmt_val = 'none';
+                elseif any(strcmpi(bad_fit_display, {'grey','gray'}))
+                    fmt_field = 'color';
+                    fmt_val = [0.8 0.8 0.8];
+                end
+                
+                if ~are_fits_good(1)
+                    group_fmt(1).(fmt_field) = fmt_val;
+                end
+                if ~are_fits_good(2)
+                    group_fmt(2).(fmt_field) = fmt_val;
+                end
             end
             %     %
             % End %
