@@ -26,9 +26,9 @@ classdef misc_emissions_analysis
             'TWRF', struct('marker', '^', 'name', 'Weekdays', 'used', false),...
             'US', struct('marker', 'h', 'name', 'Weekends', 'used', false));
             
-        time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2005/07', 'used', false),...
+        time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2006*', 'used', false),...
             'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
-            'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012/13', 'used', false),...
+            'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012-13', 'used', false),...
             'end', struct('color', 'r', 'name', '2013*', 'used', false));
     end
     
@@ -642,6 +642,7 @@ classdef misc_emissions_analysis
             p = inputParser;
             p.addParameter('loc_inds', []);
             p.addParameter('include_vcds', true);
+            p.addParameter('avg_radius', 'by_loc');
             p.addParameter('use_wrf', false);
             p.addParameter('file_loc_inds', 1:71); % location indicies in the file name
             p.addParameter('fit_type','');
@@ -650,6 +651,7 @@ classdef misc_emissions_analysis
             
             user_loc_inds = pout.loc_inds;
             include_vcds = pout.include_vcds;
+            avg_radius = pout.avg_radius;
             use_wrf = pout.use_wrf;
             file_loc_inds = pout.file_loc_inds;
             fit_type = misc_emissions_analysis.get_fit_type_interactive(pout.fit_type);
@@ -707,16 +709,25 @@ classdef misc_emissions_analysis
                 changes.vcds = default_mat;
                 changes.hcho_vcds = default_mat;
                 if ~use_wrf
-                    changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays);
-                    changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays);
-                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'species', 'hcho');
-                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'species', 'hcho');
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius);
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius);
+                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius, 'species', 'hcho');
+                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius, 'species', 'hcho');
                 else
-                    changes.vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'no2');
-                    changes.vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'no2');
-                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'hcho');
-                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'hcho');
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'no2', 'radius', avg_radius);
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'no2', 'radius', avg_radius);
+                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'hcho', 'radius', avg_radius);
+                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'hcho', 'radius', avg_radius);
                 end
+            end
+            
+            if ~ischar(avg_radius) || ~strcmpi(avg_radius, 'by_loc')
+                % If we're not averaging the VCDs within the location
+                % radius, we should redo the NEI emissions as well.
+                
+                % Add back in when can access file server again
+                %changes.nei_emis(:,1) = reaverage_nei(first_locs);
+                %changes.nei_emis(:,2) = reaverage_nei(second_locs);
             end
             
             changes.Location = {first_locs.locs.Location}';
@@ -732,6 +743,18 @@ classdef misc_emissions_analysis
                 end
             end
             
+            function loc_emis = reaverage_nei(locs)
+                first_nei_years = unique(year(locs.dvec));
+                [nei_avg_no, nei_lon, nei_lat] = misc_emissions_analysis.load_nei_by_year(first_nei_years);
+                loc_emis = nan(numel(locs),1);
+                
+                for i_eloc = 1:numel(locs)
+                    % Now get the WRF grid cells within that radius of the
+                    % site and add up their NEI NO emissions.
+                    xx = sqrt((nei_lon - locs(i_eloc).Longitude).^2 + (nei_lat - locs(i_eloc).Latitude).^2) < avg_radius;
+                    loc_emis(i_eloc) = nansum(nei_avg_no(xx));
+                end
+            end
         end
         
         function is_good = is_fit_good(x, linedens, fit_info, varargin)
@@ -929,11 +952,11 @@ classdef misc_emissions_analysis
             
             % If we select a 2-year time period, those files only have 70
             % sites
-            if regcmp(first_time_period, '2yr')
-                file_inds = 1:70;
-            else
+            %if strcmp(first_time_period, '2yr')
+            %    file_inds = 1:70;
+            %else
                 file_inds = 1:71;
-            end
+            %end
             if regcmp(second_time_period, '2yr') ~= regcmp(first_time_period, '2yr')
                 E.notimplemented('Mix of 2 and 3 year files')
             end
@@ -2704,7 +2727,7 @@ classdef misc_emissions_analysis
                 end
                 if include_wkday_wkend
                     if include_2years
-                        load_change_group('beg_2yr', 'beg_2yr', 'TWRF', 'US', 1:70);
+                        load_change_group('beg_2yr', 'beg_2yr', 'TWRF', 'US');
                         load_change_group('end_2yr', 'end_2yr', 'TWRF', 'US', 1:70);
                     end
                     load_change_group('beginning', 'beginning', 'TWRF', 'US');
@@ -2959,6 +2982,52 @@ classdef misc_emissions_analysis
             %     %
             % End %
             %     %
+        end
+        
+        function figs = plot_emis_tau_effect(varargin)
+            
+            p = advInputParser;
+            p.addParameter('use_jiang', nan)
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            use_jiang = opt_ask_yn('Use Jiang values for emissions and VCDs?', pout.use_jiang, '"use_jiang"');
+            
+            chicago_ind = misc_emissions_analysis.loc_names_to_inds('Chicago');
+            dallas_ind = misc_emissions_analysis.loc_names_to_inds('Dallas');
+            file_inds = [9 13];
+            
+            avg_radius_deg = 'by_loc';
+            [changes(1), loc_names{1}] = misc_emissions_analysis.collect_changes('beg_2yr','beginning','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
+            [changes(2), loc_names{2}] = misc_emissions_analysis.collect_changes('beginning', 'end','TWRF','TWRF','loc_inds',dallas_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
+            jiang_del_emis = [-15, -25];
+            jiang_del_vcd = [-25, 5];
+            
+            figs = gobjects(size(changes));
+            head_width = 0.125;
+            head_length = 2.5;
+            line_width = 3;
+            for i=1:numel(changes)
+                del_tau = reldiff(changes(i).tau(1,2), changes(i).tau(1,1))*100;
+                if use_jiang
+                    del_emis = jiang_del_emis(i);
+                    del_vcds = jiang_del_vcd(i);
+                else
+                    del_emis = reldiff(changes(i).nei_emis(1,2), changes(i).nei_emis(1,1))*100;
+                    del_vcds = reldiff(changes(i).vcds(1,2), changes(i).vcds(1,1))*100;
+                end
+                
+                figs(i) = figure;
+                draw_arrow_pretty([1 1], [0 del_emis], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'b');
+                draw_arrow_pretty([2 2], [0 del_tau], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'r');
+                draw_arrow_pretty([3 3], [0 ((1+del_emis/100)*(1+del_tau/100) - 1)*100], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', [0 0.5 0]);
+                draw_arrow_pretty([4 4], [0 del_vcds], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'k');
+                line([0 5],[0 0],'color',[0.5 0.5 0.5],'linestyle','--','linewidth',line_width);
+                xlim([0 5]);
+                set(gca,'fontsize',16,'xtick',1:4,'xticklabel',{'Emissions','Lifetime','E \cdot \tau','VCDs'},'XTickLabelRotation',30);
+                ylabel('%\Delta');
+                title(loc_names{i}{1});
+            end
         end
         
         function [figs, info] = plot_vcd_vs_concentration(varargin)
@@ -4046,6 +4115,20 @@ classdef misc_emissions_analysis
                 loc_inds(i_loc) = ismember(locs(i_loc).SiteType, varargin);
             end
             loc_inds = find(loc_inds);
+        end
+        
+        function loc_inds = loc_names_to_inds(varargin)
+            loc_inds = nan(size(varargin));
+            locs = misc_emissions_analysis.read_locs_file();
+            short_names = {locs.ShortName};
+            names = {locs.Location};
+            for i_loc = 1:numel(varargin)
+                this_ind = find(strcmpi(short_names, varargin{i_loc}) | strcmpi(names, varargin{i_loc}));
+                if numel(this_ind) ~= 1
+                    E.callError('loc_not_found', 'Could not find location index corresponding to "%s"', varargin{i_loc});
+                end
+                loc_inds(i_loc) = this_ind;
+            end
         end
         
         function locs = append_new_spreadsheet_fields(locs)
