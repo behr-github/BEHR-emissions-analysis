@@ -279,8 +279,12 @@ classdef misc_emissions_analysis
             end_month = 9;
             
             if isnumeric(time_period)
-                start_dates = {datenum(time_period, start_month, 1)};
-                end_dates = {eomdate(time_period, end_month)};
+                start_dates = cell(1,numel(time_period));
+                end_dates = cell(1,numel(time_period));
+                for i_yr = 1:numel(time_period)
+                    start_dates{i_yr} = datenum(time_period(i_yr), start_month, 1);
+                    end_dates{i_yr} = eomdate(time_period(i_yr), end_month);
+                end
                 legend_id = str2double(time_period);
             elseif strcmpi(time_period, 'beginning')
                 start_dates = {datenum(2007, start_month, 1), datenum(2008, start_month, 1), datenum(2009, start_month, 1)};
