@@ -29,7 +29,15 @@ classdef misc_emissions_analysis
         time_period_colors = struct('beg_2yr', struct('color', [0 0.5 0], 'name', '2006*', 'used', false),...
             'beginning', struct('color', 'b', 'name', '2008*', 'used', false),...
             'end_2yr', struct('color', [0.5 0 0.5], 'name', '2012-13', 'used', false),...
-            'end', struct('color', 'r', 'name', '2013*', 'used', false));
+            'end', struct('color', 'r', 'name', '2013*', 'used', false),...
+            'y2005', struct('color', 'r', 'name', '2005', 'used', false),...
+            'y2006', struct('color', [1 0.5 0], 'name', '2006', 'used', false),...
+            'y2007', struct('color', 'y', 'name', '2007', 'used', false),...
+            'y2008', struct('color', 'g', 'name', '2008', 'used', false),...
+            'y2009', struct('color', [0.5 0 0.5], 'name', '2009', 'used', false),...
+            'y2012', struct('color', 'b', 'name', '2012', 'used', false),...
+            'y2013', struct('color', 'c', 'name', '2013', 'used', false),...
+            'y2014', struct('color', 'm', 'name', '2014', 'used', false));
     end
     
     methods(Static = true)
@@ -2630,7 +2638,8 @@ classdef misc_emissions_analysis
             p.addParameter('sat_or_model', {});
             p.addParameter('single_plot', nan);
             p.addParameter('single_plot_mode', '');
-            p.addParameter('include_2years', nan);
+            p.addParameter('window_width', '');  % '1' or '3' - must be char
+            p.addParameter('years_to_plot', {});  % must be cell array of chars
             p.addParameter('days_of_week', '');
             p.addParameter('connect_wkend', nan);
             p.addParameter('bad_fit_display','');
@@ -2657,8 +2666,19 @@ classdef misc_emissions_analysis
                 E.badinput('MASS_VALUE must be one of: %s', strjoin(allowed_mass_vals, ', '));
             end
             
-            include_2years = opt_ask_yn('Include the points from the 2 year runs?', pout.include_2years, '"include_2years"');
-            
+            window_width = str2double(opt_ask_multichoice('What width of to use (years)?', {'1','3'}, pout.window_width, '"window_width"', 'list', true));
+            if window_width == 1
+                allowed_years = [2005, 2006, 2007, 2008, 2009, 2012, 2013, 2014];
+                years_to_time_per_fxn = @(yrs) cellfun(@str2double, yrs, 'uniform', false)
+            elseif window_width == 3
+                allowed_years = [2006, 2007, 2008, 2013];
+                years_to_time_per_fxn = @(yrs) cellfun(@(x) (str2double(x)-1):(str2double(x)+1), yrs, 'uniform', false);
+            else
+                E.notimplemented('Window width not 1')
+            end           
+            years_to_plot = opt_ask_multiselect('Which years to include?', cellfun(@num2str, num2cell(allowed_years), 'uniform', false), pout.years_to_plot, '"years_to_plot"') 
+            years_to_plot = years_to_time_per_fxn(years_to_plot);
+
             sat_or_model = opt_ask_multiselect('Which data source to use?', {'BEHR', 'WRF'}, pout.sat_or_model, '"sat_or_model"');
             
             single_plot_bool = opt_ask_yn('Plot all locations on a single plot?', pout.single_plot, '"single_plot"');
@@ -2719,19 +2739,12 @@ classdef misc_emissions_analysis
             all_changes = struct([]);
             if include_behr
                 if include_decade
-                    if include_2years
-                        load_change_group('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', 1:70);
-                    end
-                    
-                    load_change_group('beginning', 'end', 'UMTWRFS', 'UMTWRFS');
+                    E.notimplemented('Decadal')
                 end
                 if include_wkday_wkend
-                    if include_2years
-                        load_change_group('beg_2yr', 'beg_2yr', 'TWRF', 'US');
-                        load_change_group('end_2yr', 'end_2yr', 'TWRF', 'US', 1:70);
+                    for i_yr = 1:numel(years_to_plot)
+                        load_change_group(years_to_plot{i_yr}, years_to_plot{i_yr}, 'TWRF', 'US');
                     end
-                    load_change_group('beginning', 'beginning', 'TWRF', 'US');
-                    load_change_group('end', 'end', 'TWRF', 'US');
                 end
             end
             
@@ -2739,8 +2752,7 @@ classdef misc_emissions_analysis
                 % WRF is only processed for all days because it cannot have
                 % a weekend effect, since the NEI emissions are just a 24
                 % hour cycle
-                load_change_group('beg_2yr', 'end_2yr', 'UMTWRFS', 'UMTWRFS', wrf_file_inds, true);
-                load_change_group('beginning', 'end', 'UMTWRFS', 'UMTWRFS', wrf_file_inds, true);
+                E.notimplemented('WRF')
             end
             
             if do_connect_wkday_wkend
@@ -2836,16 +2848,29 @@ classdef misc_emissions_analysis
                     load_wrf = false;
                 end
                 
+                if isnumeric(time_period_1)
+                    tp1_field = sprintf('y%d', time_period_1);
+                else
+                    tp1_field = time_period_1;
+                end
+                
+                if isnumeric(time_period_2)
+                    tp2_field = sprintf('y%d', time_period_2);
+                else
+                    tp2_field = time_period_2;
+                end
+                
                 if load_wrf
                     marker_fills = 'none';
                 else
-                    marker_fills = {time_period_colors.(time_period_1).color, time_period_colors.(time_period_2).color};
+                    marker_fills = {time_period_colors.(tp1_field).color, time_period_colors.(tp2_field).color};
                 end
+
                 
                 changes = misc_emissions_analysis.collect_changes(time_period_1, time_period_2, days_of_week_1, days_of_week_2, 'loc_inds', loc_inds, 'file_loc_inds', load_loc_inds, 'use_wrf', load_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
                 changes.is_significant = misc_emissions_analysis.is_change_significant(changes.tau, changes.tau_sd, changes.n_dofs);
                 changes.style = struct('marker', {dow_markers.(days_of_week_1).marker, dow_markers.(days_of_week_2).marker},...
-                    'linestyle', 'none', 'color', {time_period_colors.(time_period_1).color, time_period_colors.(time_period_2).color},...
+                    'linestyle', 'none', 'color', {time_period_colors.(tp1_field).color, time_period_colors.(tp2_field).color},...
                     'markersize',marker_size,'linewidth',marker_linewidth,'markerfacecolor',marker_fills);
                 changes.is_wrf = load_wrf;
                 dow_markers.(days_of_week_1).used = true;
@@ -2855,8 +2880,8 @@ classdef misc_emissions_analysis
                 else
                     product_series.behr.used = true;
                 end
-                time_period_colors.(time_period_1).used = true;
-                time_period_colors.(time_period_2).used = true;
+                time_period_colors.(tp1_field).used = true;
+                time_period_colors.(tp2_field).used = true;
                 
                 
                 if isempty(all_changes)
