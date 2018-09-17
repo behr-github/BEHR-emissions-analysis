@@ -82,7 +82,7 @@ classdef misc_emissions_analysis
             p.addOptional('species', 'NO2');
             p.parse(varargin{:});
             pout = p.Results;
-            species = pout.species;
+            species = lower(pout.species);
             
             years_str = strjoin(sprintfmulti('%d', year_in),'_');
             filename = sprintf('Summer_avg_%s_%s_%s.mat', species, years_str, days_of_week);
@@ -723,8 +723,8 @@ classdef misc_emissions_analysis
                 if ~use_wrf
                     changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius);
                     changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius);
-                    changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius, 'species', 'hcho');
-                    changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius, 'species', 'hcho');
+%                     changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius, 'species', 'hcho');
+%                     changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius, 'species', 'hcho');
                 else
                     changes.vcds(:,1) = misc_emissions_analysis.avg_wrf_vcds_around_loc(first_locs.locs, first_time_period, 'no2', 'radius', avg_radius);
                     changes.vcds(:,2) = misc_emissions_analysis.avg_wrf_vcds_around_loc(second_locs.locs, second_time_period, 'no2', 'radius', avg_radius);
@@ -3023,63 +3023,114 @@ classdef misc_emissions_analysis
         function figs = plot_avg_lifetime_change(varargin)
             p = advInputParser;
             p.addParameter('plot_mode', '');
+            p.addParameter('window_width', []);
+            p.addParameter('remove_decreasing_cities', nan);
             p.parse(varargin{:});
             pout = p.Results;
             
-            plot_mode = opt_ask_multichoice('Which plot mode?', {'scatter', 'norm scatter', 'avg', 'norm avg'}, pout.plot_mode, '"plot_mode"', 'list', true);
-            
-            years = {2005 2006 2007 2008 2009 2012 2013 2014};
-            x_vals = cell2mat(years);
+            plot_mode = opt_ask_multichoice('Which plot mode?', {'scatter', 'norm scatter', 'box', 'norm box', 'wkday/wkend', 'wkday - wkend', 'avg', 'norm avg', 'avg wkday/wkend', 'avg wkday - wkend'}, pout.plot_mode, '"plot_mode"', 'list', true);
+            window_width = opt_ask_number('What width of window to use (in years): 1 or 3?', pout.window_width, '"window_width"', 'testfxn', @(x) isscalar(x) && (x==1 || x==3), 'testmsg', 'Must be 1 or 3');
+            remove_decreasing_cities = opt_ask_yn('Remove cities that only decrease?', pout.remove_decreasing_cities', '"remove_decreasing_cities"');
+            if window_width == 1
+                years = {2005 2006 2007 2008 2009 2012 2013 2014};
+                x_vals = cell2mat(years);
+            elseif window_width == 3
+                years = {2005:2007, 2007:2009, 2012:2014};
+                x_vals = [2006, 2008, 2013];
+            end
             
             n_years = numel(years);
             for i_yr = 1:n_years
                 [sdates, edates] = misc_emissions_analysis.select_start_end_dates(years{i_yr});
-                fprintf('Loading %d\n', years{i_yr});
-                year_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'TWRF', 'lu'));
+                fprintf('Loading %d\n', x_vals(i_yr));
+                year_week_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'TWRF', 'lu'));
+                year_weekend_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'US', 'lu'));
                 xx = misc_emissions_analysis.loc_types_to_inds('Cities');
-                locs = year_fits.locs(xx);
+                week_locs = year_week_fits.locs(xx);
+                weekend_locs = year_weekend_fits.locs(xx);
                 if i_yr == 1
-                    taus = nan(numel(locs), n_years);
-                    names = {locs.ShortName};
+                    week_taus = nan(numel(week_locs), n_years);
+                    weekend_taus = nan(numel(week_locs), n_years);
+                    names = {week_locs.ShortName};
                 end
                 clear year_fits
                 
-                for i_loc = 1:numel(locs)
-                    this_tau = locs(i_loc).emis_tau.tau;
-                    if ~isempty(this_tau)
-                        taus(i_loc,i_yr) = this_tau;
+                for i_loc = 1:numel(week_locs)
+                    this_week_tau = week_locs(i_loc).emis_tau.tau;
+                    this_weekend_tau = weekend_locs(i_loc).emis_tau.tau;
+                    if ~isempty(this_week_tau)
+                        week_taus(i_loc,i_yr) = this_week_tau;
+                    end
+                    if ~isempty(this_weekend_tau)
+                        weekend_taus(i_loc,i_yr) = this_weekend_tau;
                     end
                 end
-                good_fits = misc_emissions_analysis.is_fit_good_by_loc(locs, 'DEBUG_LEVEL', 0);
-                taus(~good_fits,i_yr) = nan;
+                good_week_fits = misc_emissions_analysis.is_fit_good_by_loc(week_locs, 'DEBUG_LEVEL', 0);
+                week_taus(~good_week_fits,i_yr) = nan;
+                good_weekend_fits = misc_emissions_analysis.is_fit_good_by_loc(weekend_locs, 'DEBUG_LEVEL', 0);
+                weekend_taus(~good_weekend_fits,i_yr) = nan;
             end
             
-            good_for_trends = sum(~isnan(taus),2) >= size(taus,2) - 1;
-            taus = taus(good_for_trends, :);
+            good_for_trends = sum(~isnan(week_taus),2) >= size(week_taus,2);% - 1;
+            if remove_decreasing_cities
+                good_for_trends = good_for_trends & ~all(diff(week_taus, 1, 2) < 0, 2);
+            end
+%             if any(strcmpi(plot_mode, {'wkday/wkend', 'avg wkday/wkend'}))
+%                 good_for_trends = good_for_trends & sum(~isnan(weekend_taus),2) >= size(weekend_taus,2) - 1;
+%                 
+%             end
+            week_taus = week_taus(good_for_trends, :);
+            weekend_taus = weekend_taus(good_for_trends, :);
             names = names(good_for_trends);
             
+            plotting_fxn = @(x,y,style) plot(x,y,style);
+            box_plotting_fxn = @(x,y,style) boxplot(y, 'labels', x);
+            yerr = [];
+            lstyle = '';
             switch lower(plot_mode)
                 case 'scatter'
-                    y = taus';
-                    yerr = [];
+                    y = week_taus';
                     lstyle = 'o-';
                 case 'norm scatter'
-                    y = normalize_tau(taus);
-                    yerr = [];
+                    y = normalize_tau(week_taus);
                     lstyle = 'o-';
+                case 'box'
+                    y = week_taus;
+                    plotting_fxn = box_plotting_fxn;
+                case 'norm box'
+                    y = normalize_tau(week_taus);
+                    plotting_fxn = box_plotting_fxn;
                 case 'avg'
-                    y = nanmean(taus, 1);
-                    yerr = nanstd(taus, 0, 1);
+                    y = nanmean(week_taus, 1);
+                    yerr = nanstd(week_taus, 0, 1);
                     lstyle = 'o';
                 case 'norm avg'
-                    ynorm = normalize_tau(taus);
+                    ynorm = normalize_tau(week_taus);
                     y = nanmean(ynorm, 1);
                     yerr = nanstd(ynorm,0,1);
+                    lstyle = 'o';
+                case 'wkday/wkend'
+                    y = weekend_taus ./ week_taus;
+                    y = y';
+                    lstyle = 'o-';
+                case 'avg wkday/wkend'
+                    tau_ratio = weekend_taus ./ week_taus;
+                    y = nanmean(tau_ratio, 1);
+                    yerr = nanstd(tau_ratio, 0, 1);
+                    lstyle = 'o';
+                case 'wkday - wkend'
+                    y = weekend_taus - week_taus;
+                    y = y';
+                    lstyle = 'o-';
+                case 'avg wkday - wkend'
+                    tau_del = weekend_taus - week_taus;
+                    y = nanmean(tau_del, 1);
+                    yerr = nanstd(tau_del, 0, 1);
                     lstyle = 'o';
             end
             
             figs = figure;
-            plot(x_vals, y, lstyle);
+            plotting_fxn(x_vals, y, lstyle);
             if isempty(yerr)
                 legend(names{:});
             else
@@ -3099,27 +3150,30 @@ classdef misc_emissions_analysis
             p.parse(varargin{:});
             pout = p.Results;
             
-            use_jiang = opt_ask_yn('Use Jiang values for emissions and VCDs?', pout.use_jiang, '"use_jiang"');
-            
-            chicago_ind = misc_emissions_analysis.loc_names_to_inds('Chicago');
-            dallas_ind = misc_emissions_analysis.loc_names_to_inds('Dallas');
-            file_inds = [9 13];
-            
-            avg_radius_deg = 'by_loc';
-            [changes(1), loc_names{1}] = misc_emissions_analysis.collect_changes('beg_2yr','beginning','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
-            [changes(2), loc_names{2}] = misc_emissions_analysis.collect_changes('beginning', 'end','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
+            use_jiang = true;
+%             use_jiang = opt_ask_yn('Use Jiang values for emissions and VCDs?', pout.use_jiang, '"use_jiang"');
+%             
+%             chicago_ind = misc_emissions_analysis.loc_names_to_inds('Chicago');
+%             dallas_ind = misc_emissions_analysis.loc_names_to_inds('Dallas');
+%             file_inds = [9 13];
+%             
+%             avg_radius_deg = 'by_loc';
+%             [changes(1), loc_names{1}] = misc_emissions_analysis.collect_changes('beg_2yr','beginning','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
+%             [changes(2), loc_names{2}] = misc_emissions_analysis.collect_changes('beginning', 'end','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
             jiang_del_emis = [-15, -25];
             jiang_del_vcd = [-25, 5];
+            median_del_tau = [-5, 20]; % comes from plot_avg_lifetime_change, 3yr windows, ignoring cities that only decrease
             
-            figs = gobjects(size(changes));
+%            figs = gobjects(size(changes));
             head_width = 0.125;
             head_length = 2.5;
             line_width = 3;
-            for i=1:numel(changes)
-                del_tau = reldiff(changes(i).tau(1,2), changes(i).tau(1,1))*100;
+            for i=1:numel(median_del_tau)
+                %del_tau = reldiff(changes(i).tau(1,2), changes(i).tau(1,1))*100;
                 if use_jiang
                     del_emis = jiang_del_emis(i);
                     del_vcds = jiang_del_vcd(i);
+                    del_tau = median_del_tau(i);
                 else
                     del_emis = reldiff(changes(i).nei_emis(1,2), changes(i).nei_emis(1,1))*100;
                     del_vcds = reldiff(changes(i).vcds(1,2), changes(i).vcds(1,1))*100;
@@ -3134,7 +3188,7 @@ classdef misc_emissions_analysis
                 xlim([0 5]);
                 set(gca,'fontsize',16,'xtick',1:4,'xticklabel',{'Emissions','Lifetime','E \cdot \tau','VCDs'},'XTickLabelRotation',30);
                 ylabel('%\Delta');
-                title(loc_names{i}{1});
+%                 title(loc_names{i}{1});
             end
         end
         
@@ -3828,7 +3882,7 @@ classdef misc_emissions_analysis
                     lat = year_vcds.daily.lat;
                     Avg = RunningAverage();
                 end
-                Avg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.(weights))
+                Avg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.weights)
             end
             lon_res = mean(diff(lon(1,:)));
             lat_res = mean(diff(lat(:,1)));
