@@ -3035,8 +3035,8 @@ classdef misc_emissions_analysis
                 years = {2005 2006 2007 2008 2009 2012 2013 2014};
                 x_vals = cell2mat(years);
             elseif window_width == 3
-                years = {2005:2007, 2007:2009, 2012:2014};
-                x_vals = [2006, 2008, 2013];
+                years = {2005:2007, 2006:2008, 2007:2009, 2012:2014};
+                x_vals = [2006, 2007, 2008, 2013];
             end
             
             n_years = numel(years);
