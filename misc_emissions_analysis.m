@@ -168,6 +168,10 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.emis_wrf_dir, base_filename);
         end
         
+        function value = debugging_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'Debugging');
+        end
+        
         function fulldir = subdir_prep(root_dir, varargin)
             % Use this to setup sub-output directories. It will make sure
             % that the root directory exists (if not, it errors) and then
@@ -849,6 +853,57 @@ classdef misc_emissions_analysis
         
         function n_taus = n_lifetimes_downwind(x, x_0, mu_x)
             n_taus = (max(x) - mu_x)./x_0;
+        end
+        
+        function vcds = load_vcds_for_years(years, days_of_week, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('species', 'no2');
+            p.parse(varargin{:});
+            pout = p.Results;
+            vcd_species = pout.species;
+            
+            allowed_species = {'no2','hcho'};
+            if ~ismember(vcd_species, allowed_species)
+                E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
+            elseif strcmp(vcd_species, 'hcho')
+                % currently I only have all day-of-week HCHO VCD averages
+                % because I don't expect large weekday-weekend difference
+                % (but might be worth checking) so for now we'll just force
+                % the HCHO VCDs to be from all days of week
+                
+                if ~strcmpi(days_of_week, 'UMTWRFS')
+                    warning('HCHO columns will be from all days of week, even if a different subset was specified');
+                end
+                days_of_week = 'UMTWRFS';
+            end
+            
+            for i_yr = 1:numel(years)
+                year_vcds = load(misc_emissions_analysis.avg_file_name(years(i_yr), days_of_week, vcd_species));
+                if i_yr == 1
+                    lon = year_vcds.daily.lon;
+                    lat = year_vcds.daily.lat;
+                    DailyAvg = RunningAverage();
+                    MonthlyAvg = RunningAverage();
+                    
+                    adding_monthly = ~isempty(year_vcds.monthly);
+                end
+                DailyAvg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.weights)
+                if adding_monthly
+                    if ~isempty(year_vcds.monthly)
+                        MonthlyAvg.addData(year_vcds.monthly.(vcd_species), year_vcds.monthly.weights)
+                    else
+                        E.callError('missing_monthly_vcds', '%d average has no monthly VCDs, but previous years do', years(i_yr));
+                    end
+                elseif ~isempty(year_vcds.monthly)
+                    warning('%d average has monthly VCDs, but prior years did not, so not including any monthly VCDs', years(i_yr));
+                end
+            end
+            
+            vcds.lon = lon;
+            vcds.lat = lat;
+            vcds.daily_vcds = DailyAvg.getWeightedAverage();
+            vcds.monthly_vcds = DailyAvg.getWeightedAverage();
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1893,6 +1948,37 @@ classdef misc_emissions_analysis
             save(misc_emissions_analysis.wrf_avg_prof_file(start_dates, end_dates), '-struct', 'data', '-v7.3');
         end
         
+        function check_xtrack_flags
+            dvec = make_datevec({'2005-04-01','2006-04-01','2007-04-01','2008-04-01','2009-04-01'},{'2005-09-30','2006-09-30','2007-09-30','2008-09-30','2009-09-30'});
+            frac_zeros = nan(numel(dvec), 6);
+            frac_fills = nan(numel(dvec),6);
+            frac_gt0 = nan(numel(dvec),6);
+            for i_day = 1:numel(dvec)
+                try
+                    Data = load_behr_file(dvec(i_day), 'daily', 'us');
+                catch err
+                    if strcmp(err.identifier, 'MATLAB:load:couldNotReadFile')
+                        fprintf('Could not load file for %s\n', datestr(dvec(i_day)));
+                    else
+                        rethrow(err);
+                    end
+                end
+                for i_orbit = 1:numel(Data)
+                    xtrack = Data(i_orbit).XTrackQualityFlags;
+                    n = numel(xtrack);
+                    n_zeros = sum(xtrack(:) == 0);
+                    n_fills = sum(isnan(xtrack(:)));
+                    n_gt0 = sum(xtrack(:) > 0);
+                    fprintf('Orbit %2$d on %3$s: %4$d/%1$d zeros, %5$d/%1$d fills, %6$d/%1$d > 0\n', n, i_orbit, datestr(dvec(i_day)), n_zeros, n_fills, n_gt0);
+                    frac_zeros(i_day, i_orbit) = n_zeros / n;
+                    frac_fills(i_day, i_orbit) = n_fills / n;
+                    frac_gt0(i_day, i_orbit) = n_gt0 / n;
+                end
+            end
+            
+            save(fullfile(misc_emissions_analysis.debugging_dir, 'XTrackFlags.mat'), 'dvec', 'frac_zeros', 'frac_fills', 'frac_gt0');
+        end
+        
         %%%%%%%%%%%%%%%%%%%%
         % Plotting methods %
         %%%%%%%%%%%%%%%%%%%%
@@ -2649,6 +2735,7 @@ classdef misc_emissions_analysis
             p.addParameter('sat_or_model', {});
             p.addParameter('single_plot', nan);
             p.addParameter('single_plot_mode', '');
+            p.addParameter('norm_tau', nan);
             p.addParameter('window_width', '');  % '1' or '3' - must be char
             p.addParameter('years_to_plot', {});  % must be cell array of chars
             p.addParameter('days_of_week', '');
@@ -2680,7 +2767,7 @@ classdef misc_emissions_analysis
             window_width = str2double(opt_ask_multichoice('What width of to use (years)?', {'1','3'}, pout.window_width, '"window_width"', 'list', true));
             if window_width == 1
                 allowed_years = [2005, 2006, 2007, 2008, 2009, 2012, 2013, 2014];
-                years_to_time_per_fxn = @(yrs) cellfun(@str2double, yrs, 'uniform', false)
+                years_to_time_per_fxn = @(yrs) cellfun(@str2double, yrs, 'uniform', false);
             elseif window_width == 3
                 allowed_years = [2006, 2007, 2008, 2013];
                 years_to_time_per_fxn = @(yrs) cellfun(@(x) (str2double(x)-1):(str2double(x)+1), yrs, 'uniform', false);
@@ -2698,6 +2785,8 @@ classdef misc_emissions_analysis
             else
                 single_plot_mode = '';
             end
+            
+            do_normalize_lifetimes = opt_ask_yn('Normalize lifetimes to mean of each location?', pout.norm_tau, '"norm_tau"');
             
             allowed_dows = {'UMTWRFS','TWRF','US'};
             days_of_week = opt_ask_multiselect('Choose which day-of-week subsets to include', [allowed_dows, 'all'], pout.days_of_week, '"days_of_week"');
@@ -2776,6 +2865,22 @@ classdef misc_emissions_analysis
                 x_label_str = 'Avg. NO_2 VCD (molec. cm^2)';
             else
                 x_label_str = 'a (mol NO_2)';
+            end
+            
+            if do_normalize_lifetimes
+                % We want to normalize each city's lifetime by its average.
+                for i_loc = 1:size(all_changes(1).tau)
+                    loc_taus = nan(numel(all_changes), size(all_changes(1).tau,2));
+                    for i_change = 1:numel(all_changes)
+                        loc_taus(i_change,:) = all_changes(i_change).tau(i_loc, :);
+                        % Don't include bad fits in the mean
+                        loc_taus(i_change, ~all_changes(i_change).is_fit_good(i_loc, :)) = nan;
+                    end
+                    avg_tau = nanmean(loc_taus(:));
+                    for i_change = 1:numel(all_changes)
+                        all_changes(i_change).tau(i_loc,:) = all_changes(i_change).tau(i_loc,:) ./ avg_tau;
+                    end
+                end
             end
             
             if ~single_plot_bool
@@ -3875,28 +3980,21 @@ classdef misc_emissions_analysis
             
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            for i_yr = 1:numel(time_period_years)
-                year_vcds = load(misc_emissions_analysis.avg_file_name(time_period_years(i_yr), days_of_week, vcd_species));
-                if i_yr == 1
-                    lon = year_vcds.daily.lon;
-                    lat = year_vcds.daily.lat;
-                    Avg = RunningAverage();
-                end
-                Avg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.weights)
-            end
+            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species);
+            lon = vcds.lon;
+            lat = vcds.lat;
             lon_res = mean(diff(lon(1,:)));
             lat_res = mean(diff(lat(:,1)));
             if abs(lon_res - lat_res) > 1e-10
                 E.notimplemented('Different lon and lat resolutions');
             end
-            time_avg_vcds = Avg.getWeightedAverage();
             loc_avg_vcds = nan(size(locs));
             for i_loc = 1:numel(locs)
                 % This will use the box width (from center to edge
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
                 xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius);
-                loc_avg_vcds(i_loc) = nanmean(time_avg_vcds(xx_radius));
+                loc_avg_vcds(i_loc) = nanmean(vcds.daily_vcds(xx_radius));
             end
         end
         
