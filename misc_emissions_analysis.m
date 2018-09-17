@@ -830,15 +830,21 @@ classdef misc_emissions_analysis
             is_good = true;
         end
         
-        function is_good = is_fit_good_by_loc(loc, varargin)
+        function is_good = is_fit_good_by_loc(all_locs, varargin)
             E = JLLErrors;
-            if ~isscalar(loc) || ~isstruct(loc)
-                E.badinput('LOC must be a scalar structure')
+            if ~isstruct(all_locs)
+                E.badinput('LOC must be a structure')
             end
             
-            varargin = update_params(varargin, 'DEBUG_LEVEL', 1);
+            varargin = update_params('missing', varargin, 'DEBUG_LEVEL', 1);
             
-            is_good = misc_emissions_analysis.is_fit_good(loc.no2_sectors.x, loc.no2_sectors.linedens, loc.fit_info, varargin{:});
+            is_good = false(size(all_locs));
+            for i_loc = 1:numel(all_locs)
+                loc = all_locs(i_loc);
+                if ~isempty(loc.fit_info.emgfit)
+                    is_good(i_loc) = misc_emissions_analysis.is_fit_good(loc.no2_sectors.x, loc.no2_sectors.linedens, loc.fit_info, varargin{:});
+                end
+            end
         end
         
         function n_taus = n_lifetimes_downwind(x, x_0, mu_x)
@@ -1041,10 +1047,11 @@ classdef misc_emissions_analysis
             common_opts = {'DEBUG_LEVEL', 1, 'dayofweek', days_of_week};
             switch lower(species)
                 case 'no2'
-                    [monthly.no2, monthly.lon, monthly.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
-                    [daily.no2, daily.lon, daily.lat] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
+                    %[monthly.no2, monthly.lon, monthly.lat, monthly.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
+                    monthly = [];
+                    [daily.no2, daily.lon, daily.lat, daily.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
                 case 'hcho'
-                    [monthly.hcho, monthly.lon, monthly.lat] = omhcho_time_average(start_date, end_date);
+                    [monthly.hcho, monthly.lon, monthly.lat, monthly.weights] = omhcho_time_average(start_date, end_date);
                     daily = monthly;
             end
             
@@ -2680,7 +2687,7 @@ classdef misc_emissions_analysis
             else
                 E.notimplemented('Window width not 1')
             end           
-            years_to_plot = opt_ask_multiselect('Which years to include?', cellfun(@num2str, num2cell(allowed_years), 'uniform', false), pout.years_to_plot, '"years_to_plot"') 
+            years_to_plot = opt_ask_multiselect('Which years to include?', cellfun(@num2str, num2cell(allowed_years), 'uniform', false), pout.years_to_plot, '"years_to_plot"');
             years_to_plot = years_to_time_per_fxn(years_to_plot);
 
             sat_or_model = opt_ask_multiselect('Which data source to use?', {'BEHR', 'WRF'}, pout.sat_or_model, '"sat_or_model"');
@@ -2747,7 +2754,7 @@ classdef misc_emissions_analysis
                 end
                 if include_wkday_wkend
                     for i_yr = 1:numel(years_to_plot)
-                        load_change_group(years_to_plot{i_yr}, years_to_plot{i_yr}, 'TWRF', 'US');
+                        load_change_group(years_to_plot{i_yr}, years_to_plot{i_yr}, 'TWRF', 'US', file_loc_inds);
                     end
                 end
             end
@@ -2853,13 +2860,13 @@ classdef misc_emissions_analysis
                 end
                 
                 if isnumeric(time_period_1)
-                    tp1_field = sprintf('y%d', time_period_1);
+                    tp1_field = sprintf('y%d', mean(time_period_1));
                 else
                     tp1_field = time_period_1;
                 end
                 
                 if isnumeric(time_period_2)
-                    tp2_field = sprintf('y%d', time_period_2);
+                    tp2_field = sprintf('y%d', mean(time_period_2));
                 else
                     tp2_field = time_period_2;
                 end
@@ -3013,6 +3020,78 @@ classdef misc_emissions_analysis
             %     %
         end
         
+        function figs = plot_avg_lifetime_change(varargin)
+            p = advInputParser;
+            p.addParameter('plot_mode', '');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            plot_mode = opt_ask_multichoice('Which plot mode?', {'scatter', 'norm scatter', 'avg', 'norm avg'}, pout.plot_mode, '"plot_mode"', 'list', true);
+            
+            years = {2005 2006 2007 2008 2009 2012 2013 2014};
+            x_vals = cell2mat(years);
+            
+            n_years = numel(years);
+            for i_yr = 1:n_years
+                [sdates, edates] = misc_emissions_analysis.select_start_end_dates(years{i_yr});
+                fprintf('Loading %d\n', years{i_yr});
+                year_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'TWRF', 'lu'));
+                xx = misc_emissions_analysis.loc_types_to_inds('Cities');
+                locs = year_fits.locs(xx);
+                if i_yr == 1
+                    taus = nan(numel(locs), n_years);
+                    names = {locs.ShortName};
+                end
+                clear year_fits
+                
+                for i_loc = 1:numel(locs)
+                    this_tau = locs(i_loc).emis_tau.tau;
+                    if ~isempty(this_tau)
+                        taus(i_loc,i_yr) = this_tau;
+                    end
+                end
+                good_fits = misc_emissions_analysis.is_fit_good_by_loc(locs, 'DEBUG_LEVEL', 0);
+                taus(~good_fits,i_yr) = nan;
+            end
+            
+            good_for_trends = sum(~isnan(taus),2) >= size(taus,2) - 1;
+            taus = taus(good_for_trends, :);
+            names = names(good_for_trends);
+            
+            switch lower(plot_mode)
+                case 'scatter'
+                    y = taus';
+                    yerr = [];
+                    lstyle = 'o-';
+                case 'norm scatter'
+                    y = normalize_tau(taus);
+                    yerr = [];
+                    lstyle = 'o-';
+                case 'avg'
+                    y = nanmean(taus, 1);
+                    yerr = nanstd(taus, 0, 1);
+                    lstyle = 'o';
+                case 'norm avg'
+                    ynorm = normalize_tau(taus);
+                    y = nanmean(ynorm, 1);
+                    yerr = nanstd(ynorm,0,1);
+                    lstyle = 'o';
+            end
+            
+            figs = figure;
+            plot(x_vals, y, lstyle);
+            if isempty(yerr)
+                legend(names{:});
+            else
+                scatter_errorbars(x_vals, y, yerr);
+            end
+            
+            function ynorm = normalize_tau(taus)
+                ybar = repmat(nanmean(taus,2), 1, n_years);
+                ynorm = taus ./ ybar;
+            end
+        end
+        
         function figs = plot_emis_tau_effect(varargin)
             
             p = advInputParser;
@@ -3028,7 +3107,7 @@ classdef misc_emissions_analysis
             
             avg_radius_deg = 'by_loc';
             [changes(1), loc_names{1}] = misc_emissions_analysis.collect_changes('beg_2yr','beginning','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
-            [changes(2), loc_names{2}] = misc_emissions_analysis.collect_changes('beginning', 'end','TWRF','TWRF','loc_inds',dallas_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
+            [changes(2), loc_names{2}] = misc_emissions_analysis.collect_changes('beginning', 'end','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
             jiang_del_emis = [-15, -25];
             jiang_del_vcd = [-25, 5];
             
@@ -3705,7 +3784,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
+        function loc_avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
@@ -3742,19 +3821,28 @@ classdef misc_emissions_analysis
             
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            VCDs = load(misc_emissions_analysis.avg_file_name(time_period_years, days_of_week, vcd_species));
-            lon_res = mean(diff(VCDs.daily.lon(1,:)));
-            lat_res = mean(diff(VCDs.daily.lat(:,1)));
+            for i_yr = 1:numel(time_period_years)
+                year_vcds = load(misc_emissions_analysis.avg_file_name(time_period_years(i_yr), days_of_week, vcd_species));
+                if i_yr == 1
+                    lon = year_vcds.daily.lon;
+                    lat = year_vcds.daily.lat;
+                    Avg = RunningAverage();
+                end
+                Avg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.(weights))
+            end
+            lon_res = mean(diff(lon(1,:)));
+            lat_res = mean(diff(lat(:,1)));
             if abs(lon_res - lat_res) > 1e-10
                 E.notimplemented('Different lon and lat resolutions');
             end
-            avg_vcds = nan(size(locs));
+            time_avg_vcds = Avg.getWeightedAverage();
+            loc_avg_vcds = nan(size(locs));
             for i_loc = 1:numel(locs)
                 % This will use the box width (from center to edge
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
-                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), VCDs.daily.lon, VCDs.daily.lat, avg_radius);
-                avg_vcds(i_loc) = nanmean(VCDs.daily.(vcd_species)(xx_radius));
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius);
+                loc_avg_vcds(i_loc) = nanmean(time_avg_vcds(xx_radius));
             end
         end
         
