@@ -3127,13 +3127,29 @@ classdef misc_emissions_analysis
         
         function figs = plot_avg_lifetime_change(varargin)
             p = advInputParser;
-            p.addParameter('plot_mode', '');
+            p.addParameter('plot_quantity', '');
+            p.addParameter('plot_averaging', '');
             p.addParameter('window_width', []);
             p.addParameter('remove_decreasing_cities', nan);
             p.parse(varargin{:});
             pout = p.Results;
             
-            plot_mode = opt_ask_multichoice('Which plot mode?', {'scatter', 'norm scatter', 'box', 'norm box', 'wkday/wkend', 'wkday - wkend', 'avg', 'norm avg', 'avg wkday/wkend', 'avg wkday - wkend'}, pout.plot_mode, '"plot_mode"', 'list', true);
+            % options for the quantity to plot
+            pqopts.lifetime = 'Lifetime';
+            pqopts.normlife = 'Normalized lifetime';
+            pqopts.wkend_wkday_ratio = 'Weekend/weekday lifetime';
+            pqopts.wkend_wkday_diff = 'Weekend - weekday lifetime';
+            
+            plot_quantity = opt_ask_multichoice('Which quantity to plot?', struct2cell(pqopts), pout.plot_quantity, '"plot_quantity"', 'list', true);
+            
+            % options for the averaging
+            avgopts.none = 'None';
+            avgopts.avg = 'Average';
+            avgopts.vcdwt = 'VCD weighted avg.';
+            avgopts.box = 'Boxplot';
+            
+            plot_averaging = opt_ask_multichoice('What averaging to use?', struct2cell(avgopts), pout.plot_averaging, '"plot_averaging"', 'list', true);
+            
             window_width = opt_ask_number('What width of window to use (in years): 1 or 3?', pout.window_width, '"window_width"', 'testfxn', @(x) isscalar(x) && (x==1 || x==3), 'testmsg', 'Must be 1 or 3');
             remove_decreasing_cities = opt_ask_yn('Remove cities that only decrease?', pout.remove_decreasing_cities', '"remove_decreasing_cities"');
             if window_width == 1
@@ -3185,6 +3201,7 @@ classdef misc_emissions_analysis
 %                 
 %             end
             week_taus = week_taus(good_for_trends, :);
+            week_locs = week_locs(good_for_trends);
             weekend_taus = weekend_taus(good_for_trends, :);
             names = names(good_for_trends);
             
@@ -3192,54 +3209,46 @@ classdef misc_emissions_analysis
             box_plotting_fxn = @(x,y,style) boxplot(y, 'labels', x);
             yerr = [];
             lstyle = '';
-            switch lower(plot_mode)
-                case 'scatter'
-                    y = week_taus';
-                    lstyle = 'o-';
-                case 'norm scatter'
-                    y = normalize_tau(week_taus);
-                    lstyle = 'o-';
-                case 'box'
+            add_legend = false;
+            
+            switch plot_quantity
+                case pqopts.lifetime
                     y = week_taus;
-                    plotting_fxn = box_plotting_fxn;
-                case 'norm box'
+                case pqopts.normlife
                     y = normalize_tau(week_taus);
-                    plotting_fxn = box_plotting_fxn;
-                case 'avg'
-                    y = nanmean(week_taus, 1);
-                    yerr = nanstd(week_taus, 0, 1);
-                    lstyle = 'o';
-                case 'norm avg'
-                    ynorm = normalize_tau(week_taus);
-                    y = nanmean(ynorm, 1);
-                    yerr = nanstd(ynorm,0,1);
-                    lstyle = 'o';
-                case 'wkday/wkend'
+                case pqopts.wkend_wkday_ratio
                     y = weekend_taus ./ week_taus;
-                    y = y';
-                    lstyle = 'o-';
-                case 'avg wkday/wkend'
-                    tau_ratio = weekend_taus ./ week_taus;
-                    y = nanmean(tau_ratio, 1);
-                    yerr = nanstd(tau_ratio, 0, 1);
-                    lstyle = 'o';
-                case 'wkday - wkend'
+                case pqopts.wkend_wkday_diff
                     y = weekend_taus - week_taus;
-                    y = y';
-                    lstyle = 'o-';
-                case 'avg wkday - wkend'
-                    tau_del = weekend_taus - week_taus;
-                    y = nanmean(tau_del, 1);
-                    yerr = nanstd(tau_del, 0, 1);
-                    lstyle = 'o';
             end
+            
+            switch plot_averaging
+                case avgopts.none
+                    lstyle = 'o-';
+                    add_legend = true;
+                case avgopts.avg
+                    yerr = nanstd(y, 0, 1);
+                    y = nanmean(y, 1);
+                    lstyle = 'o';
+                case avgopts.vcdwt
+                    vcds = nan(numel(week_locs), n_years);
+                    for i_yr = 1:n_years
+                        vcds(:,i_yr) = misc_emissions_analysis.avg_vcds_around_loc(week_locs, years{i_yr}, 'TWRF');
+                    end
+                    [y, yerr] = weighted_mean(y, vcds, 1);
+                    lstyle = 'bo';
+                case avgopts.box
+                    plotting_fxn = box_plotting_fxn;
+            end
+            
             
             figs = figure;
             plotting_fxn(x_vals, y, lstyle);
-            if isempty(yerr)
-                legend(names{:});
-            else
+            if ~isempty(yerr)
                 scatter_errorbars(x_vals, y, yerr);
+            end
+            if add_legend
+                legend(names{:})
             end
             
             function ynorm = normalize_tau(taus)
@@ -3265,10 +3274,15 @@ classdef misc_emissions_analysis
 %             avg_radius_deg = 'by_loc';
 %             [changes(1), loc_names{1}] = misc_emissions_analysis.collect_changes('beg_2yr','beginning','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
 %             [changes(2), loc_names{2}] = misc_emissions_analysis.collect_changes('beginning', 'end','TWRF','TWRF','loc_inds',chicago_ind,'fit_type','lu','avg_radius',avg_radius_deg, 'file_loc_inds', file_inds);
-            jiang_del_emis = [-15, -25];
-            jiang_del_vcd = [-25, 5];
-            median_del_tau = [-5, 20]; % comes from plot_avg_lifetime_change, 3yr windows, ignoring cities that only decrease
-            
+            jiang_del_emis = [-15, -24];
+            jiang_del_behr_vcd = [-13, -2]; % BEHR
+            jiang_del_sp_vcd = [-24, -1]; % NASA SP
+            if ask_yn('Exclude the 3 cities with contrary trends?')
+                median_del_tau = [-8, 20]; % comes from plot_avg_lifetime_change, 3yr windows, ignoring cities that only decrease
+            else
+                median_del_tau = [-5, 13]; % keeping cities that decrease
+            end
+            titles = {'2006 \rightarrow 2008', '2008 \rightarrow 2013'};
 %            figs = gobjects(size(changes));
             head_width = 0.125;
             head_length = 2.5;
@@ -3277,7 +3291,8 @@ classdef misc_emissions_analysis
                 %del_tau = reldiff(changes(i).tau(1,2), changes(i).tau(1,1))*100;
                 if use_jiang
                     del_emis = jiang_del_emis(i);
-                    del_vcds = jiang_del_vcd(i);
+                    del_vcds(1) = jiang_del_behr_vcd(i);
+                    del_vcds(2) = jiang_del_sp_vcd(i);
                     del_tau = median_del_tau(i);
                 else
                     del_emis = reldiff(changes(i).nei_emis(1,2), changes(i).nei_emis(1,1))*100;
@@ -3288,12 +3303,16 @@ classdef misc_emissions_analysis
                 draw_arrow_pretty([1 1], [0 del_emis], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'b');
                 draw_arrow_pretty([2 2], [0 del_tau], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'r');
                 draw_arrow_pretty([3 3], [0 ((1+del_emis/100)*(1+del_tau/100) - 1)*100], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', [0 0.5 0]);
-                draw_arrow_pretty([4 4], [0 del_vcds], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'k');
+                draw_arrow_pretty([3.8 3.8], [0 del_vcds(1)], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'k');
+                text(3.7, del_vcds(1) + 2*sign(del_vcds(1)), '(BEHR)', 'HorizontalAlignment', 'center','fontsize',16);
+                draw_arrow_pretty([4.2 4.2], [0 del_vcds(2)], 'headlength', head_length, 'headwidth', head_width, 'linewidth', line_width, 'color', 'k');
+                text(4.3, del_vcds(2) + 2*sign(del_vcds(2)), '(SP)', 'HorizontalAlignment','center','fontsize',16);
                 line([0 5],[0 0],'color',[0.5 0.5 0.5],'linestyle','--','linewidth',line_width);
                 xlim([0 5]);
-                set(gca,'fontsize',16,'xtick',1:4,'xticklabel',{'Emissions','Lifetime','E \cdot \tau','VCDs'},'XTickLabelRotation',30);
+                ylim([-30 30]);
+                set(gca,'fontsize',16,'xtick',1:4,'xticklabel',{'Emissions','Lifetime','E \cdot \tau','VCDs'},'XTickLabelRotation',30,'ygrid','on');
                 ylabel('%\Delta');
-%                 title(loc_names{i}{1});
+                title(titles{i});
             end
         end
         
