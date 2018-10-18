@@ -32,12 +32,14 @@ classdef misc_emissions_analysis
             'end', struct('color', 'r', 'name', '2013*', 'used', false),...
             'y2005', struct('color', 'r', 'name', '2005', 'used', false),...
             'y2006', struct('color', [1 0.5 0], 'name', '2006', 'used', false),...
-            'y2007', struct('color', 'y', 'name', '2007', 'used', false),...
-            'y2008', struct('color', 'g', 'name', '2008', 'used', false),...
-            'y2009', struct('color', [0.5 0 0.5], 'name', '2009', 'used', false),...
+            'y2007', struct('color', [0.5 0.5 0], 'name', '2007', 'used', false),...
+            'y2008', struct('color', 'y', 'name', '2008', 'used', false),...
+            'y2009', struct('color', 'g', 'name', '2009', 'used', false),...
+            'y2010', struct('color', [0 0.5 0], 'name', '2010', 'used', false),...
+            'y2011', struct('color', 'c', 'name', '2011', 'used', false),...
             'y2012', struct('color', 'b', 'name', '2012', 'used', false),...
-            'y2013', struct('color', 'c', 'name', '2013', 'used', false),...
-            'y2014', struct('color', 'm', 'name', '2014', 'used', false));
+            'y2013', struct('color', 'm', 'name', '2013', 'used', false),...
+            'y2014', struct('color', [0.5 0 0.5], 'name', '2014', 'used', false));
     end
     
     methods(Static = true)
@@ -172,6 +174,25 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'Debugging');
         end
         
+        function value = moves_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'MOVES');
+        end
+        
+        function filename = moves_file(varargin)
+            p = advInputParser;
+            p.addOptional('domain','national');
+            p.parse(varargin{:});
+            pout = p.Results;
+            domain = pout.domain;
+            
+            file = sprintf('moves_%s_2005to2014.csv', domain);
+            filename = fullfile(misc_emissions_analysis.moves_dir, file);
+        end
+        
+        function filename = county_shape_file()
+            filename = fullfile(misc_emissions_analysis.site_info_dir, 'CountyShapes', 'cb_2017_us_county_500k.shp');
+        end
+        
         function fulldir = subdir_prep(root_dir, varargin)
             % Use this to setup sub-output directories. It will make sure
             % that the root directory exists (if not, it errors) and then
@@ -186,6 +207,7 @@ classdef misc_emissions_analysis
                 mkdir(fulldir);
             end
         end
+        
         
         %%%%%%%%%%%%%%%%%%%
         % Utility methods %
@@ -856,12 +878,32 @@ classdef misc_emissions_analysis
         end
         
         function vcds = load_vcds_for_years(years, days_of_week, varargin)
+            % LOAD_VCDS_FOR_YEARS Averages annual VCDs into multi-year periods
+            %
+            %   VCDS = LOAD_VCDS_FOR_YEARS( YEARS, DAYS_OF_WEEK ) Given
+            %   YEARS as a numeric vector and DAYS_OF_WEEK as a string
+            %   ('UMTWRFS', 'TWRF', 'US', etc.), returns the average VCDs
+            %   for that time period.
+            %
+            %   Parameters:
+            %       'species' - default 'no2', other option is 'hcho';
+            %       determine which VCDs are returned.
+            %
+            %       'ignore_missing_files' - default false, if true, will
+            %       not error if it cannot find an average VCD file for the
+            %       given time period, but will error if it can't find any
+            %       such file. Useful while waiting for daily BEHR files to
+            %       finish being produced.
+            
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('species', 'no2');
+            p.addParameter('ignore_missing_files', false);
             p.parse(varargin{:});
             pout = p.Results;
+            
             vcd_species = pout.species;
+            ignore_missing_files = pout.ignore_missing_files;
             
             allowed_species = {'no2','hcho'};
             if ~ismember(vcd_species, allowed_species)
@@ -878,15 +920,27 @@ classdef misc_emissions_analysis
                 days_of_week = 'UMTWRFS';
             end
             
+            init_done = false;
             for i_yr = 1:numel(years)
-                year_vcds = load(misc_emissions_analysis.avg_file_name(years(i_yr), days_of_week, vcd_species));
-                if i_yr == 1
+                avg_filename = misc_emissions_analysis.avg_file_name(years(i_yr), days_of_week, vcd_species);
+                try
+                    year_vcds = load(avg_filename);
+                catch err
+                    if strcmpi(err.identifier, 'MATLAB:load:couldNotReadFile') && ignore_missing_files
+                        warning('Not loading %s, file not found', avg_filename)
+                        continue
+                    else
+                        rethrow(err);
+                    end
+                end
+                if ~init_done
                     lon = year_vcds.daily.lon;
                     lat = year_vcds.daily.lat;
                     DailyAvg = RunningAverage();
                     MonthlyAvg = RunningAverage();
                     
                     adding_monthly = ~isempty(year_vcds.monthly);
+                    init_done = true;
                 end
                 DailyAvg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.weights)
                 if adding_monthly
@@ -900,10 +954,196 @@ classdef misc_emissions_analysis
                 end
             end
             
+            if ~init_done
+                E.callError('no_files', 'No average files found for the specified time period');
+            end
+            
             vcds.lon = lon;
             vcds.lat = lat;
             vcds.daily_vcds = DailyAvg.getWeightedAverage();
             vcds.monthly_vcds = DailyAvg.getWeightedAverage();
+        end
+        
+        function moves = read_moves_data(varargin)
+            p = advInputParser;
+            p.addParameter('domain', '');
+            p.addParameter('window_width', []);
+            p.addParameter('years', []);
+            p.addParameter('months', []);
+            p.addParameter('locations', []);
+            p.addParameter('species', 3);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            E = JLLErrors;
+            
+            locations = pout.locations;
+            
+            for i_loc = 1:numel(locations)
+                if isnan(locations(i_loc).CoreCountyID)
+                    E.badinput('%s does not have a core county ID specified', locations.ShortName);
+                end
+            end
+            
+            allowed_domains = {'national','core_counties'};
+            if ~isempty(locations)
+                % if trying to get specific locations, must use the
+                % counties table.
+                domain = 'core_counties';
+            else
+                domain = opt_ask_multichoice('Which domain', allowed_domains, pout.domain, '"domain"', 'list',true); % update to opt_ask_multichoice when there is >1 domain
+            end
+            
+            window_width = misc_emissions_analysis.get_window_width(pout.window_width);
+            species = pout.species; % todo: make accept string or number and convert string
+            
+            if isempty(locations)
+                county_ids = [];
+            else
+                county_ids = [locations.CoreCountyID];
+            end
+            
+            
+            
+            % Read the MOVES table now so that we know what years are
+            % available
+            moves_table_in = import_moves_csv(domain);
+            
+            xx_missing = ~ismember(county_ids, moves_table_in{:,'county_id'});
+            if any(xx_missing)
+                E.badinput('The county IDs for %s are not present in the MOVES table', strjoin({locations(xx_missing).ShortName}, ', '));
+            end
+            
+            avail_years = unique(moves_table_in{:,'emis_year'});
+            [min_year, max_year] = year_range_for_window(window_width);
+            
+            years_req = opt_ask_number(sprintf('Enter the years to include (%d-%d)',min_year,max_year), pout.years, '"years"',...
+                'testfxn', @(x) all(x >= min_year & x <= max_year),...
+                'testmsg', sprintf('All numbers must be between %d and %d', min_year, max_year));
+            n_yr = numel(years_req);
+            months_req = opt_ask_number('Enter the months to include (1-12)', pout.months, '"months"',...
+                'testfxn', @(x) all(x >= 1 & x <= 12),...
+                'testmsg', 'All numbers must be between 1 and 12');
+            
+            moves = table(years_req(:), nan(n_yr,1), 'VariableNames', {'year','emis'});
+            
+            for i_yr = 1:n_yr
+                if window_width == 1
+                    xx_yr = moves_table_in{:,'emis_year'} == years_req(i_yr);
+                elseif window_width == 3
+                    this_year = years_req(i_yr);
+                    win_years = (this_year-1):(this_year+1);
+                    xx_yr = ismember(moves_table_in{:,'emis_year'}, win_years);
+                else
+                    E.notimplemented('Window other that 1 or 3')
+                end
+                
+                xx_window = xx_yr & ismember(moves_table_in{:,'emis_month'}, months_req) ...
+                    & moves_table_in{:, 'species_id'} == species;
+                
+                moves{i_yr, 2} = nanmean(sum_to_year(moves_table_in(xx_window, :)));
+            end
+            
+            
+            function [min_year, max_year] = year_range_for_window(window)
+                if window == 1
+                    min_year = min(avail_years);
+                    max_year = max(avail_years);
+                elseif window == 3
+                    min_year = min(avail_years) + 1;
+                    max_year = max(avail_years) - 1;
+                else
+                    E.notimplemented('Window other that 1 or 3')
+                end
+            end
+            
+            function emis_sum = sum_to_year(moves_table)
+                u_years = unique(moves_table{:,'emis_year'});
+                emis_sum = nan(size(u_years));
+                for i_uyr = 1:numel(u_years)
+                    xx = moves_table{:,'emis_year'} == u_years(i_uyr);
+                    if ~isempty(county_ids)
+                        xx = xx & ismember(moves_table{:, 'county_id'}, county_ids);
+                    end
+                    emis_sum(i_uyr) = nansum2(moves_table{xx, 'total_emis_kg'});
+                end
+            end
+            
+            function moves_data = import_moves_csv(domain)
+                %IMPORTFILE Import numeric data from a text file as a matrix.
+                %   MOVESNATIONAL2005TO2014 = IMPORTFILE(FILENAME) Reads data from text
+                %   file FILENAME for the default selection.
+                %
+                %   MOVESNATIONAL2005TO2014 = IMPORTFILE(FILENAME, STARTROW, ENDROW) Reads
+                %   data from rows STARTROW through ENDROW of text file FILENAME.
+                %
+                % Example:
+                %   movesnational2005to2014 = importfile('moves_national_2005to2014.csv', 2, 361);
+                %
+                %    See also TEXTSCAN.
+                
+                % Auto-generated by MATLAB on 2018/10/12 09:24:20
+                
+                % Initialize variables.
+                filename = misc_emissions_analysis.moves_file(domain);
+                delimiter = ',';
+                startRow = 2;
+                endRow = inf;
+                
+                % Format for each line of text:
+                %   MOVES Run ID:   double (%f)
+                %   MOVES Run File: strings (%s)
+                %   Year:           double (%f)
+                %	Month:          double (%f)
+                %   Species ID Num: double (%f)
+                %	Species Name:   categorical (%C)
+                %   Total emis:     double (%f)
+                % For more information, see the TEXTSCAN documentation.
+                if strcmpi(domain,'national')
+                    formatSpec = '%f%f%f%C%f%[^\n\r]';
+                    varnames = {'emis_year','emis_month','species_id','species_name','total_emis_kg'};
+                elseif strcmpi(domain,'core_counties')
+                    formatSpec = '%f%s%f%f%f%C%f%[^\n\r]';
+                    varnames = {'moves_run_id', 'moves_run_file', 'emis_year','emis_month','species_id','species_name','total_emis_kg'};
+                end
+                
+                % Open the text file.
+                fileID = fopen(filename,'r');
+                
+                % Read columns of data according to the format.
+                % This call is based on the structure of the file used to generate this
+                % code. If an error occurs for a different file, try regenerating the code
+                % from the Import Tool.
+                dataArray = textscan(fileID, formatSpec, endRow(1)-startRow(1)+1, 'Delimiter', delimiter, 'TextType', 'string', 'HeaderLines', startRow(1)-1, 'ReturnOnError', false, 'EndOfLine', '\r\n');
+                for block=2:length(startRow)
+                    frewind(fileID);
+                    dataArrayBlock = textscan(fileID, formatSpec, endRow(block)-startRow(block)+1, 'Delimiter', delimiter, 'TextType', 'string', 'HeaderLines', startRow(block)-1, 'ReturnOnError', false, 'EndOfLine', '\r\n');
+                    for col=1:length(dataArray)
+                        dataArray{col} = [dataArray{col};dataArrayBlock{col}];
+                    end
+                end
+                
+                % Close the text file.
+                fclose(fileID);
+                
+                % Post processing for unimportable data.
+                % No unimportable data rules were applied during the import, so no post
+                % processing code is included. To generate code which works for
+                % unimportable data, select unimportable cells in a file and regenerate the
+                % script.
+                
+                % Create output variable
+                moves_data = table(dataArray{1:end-1}, 'VariableNames', varnames);
+                if ismember('moves_run_file', moves_data.Properties.VariableNames)
+                    county_ids_strs = regexp(moves_data{:, 'moves_run_file'}, '(?<=_)\d+(?=_)', 'match', 'once');
+                    moves_data{:,'county_id'} = str2double(county_ids_strs);
+                    moves_data(:,'moves_run_file')=[];
+                end
+            end
+        end
+        
+        function counties = read_county_shapefile()
+            counties = shaperead(misc_emissions_analysis.county_shape_file);
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1979,6 +2219,11 @@ classdef misc_emissions_analysis
             save(fullfile(misc_emissions_analysis.debugging_dir, 'XTrackFlags.mat'), 'dvec', 'frac_zeros', 'frac_fills', 'frac_gt0');
         end
         
+        function [x,y] = center_and_normalize(varargin)
+            % CENTER_AND_NORMALIZE - Alias to same function in
+            % misc_pecans_lifetime_plots. See docs there.
+            [x,y] = misc_pecans_lifetime_plots.center_and_normalize(varargin{:});
+        end
         %%%%%%%%%%%%%%%%%%%%
         % Plotting methods %
         %%%%%%%%%%%%%%%%%%%%
@@ -2721,11 +2966,48 @@ classdef misc_emissions_analysis
             % Plot lifetimes vs. some measure of NOx mass for each location
             % separately. Parameters:
             %   'loc_inds' - numeric indicies of which locations to
-            %   include.
+            %   include. May also be a cell array of location names.
             %
             %   'mass_value' - character array, either 'a' or 'vcds'.
             %   'a' uses the fitting parameter a, 'vcds' uses the
             %   average summer columns within the box width of the site.
+            %
+            %   'fit_type' - which EMG fitting method to use: 'lu' or
+            %   'convolution'
+            %
+            %   'sat_or_model' - which data to use: 'BEHR' or 'WRF' (must
+            %   be a cell array containing one or both of those).
+            %
+            %   'single_plot' - whether or not to plot all locations on one
+            %   plot (boolean)
+            %
+            %   'single_plot_mode' - how to color the points in the single
+            %   plot: 'Year' or 'HCHO VCD'
+            %
+            %   'norm_tau' - normalize lifetimes to each location's mean
+            %   (boolean)
+            %
+            %   'window_width' - 1 or 3 year windows (number).
+            %
+            %   'years_to_plot' - what years to plot, must be a cell array
+            %   of chars. If using window_width == 1, give the actual
+            %   years. For window_width == 3, give the center years.
+            %
+            %   'days_of_week' - string or cell array of strings giving
+            %   which days to plot out of U, M, T, W, R, F, S.
+            %
+            %   'connect_wkend' - whether or not to draw a line connecting
+            %   weekday/weekend points for the same time period (boolean).
+            %
+            %   'bad_fit_display' - what to do with points whose fits fail
+            %   the quality tests. Options are 'no' (do not display) or
+            %   'grey' (grey out the points).
+            %
+            %   'legend' - which figures to include the legend on. Options
+            %   are 'all', 'none', 'first', 'last'. ('first' and 'last' are
+            %   only valid to 'single_plot' is false.)
+            %
+            %   'title' - include title on each plot. Default is true.
             E = JLLErrors;
             
             p = inputParser;
@@ -2750,10 +3032,11 @@ classdef misc_emissions_analysis
             include_title = pout.title;
             
             loc_inds = pout.loc_inds;
-            if isnan(loc_inds)
+            file_loc_inds = 1:71;
+            if iscell(loc_inds)
+                loc_inds = misc_emissions_analysis.loc_names_to_inds(loc_inds{:});
+            elseif isnan(loc_inds)
                 [loc_inds, file_loc_inds] = misc_emissions_analysis.get_loc_inds_interactive();
-            else
-                file_loc_inds = 1:71;
             end
             
             mass_value = pout.mass_value;
@@ -2764,12 +3047,12 @@ classdef misc_emissions_analysis
                 E.badinput('MASS_VALUE must be one of: %s', strjoin(allowed_mass_vals, ', '));
             end
             
-            window_width = str2double(opt_ask_multichoice('What width of to use (years)?', {'1','3'}, pout.window_width, '"window_width"', 'list', true));
+            window_width = misc_emissions_analysis.get_window_width(pout.window_width);
             if window_width == 1
                 allowed_years = [2005, 2006, 2007, 2008, 2009, 2012, 2013, 2014];
                 years_to_time_per_fxn = @(yrs) cellfun(@str2double, yrs, 'uniform', false);
             elseif window_width == 3
-                allowed_years = [2006, 2007, 2008, 2013];
+                allowed_years = [2006, 2007, 2008, 2010, 2011, 2012, 2013];
                 years_to_time_per_fxn = @(yrs) cellfun(@(x) (str2double(x)-1):(str2double(x)+1), yrs, 'uniform', false);
             else
                 E.notimplemented('Window width not 1')
@@ -3125,84 +3408,207 @@ classdef misc_emissions_analysis
             %     %
         end
         
-        function figs = plot_avg_lifetime_change(varargin)
+        function figs = plot_emis_tau_vcd_trends(varargin)
             p = advInputParser;
-            p.addParameter('plot_quantity', '');
-            p.addParameter('plot_averaging', '');
-            p.addParameter('window_width', []);
-            p.addParameter('remove_decreasing_cities', nan);
+            p.addParameter('domain', 'national');
             p.parse(varargin{:});
             pout = p.Results;
             
+            E = JLLErrors;
+            
+            domain = pout.domain;
+            % need to get median emissions and lifetime
+            window = 3;
+            norm_year = 2006;
+            
+            common_params = {'plot_averaging', 'Median', 'window_width', window, 'remove_decreasing_cities', false,...
+                'always_restrict_to_moves', true, 'no_fig', true};
+            [~,years,behr_emis] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Normalized emissions', common_params{:});
+            [~,~,behr_tau] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Normalized lifetime', common_params{:});
+            %behr_emis = normalize_trend(behr_emis, years);
+            %behr_tau = normalize_trend(behr_tau, years);
+            
+            % now need the MOVES emissions
+            moves_table = misc_emissions_analysis.read_moves_data('domain', domain, 'years', years, 'months', 4:9, 'window_width', window);
+            moves_emis = moves_table{:,'emis'}';
+            moves_emis = normalize_trend(moves_emis, years);
+            
+            % next we need the VCD trends. maybe should add option to
+            % either do the national average or just around the locations
+            % used for the lifetimes.
+            behr_vcds = nan(size(years));
+            for i_yr = 1:numel(years)
+                behr_vcds(i_yr) = avg_national_vcds(years(i_yr), window);
+            end
+            % normalize, like the others
+            behr_vcds = normalize_trend(behr_vcds, years);
+            
+            % finally, let's calculated the expected VCDs from the
+            % emissions and lifetime, since at steady state:
+            %    E = [NO2] * k_loss
+            % => E = [NO2] / tau
+            % => E*tau = [NO2]
+            expected_vcds = moves_emis .* behr_tau;
+            
+            figs = figure;
+            subplot(2,1,1);
+            l = plot(years, moves_emis, 'bo-', years, behr_emis, 'b^--', years, behr_tau, 'rv:');
+            legend(l, {'MOVES emissions', 'BEHR-derived emis', 'BEHR-derived \tau'});
+            
+            subplot(2,1,2);
+            l2 = plot(years, behr_vcds, 'ko-', years, expected_vcds, 'mh--', years, moves_emis, 'bo:');
+            legend(l2, {'BEHR VCDs', 'Expected VCDs', 'Without lifetime'});
+            
+            function vcds = avg_national_vcds(year, window)
+                if mod(window,2) ~= 1
+                    E.notimplemented('Even number of years in window')
+                end
+                width = (window-1)/2;
+                all_years = (year-width):(year+width);
+                v_loaded = misc_emissions_analysis.load_vcds_for_years(all_years, 'TWRF');
+                vcds = nanmean(v_loaded.daily_vcds(:));
+            end
+            
+            function vals = normalize_trend(vals, years)
+                %xx = years == norm_year;
+                %vals = vals ./ vals(xx);
+                vals = vals ./ nanmean(vals);
+            end
+        end
+        
+        function [figs, x_vals, y, yerr] = plot_avg_lifetime_change(varargin)
+            E = JLLErrors;
+            
+            p = advInputParser;
+            p.addParameter('plot_quantity', '');
+            p.addParameter('normalize', nan);
+            p.addParameter('plot_averaging', '');
+            p.addParameter('window_width', []);
+            p.addParameter('remove_decreasing_cities', nan);
+            p.addParameter('always_restrict_to_moves', nan);
+            p.addParameter('no_fig', false);
+            p.addParameter('allow_missing_vcds', true);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            do_plot_fig = ~pout.no_fig;
+            allow_missing_vcds = pout.allow_missing_vcds;
+            
             % options for the quantity to plot
             pqopts.lifetime = 'Lifetime';
-            pqopts.normlife = 'Normalized lifetime';
             pqopts.wkend_wkday_ratio = 'Weekend/weekday lifetime';
             pqopts.wkend_wkday_diff = 'Weekend - weekday lifetime';
+            pqopts.emissions = 'Emissions';
+            pqopts.moves = 'MOVES';
+            pqopts.vcds = 'VCDs';
+            pqopts.expected_vcds = 'Expected VCDs';
+            
+            needs_moves = {pqopts.moves, pqopts.expected_vcds};
             
             plot_quantity = opt_ask_multichoice('Which quantity to plot?', struct2cell(pqopts), pout.plot_quantity, '"plot_quantity"', 'list', true);
+            do_normalize = opt_ask_yn('Normalize each location''s value to its average?', pout.normalize', '"normalize"');
             
             % options for the averaging
             avgopts.none = 'None';
             avgopts.avg = 'Average';
+            avgopts.median = 'Median';
             avgopts.vcdwt = 'VCD weighted avg.';
             avgopts.box = 'Boxplot';
             
             plot_averaging = opt_ask_multichoice('What averaging to use?', struct2cell(avgopts), pout.plot_averaging, '"plot_averaging"', 'list', true);
             
-            window_width = opt_ask_number('What width of window to use (in years): 1 or 3?', pout.window_width, '"window_width"', 'testfxn', @(x) isscalar(x) && (x==1 || x==3), 'testmsg', 'Must be 1 or 3');
-            remove_decreasing_cities = opt_ask_yn('Remove cities that only decrease?', pout.remove_decreasing_cities', '"remove_decreasing_cities"');
+            window_width = misc_emissions_analysis.get_window_width(pout.window_width);
+            remove_decreasing_cities = opt_ask_yn('Remove cities that only decrease?', pout.remove_decreasing_cities, '"remove_decreasing_cities"');
+            restrict_to_moves = opt_ask_yn('Only keep cities with MOVES data?', pout.always_restrict_to_moves, '"always_restrict_to_moves"');
+            
             if window_width == 1
                 years = {2005 2006 2007 2008 2009 2012 2013 2014};
                 x_vals = cell2mat(years);
             elseif window_width == 3
-                years = {2005:2007, 2006:2008, 2007:2009, 2012:2014};
-                x_vals = [2006, 2007, 2008, 2013];
+                years = {2005:2007, 2006:2008, 2007:2009, 2009:2011, 2010:2012, 2011:2013, 2012:2014};
+                x_vals = [2006, 2007, 2008, 2010, 2011, 2012, 2013];
             end
             
             n_years = numel(years);
+            
+            
             for i_yr = 1:n_years
+                % We'll need the fits in all cases to filter out
+                % locations/times with bad fits
                 [sdates, edates] = misc_emissions_analysis.select_start_end_dates(years{i_yr});
                 fprintf('Loading %d\n', x_vals(i_yr));
                 year_week_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'TWRF', 'lu'));
                 year_weekend_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'US', 'lu'));
                 xx = misc_emissions_analysis.loc_types_to_inds('Cities');
-                week_locs = year_week_fits.locs(xx);
-                weekend_locs = year_weekend_fits.locs(xx);
+                week_locs = misc_emissions_analysis.append_new_spreadsheet_fields(year_week_fits.locs(xx));
+                weekend_locs = misc_emissions_analysis.append_new_spreadsheet_fields(year_weekend_fits.locs(xx));
+                
+                if restrict_to_moves || ismember(plot_quantity, needs_moves)
+                    week_locs = remove_locs_missing_county(week_locs);
+                    weekend_locs = remove_locs_missing_county(weekend_locs);
+                end
+                
                 if i_yr == 1
-                    week_taus = nan(numel(week_locs), n_years);
-                    weekend_taus = nan(numel(week_locs), n_years);
+                    week_vals = nan(numel(week_locs), n_years);
+                    weekend_vals = nan(numel(week_locs), n_years);
                     names = {week_locs.ShortName};
+                    
+                    % Load the VCDs once we have the lists of locations to
+                    % read them in for. This subfunction loads all years so
+                    % only need to do it once.
+                    week_vcds = load_vcds(week_locs, 'TWRF');
+                    weekend_vcds = load_vcds(weekend_locs, 'US');
                 end
                 clear year_fits
                 
                 for i_loc = 1:numel(week_locs)
-                    this_week_tau = week_locs(i_loc).emis_tau.tau;
-                    this_weekend_tau = weekend_locs(i_loc).emis_tau.tau;
-                    if ~isempty(this_week_tau)
-                        week_taus(i_loc,i_yr) = this_week_tau;
+                    if strcmpi(plot_quantity, pqopts.emissions)
+                        this_week_val = week_locs(i_loc).emis_tau.emis;
+                        this_weekend_val = weekend_locs(i_loc).emis_tau.emis;
+                    elseif strcmpi(plot_quantity, pqopts.moves)
+                        this_week_val = get_moves_for_loc_and_year(week_locs(i_loc), years{i_yr});
+                        % MOVES doesn't have separate weekend values
+                        this_weekend_val = NaN;
+                    elseif strcmpi(plot_quantity, pqopts.vcds)
+                        this_week_val = week_vcds(i_loc, i_yr);
+                        this_weekend_val = weekend_vcds(i_loc, i_yr);
+                    elseif strcmpi(plot_quantity, pqopts.expected_vcds)
+                        moves_emis = get_moves_for_loc_and_year(week_locs(i_loc), years{i_yr});
+                        behr_tau = week_locs(i_loc).emis_tau.tau;
+                        this_week_val = moves_emis .* behr_tau;
+                        % MOVES doesn't have separate weekend values
+                        this_weekend_val = NaN;
+                    else
+                        this_week_val = week_locs(i_loc).emis_tau.tau;
+                        this_weekend_val = weekend_locs(i_loc).emis_tau.tau;
                     end
-                    if ~isempty(this_weekend_tau)
-                        weekend_taus(i_loc,i_yr) = this_weekend_tau;
+                    
+                    % Only add the value for this location/year if the fit
+                    % worked (so the value is not empty)
+                    if ~isempty(this_week_val)
+                        week_vals(i_loc,i_yr) = this_week_val;
+                    end
+                    if ~isempty(this_weekend_val)
+                        weekend_vals(i_loc,i_yr) = this_weekend_val;
                     end
                 end
                 good_week_fits = misc_emissions_analysis.is_fit_good_by_loc(week_locs, 'DEBUG_LEVEL', 0);
-                week_taus(~good_week_fits,i_yr) = nan;
+                week_vals(~good_week_fits,i_yr) = nan;
                 good_weekend_fits = misc_emissions_analysis.is_fit_good_by_loc(weekend_locs, 'DEBUG_LEVEL', 0);
-                weekend_taus(~good_weekend_fits,i_yr) = nan;
+                weekend_vals(~good_weekend_fits,i_yr) = nan;
             end
             
-            good_for_trends = sum(~isnan(week_taus),2) >= size(week_taus,2);% - 1;
+            good_for_trends = sum(~isnan(week_vals),2) >= size(week_vals,2) - 1;
             if remove_decreasing_cities
-                good_for_trends = good_for_trends & ~all(diff(week_taus, 1, 2) < 0, 2);
+                good_for_trends = good_for_trends & ~all(diff(week_vals, 1, 2) < 0, 2);
             end
 %             if any(strcmpi(plot_mode, {'wkday/wkend', 'avg wkday/wkend'}))
 %                 good_for_trends = good_for_trends & sum(~isnan(weekend_taus),2) >= size(weekend_taus,2) - 1;
 %                 
 %             end
-            week_taus = week_taus(good_for_trends, :);
+            week_vals = week_vals(good_for_trends, :);
             week_locs = week_locs(good_for_trends);
-            weekend_taus = weekend_taus(good_for_trends, :);
+            weekend_vals = weekend_vals(good_for_trends, :);
             names = names(good_for_trends);
             
             plotting_fxn = @(x,y,style) plot(x,y,style);
@@ -3212,48 +3618,107 @@ classdef misc_emissions_analysis
             add_legend = false;
             
             switch plot_quantity
-                case pqopts.lifetime
-                    y = week_taus;
-                case pqopts.normlife
-                    y = normalize_tau(week_taus);
                 case pqopts.wkend_wkday_ratio
-                    y = weekend_taus ./ week_taus;
+                    y = weekend_vals ./ week_vals;
                 case pqopts.wkend_wkday_diff
-                    y = weekend_taus - week_taus;
+                    y = weekend_vals - week_vals;
+                otherwise
+                    y = week_vals;
+            end
+            
+            if do_normalize
+                y = normalize_y(y);
             end
             
             switch plot_averaging
                 case avgopts.none
-                    lstyle = 'o-';
+                    lstyle = {'marker', 'o', 'linestyle', '-', 'linewidth', 2, 'markersize', 6};
                     add_legend = true;
+                    plotting_fxn = @plot_ensemble;
                 case avgopts.avg
                     yerr = nanstd(y, 0, 1);
                     y = nanmean(y, 1);
                     lstyle = 'o';
+                case avgopts.median
+                    yerr = quantile(y,[0.25 0.75],1);
+                    y = nanmedian(y,1);
+                    lstyle = 'o';
                 case avgopts.vcdwt
-                    vcds = nan(numel(week_locs), n_years);
-                    for i_yr = 1:n_years
-                        vcds(:,i_yr) = misc_emissions_analysis.avg_vcds_around_loc(week_locs, years{i_yr}, 'TWRF');
-                    end
-                    [y, yerr] = weighted_mean(y, vcds, 1);
+                    [y, yerr] = weighted_mean(y, week_vcds, 1);
                     lstyle = 'bo';
                 case avgopts.box
                     plotting_fxn = box_plotting_fxn;
             end
             
-            
-            figs = figure;
-            plotting_fxn(x_vals, y, lstyle);
-            if ~isempty(yerr)
-                scatter_errorbars(x_vals, y, yerr);
+            if do_plot_fig
+                figs = figure;
+                plotting_fxn(x_vals, y, lstyle);
+                if ~isempty(yerr)
+                    if size(yerr,1) == 1
+                        scatter_errorbars(x_vals, y, yerr);
+                    else
+                        % scatter_errorbars assumes that the errors are
+                        % differences from the y value, so we need to convert
+                        % them to such here.
+                        scatter_errorbars(x_vals, y, abs(yerr(1,:) - y), abs(yerr(2,:) - y));
+                    end
+                end
+                if add_legend
+                    legend(names{:}, 'location', 'eastoutside')
+                end
+                ylabel(plot_quantity)
+            else
+                figs = gobjects(0);
             end
-            if add_legend
-                legend(names{:})
-            end
             
-            function ynorm = normalize_tau(taus)
+            function ynorm = normalize_y(taus)
+                % Find the average for each location across all years, then
+                % normalize each location to its own average.
                 ybar = repmat(nanmean(taus,2), 1, n_years);
                 ynorm = taus ./ ybar;
+            end
+            
+            function vcds = load_vcds(locs, days_of_week)
+                vcds = nan(numel(locs), n_years);
+                for i_yr_inner = 1:n_years
+                    vcds(:,i_yr_inner) = misc_emissions_analysis.avg_vcds_around_loc(locs, years{i_yr_inner}, days_of_week, 'ignore_missing_files', allow_missing_vcds);
+                end
+            end
+            
+            function plot_ensemble(x, y, style)
+                n = size(y,1);
+                    
+                for i=1:n
+                    if isvector(x)
+                        x_plot = x;
+                    else
+                        x_plot = x(i,:);
+                    end
+                    
+                    color = map2colmap(i,1,n,'jet');
+                    line(x_plot,y(i,:),'color',color,style{:});
+                end
+            end
+            
+            function locs = remove_locs_missing_county(locs)
+                xx_loc = true(size(locs));
+                for i=1:numel(locs)
+                    xx_loc(i) = ~isnan(locs(i).CoreCountyID);
+                end
+                locs = locs(xx_loc);
+            end
+            
+            function moves = get_moves_for_loc_and_year(loc, yr)
+                if window_width == 3
+                    yr = yr(2);
+                end
+                moves_table = misc_emissions_analysis.read_moves_data(...
+                    'locations', loc, 'window_width', window_width, 'years', yr, 'months', 4:9);
+                if size(moves_table,1) ~= 1
+                    E.notimplemented('Getting multiple years of MOVES at once')
+                else
+                    moves = moves_table{1,'emis'};
+                end
             end
         end
         
@@ -3904,9 +4369,57 @@ classdef misc_emissions_analysis
                 end
             end
         end
+        
+        function figs = plot_counties_around_loc(varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', []);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = pout.loc_inds;
+            if isempty(loc_inds)
+                loc_inds = misc_emissions_analysis.get_loc_inds_interactive();
+            end
+            
+            locs = misc_emissions_analysis.read_locs_file();
+            locs = locs(loc_inds);
+            figs = gobjects(size(locs));
+            
+            counties = misc_emissions_analysis.read_county_shapefile();
+            
+            for i_loc = 1:numel(locs)
+                this_loc = locs(i_loc);
+                loc_radius = max(locs.BoxSize(3:4));
+                % Find all counties whose bounding box center is close to
+                % the location
+                xx_county = false(size(counties));
+                for i_county = 1:numel(counties)
+                    bb_center = nanmean(counties(i_county).BoundingBox, 1);
+                    r = sqrt(sum((bb_center - [this_loc.Longitude, this_loc.Latitude]).^2));
+                    xx_county(i_county) = r <= loc_radius*2;
+                end
+                
+                figs(i_loc) = figure;
+                line(this_loc.Longitude, this_loc.Latitude, 'linestyle', 'none', 'marker', 'x', 'markersize',16,'linewidth',2,'color','r');
+                draw_circle(this_loc.Longitude, this_loc.Latitude, loc_radius, 'color', 'r');
+                c_inds = find(xx_county);
+                for i_county = 1:numel(c_inds)
+                    this_county = counties(c_inds(i_county));
+                    line(this_county.X, this_county.Y, 'color','k');
+                    bb_center = nanmean(this_county.BoundingBox, 1);
+                    text(bb_center(1), bb_center(2), this_county.NAME);
+                end
+                state_outlines('m');
+                title(this_loc.ShortName);
+            end
+        end
     end
     
     methods(Static = true, Access = private)
+        function width = get_window_width(width_in)
+            width = opt_ask_number('What width of window to use (in years): 1 or 3?', width_in, '"window_width"', 'testfxn', @(x) isscalar(x) && (x==1 || x==3), 'testmsg', 'Must be 1 or 3');
+        end
+        
         function [bool, years_list] = is_year_valid(years_in)
             bool = all(years_in == 2005 | (years_in >= 2007 & years_in <= 2009) | (years_in >= 2012 & years_in <= 2014));
             years_list = '2005, 2007-09, 2012-14';
@@ -3967,12 +4480,14 @@ classdef misc_emissions_analysis
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
             p.addParameter('species', 'no2');
+            p.addParameter('ignore_missing_files', false);
             
             p.parse(varargin{:});
             pout = p.Results;
             
             avg_radius = pout.radius;
             vcd_species = pout.species;
+            ignore_missing_files = pout.ignore_missing_files;
             
             if ischar(avg_radius)
                 if strcmpi(avg_radius, 'by_loc')
@@ -3999,7 +4514,7 @@ classdef misc_emissions_analysis
             
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species);
+            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species, 'ignore_missing_files', ignore_missing_files);
             lon = vcds.lon;
             lat = vcds.lat;
             lon_res = mean(diff(lon(1,:)));
@@ -4424,6 +4939,7 @@ classdef misc_emissions_analysis
             % time a particular step was run, this will ensure those values
             % are includes in the locations structure given as input.
             spreadsheet_locs = misc_emissions_analysis.read_locs_file();
+            spreadsheet_locs = misc_emissions_analysis.match_locs_structs(spreadsheet_locs, locs);
             locs = copy_structure_fields(spreadsheet_locs, locs, 'missing');
         end
         

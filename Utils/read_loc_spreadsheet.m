@@ -55,7 +55,8 @@ for a=1:numel(sheets)
     raw(:,end+1) = repmat({sheets{a}},size(raw,1),1);
     
     these_locs = cell2struct(raw,header,2);
-    locs = cat(1, locs, these_locs);
+    tmp_locs = cat(1, locs, these_locs);
+    locs = tmp_locs;
 end
 
 end

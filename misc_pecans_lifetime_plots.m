@@ -27,19 +27,57 @@ classdef misc_pecans_lifetime_plots
             behr_loc = behr_data.locs(9); % use Chicago
             
             % Do need to transform PECANS x from meters to kilometers
-            [pecans_x, pecans_ld] = center_and_normalize(pecans_data.x, pecans_data.A);
-            [behr_x, behr_ld] = center_and_normalize(behr_loc.no2_sectors.x, behr_loc.no2_sectors.linedens);
+            [pecans_x, pecans_ld] = misc_pecans_lifetime_plots.center_and_normalize(pecans_data.x, pecans_data.A);
+            [behr_x, behr_ld] = misc_pecans_lifetime_plots.center_and_normalize(behr_loc.no2_sectors.x, behr_loc.no2_sectors.linedens);
             
             figure; plot(behr_x, behr_ld, 'b', pecans_x, pecans_ld, 'r');
             legend(sprintf('BEHR (%s)', behr_loc.ShortName), 'PECANS (\tau = 3h)');
             set(gca,'fontsize',16);
             
-            function [x, y] = center_and_normalize(x, y)
-                [~,m] = max(y);
-                x = x - x(m);
-                y = scale_to_range(y, [0 1]);
-            end
         end
+        
+        function [x, y] = center_and_normalize(x, y, varargin)
+                % CENTER_AND_NORMALIZE Centers line densities on 0 and normalizes
+                %
+                %   [X, Y] = CENTER_AND_NORMALIZE(X, Y) Centers the line
+                %   density define on coordinates X with values Y so that
+                %   the max is at 0 and the values range from 0 to 1.
+                %
+                %   Parameters:
+                %
+                %       'norm' - changes normalization mode. Default is
+                %       "squeeze", which compresses to the range 0 to 1.
+                %       Other options:
+                %           * 'max' - slides the line densities so that the
+                %           max is at 0.
+                %           * 'min' - slides the line densities so that the
+                %           min is at 0.
+                p = advInputParser;
+                p.addParameter('norm', 'squeeze')
+                p.parse(varargin{:});
+                pout = p.Results;
+                
+                E = JLLErrors;
+                
+                norm_mode = pout.norm;
+                allowed_norm_modes = {'squeeze', 'max', 'min'};
+                if ~ismember(norm_mode, allowed_norm_modes)
+                    E.badinput('"norm" must be one of "%s"', strjoin(allowed_norm_modes, '", "'));
+                end
+                
+                [maxy,m] = max(y);
+                x = x - x(m);
+                switch lower(norm_mode)
+                    case 'squeeze'
+                        y = scale_to_range(y, [0 1]);
+                    case 'max'
+                        y = y - maxy;
+                    case 'min'
+                        y = y - min(y);
+                    otherwise
+                        E.notimplemented('No method defined for norm_mode = %s', norm_mode)
+                end
+            end
         
         function plot_each_pecans_fit()
             taus = 1:9;
