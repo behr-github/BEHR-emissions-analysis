@@ -98,6 +98,13 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
+        function filename = wrf_data_file_name(start_date, end_date)
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            filename = sprintf('site_wrf_data_%sto%s.mat', datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'));
+            filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
+        end
+        
         function filename = line_density_file_name(start_date, end_date, by_sectors, wind_reject_filtered, wind_dir_weighted, use_wrf, winds_op, winds_cutoff, loc_inds, days_of_week)
             if by_sectors
                 sectors_string = 'sectors';
@@ -1530,6 +1537,136 @@ classdef misc_emissions_analysis
                         locs(i_loc).WindUsedBool(i_date, i_orbit) = any(Data(i_orbit).Areaweight(xx_pixels_used) > 0);
                     end
                 end
+            end
+        end
+        
+        function make_location_wrf_avgs_file(time_periods, overwrite)
+            E = JLLErrors;
+            wrf_vars = {'ndens', 'temperature', 'ho', 'LNOXHNO3', 'LNOXA'};
+
+            if ~exist('overwrite', 'var')
+                overwrite = -1;
+            end
+            
+            base_locs = misc_emissions_analysis.read_locs_file();
+            base_locs_names = {base_locs.ShortName};
+            
+            n_files_per_day = 6; % should match the assumed number for the winds files
+            n_vars = numel(wrf_vars);
+            n_locs = numel(base_locs);
+            n_times = numel(time_periods);
+            
+            winds_data = cell(n_times,1);
+            first_year = nan;
+            last_year = nan;
+            for i_time = 1:n_times
+                first_year = min(veccat(first_year, time_periods{i_time}));
+                last_year = max(veccat(last_year, time_periods{i_time}));
+                [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_periods{i_time});
+                winds_data{i_time} = load(misc_emissions_analysis.winds_file_name(start_date, end_date));
+                
+                % Double check that the winds structs match the base locs
+                tmp_locs = winds_data{i_time}.locs;
+                loc_names = {tmp_locs.ShortName};
+                if ~isequal(loc_names, base_locs_names)
+                    E.notimplemented('Winds locs different from base locs')
+                end
+                
+                % Append a substructure to put the WRF data into. Have one
+                % value per day, we'll average together whichever hours are
+                % used.
+                
+                data_struct = make_empty_struct_from_cell(wrf_vars, nan(size(tmp_locs.WindUsedBool,1),1));
+                tmp_locs.WRFData = data_struct;
+                winds_data{i_time}.locs = tmp_locs;
+                
+                winds_data{i_time}.savename = misc_emissions_analysis.wrf_data_file_name(start_date, end_date);
+            end
+            
+            [total_starts, total_ends] = misc_emissions_analysis.select_start_end_dates([first_year, last_year]);
+            total_dvec = make_datevec(total_starts, total_ends);
+            
+            last_month = nan;
+            last_year = nan;
+            for d=1:numel(total_dvec)
+                this_date = total_dvec(d);
+                fprintf('Now on %s (%d of %d)\n', datestr(this_date), d, numel(total_dvec));
+                % We need to pick the WRF file closest in time to the OMI
+                % overpass, so we will load the BEHR file for this day and
+                % calculate which WRF file is closest in time to that
+                % swath, then calculate wind speed and direction for each
+                % file. Later, we will actually pick the swath-specific
+                % wind direction for each rotation.
+                
+                % If we're in the same month as the last time through this
+                % loop, the closest_wrf method doesn't need to get the
+                % directory listing of the WRF directory again (because it
+                % should be organized by month and year).
+                fprintf('%s: Gathering WRF files\n', datestr(total_dvec(d)));
+                try
+                    if month(total_dvec(d)) == last_month && year(total_dvec(d)) == last_year
+                        fprintf('     Using existing list of WRF files\n');
+                        wrf_files = misc_emissions_analysis.closest_wrf_file_in_time(total_dvec(d), all_months_wrf_files);
+                    else
+                        fprintf('     New month: need to get the directory listing\n');
+                        [wrf_files, all_months_wrf_files] = misc_emissions_analysis.closest_wrf_file_in_time(total_dvec(d));
+                        last_month = month(total_dvec(d));
+                        last_year = year(total_dvec(d));
+                    end
+                catch err
+                    if strcmp(err.identifier, 'MATLAB:load:couldNotReadFile')
+                        fprintf('Cannot load file for %s, skipping\n', datestr(total_dvec(d)));
+                        continue
+                    else
+                        rethrow(err)
+                    end
+                end
+                
+                data_for_today = nan(n_files_per_day, n_vars, n_locs);
+                
+                for i_file=1:numel(wrf_files)
+                    % Load the bottom five layers of each variable in turn,
+                    % average it to the cities radii, then for each time
+                    % period, figure out if this date is in it, if so, get
+                    % the data for the right time for that city, and store
+                    % it.
+                    wrf_lon = ncread(wrf_files{i_file}, 'XLONG');
+                    wrf_lat = ncread(wrf_files{i_file}, 'XLAT');
+                    for i_var = 1:numel(wrf_vars)
+                        fprintf('    Loading %s\n', wrf_vars{i_var});
+                        wrf_value = read_wrf_preproc(wrf_files{i_file}, wrf_vars{i_var}, [1 1 1 1], [Inf Inf 5 Inf]);
+                        wrf_value = nanmean(wrf_value, 3);
+                        for i_loc = 1:n_locs
+                            xx = misc_emissions_analysis.find_indices_in_radius_around_loc(base_locs(i_loc), wrf_lon, wrf_lat);
+                            data_for_today(i_file, i_var, i_loc) = nanmean(wrf_value(xx));
+                        end
+                    end
+                end
+                
+                fprintf('Average to locations...\n');
+                for i_time = 1:n_times
+                    xx_date = winds_data{i_time}.dvec == this_date;
+                    if sum(xx_date) < 0
+                        fprintf('  %s not in time period %d\n', datestr(this_date), i_time);
+                        continue
+                    elseif sum(xx_date) > 1
+                        E.notimplemented('Date matched multiple dates in location file')
+                    end
+                    
+                    for i_loc=1:n_locs
+                        xx_hours = winds_data{i_time}.locs(i_loc).WindUsedBool(xx_date, :);
+                        for i_var=1:n_vars
+                            loc_var_value = nanmean(data_for_today(xx_hours, i_var, i_loc));
+                            winds_data{i_time}.locs(i_loc).WRFData.(wrf_vars{i_var})(xx_date) = loc_var_value;
+                        end
+                    end
+                end
+            end
+            
+            for i_time=1:n_times
+                savename = winds_data{i_time}.savename;
+                savedata = rmfield(winds_data{i_time}, 'savename');
+                save(savename, '-v7.3', '-struct', 'savedata' );
             end
         end
         
@@ -2991,39 +3128,30 @@ classdef misc_emissions_analysis
                 year_window = (years(i_yr)-1):(years(i_yr)+1);
                 [changes, loc_names] = misc_emissions_analysis.collect_changes(year_window, year_window, 'TWRF', 'US', 'loc_inds', loc_inds, 'include_vcds', false, 'fit_type', 'lu');
                 
+                
                 perdiff_locs = (reldiff(changes.tau(:,2), changes.tau(:,1))*100)';
                 sig_locs = changes.is_significant';
+                bad_fits = any(~changes.is_fit_good,2)';
+                perdiff_locs(bad_fits) = nan;
                 
                 percent_diff_tau(i_yr, sig_locs) = perdiff_locs(sig_locs);
                 insignificant_percent_diff_tau(i_yr, ~sig_locs) = perdiff_locs(~sig_locs);
             end
             
-            loc_colors = cell(1,n_locs);
-            for i=1:n_locs
-                loc_colors{i} = map2colmap(i,1,n_locs+1,'jet');
-            end
-            
-            sig_group_fmt = struct('marker', 'o', 'markersize', 10, 'linewidth', 2, 'color', loc_colors);
-            insig_group_fmt = struct('marker', 'x', 'markersize', 10, 'linewidth', 2, 'color', loc_colors);
-            
             fig = figure;
-            scatter_grouped(percent_diff_tau, 'group_fmt', sig_group_fmt, 'width', 0.125)
+            sig_ch = bar(percent_diff_tau);
             hold on
-            scatter_grouped(insignificant_percent_diff_tau, 'group_fmt', insig_group_fmt, 'width', 0.125)
-            
-            % Add fake lines for the legend
-            l = gobjects(numel(sig_group_fmt)+2,1);
-            for i_loc = 1:n_locs
-                l(i_loc) = line(nan, nan, sig_group_fmt(i_loc));
+            insig_ch = bar(insignificant_percent_diff_tau);
+            common_fmt = {'linewidth', 2};
+            for i_ch = 1:numel(sig_ch)
+                insig_ch(i_ch).FaceColor = sig_ch(i_ch).FaceColor;
+                set(sig_ch(i_ch), common_fmt{:}, 'linestyle', '-');
+                set(insig_ch(i_ch), common_fmt{:}, 'linestyle', ':');
             end
-            % Plot significant and not significant, but override the color
-            l(end-1) = line(nan, nan, sig_group_fmt(1), 'color', 'k');
-            l(end) = line(nan, nan, insig_group_fmt(1), 'color', 'k');
-            leg_str = veccat(loc_names, {'Significant', 'Insignificant'});
             
             set(gca,'fontsize',12,'xticklabel',years);
             ylabel('%\Delta \tau (weekend vs weekday)');
-            legend(l, leg_str, 'location', 'EastOutside');
+            legend(sig_ch, loc_names, 'location', 'EastOutside');
             
         end
         
