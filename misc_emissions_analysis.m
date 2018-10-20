@@ -653,6 +653,15 @@ classdef misc_emissions_analysis
                 'testfxn', @(x) all(x >= min_ind & x <= max_ind), 'testmsg', sprintf('All values must be between %d and %d', min_ind, max_ind));
         end
         
+        function [loc_inds, file_loc_inds] = convert_input_loc_inds(loc_inds)
+            file_loc_inds = 1:71;
+            if iscell(loc_inds)
+                loc_inds = misc_emissions_analysis.loc_names_to_inds(loc_inds{:});
+            elseif isnan(loc_inds)
+                [loc_inds, file_loc_inds] = misc_emissions_analysis.get_loc_inds_interactive();
+            end
+        end
+        
         function fit_type_in = get_fit_type_interactive(varargin)
             if nargin > 0
                 fit_type_in = varargin{1};
@@ -743,12 +752,14 @@ classdef misc_emissions_analysis
                 end
             end
             
+            changes.is_significant = misc_emissions_analysis.is_change_significant(changes.tau, changes.tau_sd, changes.n_dofs);
+            
             if include_vcds
                 changes.vcds = default_mat;
                 changes.hcho_vcds = default_mat;
                 if ~use_wrf
-                    changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius);
-                    changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius);
+                    changes.vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius, 'ignore_missing_files', true);
+                    changes.vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius, 'ignore_missing_files', true);
 %                     changes.hcho_vcds(:,1) = misc_emissions_analysis.avg_vcds_around_loc(first_locs.locs, first_time_period, first_weekdays, 'radius', avg_radius, 'species', 'hcho');
 %                     changes.hcho_vcds(:,2) = misc_emissions_analysis.avg_vcds_around_loc(second_locs.locs, second_time_period, second_weekdays, 'radius', avg_radius, 'species', 'hcho');
                 else
@@ -2962,6 +2973,60 @@ classdef misc_emissions_analysis
             set(gca,'fontsize',16);
         end
         
+        function fig = plot_weekend_weekday_tau_perdiff(varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', nan);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            n_locs = numel(loc_inds);
+            
+            years = 2006:2013;
+            n_yrs = numel(years);
+            percent_diff_tau = nan(n_yrs, n_locs);
+            insignificant_percent_diff_tau = nan(n_yrs, n_locs);
+            
+            for i_yr = 1:n_yrs
+                year_window = (years(i_yr)-1):(years(i_yr)+1);
+                [changes, loc_names] = misc_emissions_analysis.collect_changes(year_window, year_window, 'TWRF', 'US', 'loc_inds', loc_inds, 'include_vcds', false, 'fit_type', 'lu');
+                
+                perdiff_locs = (reldiff(changes.tau(:,2), changes.tau(:,1))*100)';
+                sig_locs = changes.is_significant';
+                
+                percent_diff_tau(i_yr, sig_locs) = perdiff_locs(sig_locs);
+                insignificant_percent_diff_tau(i_yr, ~sig_locs) = perdiff_locs(~sig_locs);
+            end
+            
+            loc_colors = cell(1,n_locs);
+            for i=1:n_locs
+                loc_colors{i} = map2colmap(i,1,n_locs+1,'jet');
+            end
+            
+            sig_group_fmt = struct('marker', 'o', 'markersize', 10, 'linewidth', 2, 'color', loc_colors);
+            insig_group_fmt = struct('marker', 'x', 'markersize', 10, 'linewidth', 2, 'color', loc_colors);
+            
+            fig = figure;
+            scatter_grouped(percent_diff_tau, 'group_fmt', sig_group_fmt, 'width', 0.125)
+            hold on
+            scatter_grouped(insignificant_percent_diff_tau, 'group_fmt', insig_group_fmt, 'width', 0.125)
+            
+            % Add fake lines for the legend
+            l = gobjects(numel(sig_group_fmt)+2,1);
+            for i_loc = 1:n_locs
+                l(i_loc) = line(nan, nan, sig_group_fmt(i_loc));
+            end
+            % Plot significant and not significant, but override the color
+            l(end-1) = line(nan, nan, sig_group_fmt(1), 'color', 'k');
+            l(end) = line(nan, nan, insig_group_fmt(1), 'color', 'k');
+            leg_str = veccat(loc_names, {'Significant', 'Insignificant'});
+            
+            set(gca,'fontsize',12,'xticklabel',years);
+            ylabel('%\Delta \tau (weekend vs weekday)');
+            legend(l, leg_str, 'location', 'EastOutside');
+            
+        end
+        
         function figs = plot_lifetime_vs_mass(varargin)
             % Plot lifetimes vs. some measure of NOx mass for each location
             % separately. Parameters:
@@ -3267,7 +3332,7 @@ classdef misc_emissions_analysis
 
                 
                 changes = misc_emissions_analysis.collect_changes(time_period_1, time_period_2, days_of_week_1, days_of_week_2, 'loc_inds', loc_inds, 'file_loc_inds', load_loc_inds, 'use_wrf', load_wrf, 'include_vcds', vcds_bool, 'fit_type', fit_type);
-                changes.is_significant = misc_emissions_analysis.is_change_significant(changes.tau, changes.tau_sd, changes.n_dofs);
+                %changes.is_significant = misc_emissions_analysis.is_change_significant(changes.tau, changes.tau_sd, changes.n_dofs);
                 changes.style = struct('marker', {dow_markers.(days_of_week_1).marker, dow_markers.(days_of_week_2).marker},...
                     'linestyle', 'none', 'color', {time_period_colors.(tp1_field).color, time_period_colors.(tp2_field).color},...
                     'markersize',marker_size,'linewidth',marker_linewidth,'markerfacecolor',marker_fills);
@@ -3408,72 +3473,57 @@ classdef misc_emissions_analysis
             %     %
         end
         
-        function figs = plot_emis_tau_vcd_trends(varargin)
-            p = advInputParser;
-            p.addParameter('domain', 'national');
-            p.parse(varargin{:});
-            pout = p.Results;
+        function figs = plot_emis_tau_vcd_trend_boxplots(varargin)
+            %p = advInputParser;
+            %p.parse(varargin{:});
+            %pout = p.Results;
             
             E = JLLErrors;
             
-            domain = pout.domain;
             % need to get median emissions and lifetime
             window = 3;
-            norm_year = 2006;
             
-            common_params = {'plot_averaging', 'Median', 'window_width', window, 'remove_decreasing_cities', false,...
+            common_params = {'plot_averaging', 'VCD weighted avg.', 'normalize', true, 'window_width', window, 'remove_decreasing_cities', false,...
                 'always_restrict_to_moves', true, 'no_fig', true};
-            [~,years,behr_emis] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Normalized emissions', common_params{:});
-            [~,~,behr_tau] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Normalized lifetime', common_params{:});
-            %behr_emis = normalize_trend(behr_emis, years);
-            %behr_tau = normalize_trend(behr_tau, years);
+            [~,years,behr_emis,behr_emis_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Emissions', common_params{:});
+            [~,~,moves_emis,moves_emis_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'MOVES', common_params{:});
+            [~,~,behr_tau,behr_tau_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Lifetime', common_params{:});
+            [~,~,behr_vcds,behr_vcds_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'VCDs', common_params{:});
+            [~,~,expected_vcds,expected_vcds_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Expected VCDs', common_params{:});
+        end
+        
+        function figs = plot_emis_tau_vcd_trends(varargin)
+            %p = advInputParser;
+            %p.parse(varargin{:});
+            %pout = p.Results;
             
-            % now need the MOVES emissions
-            moves_table = misc_emissions_analysis.read_moves_data('domain', domain, 'years', years, 'months', 4:9, 'window_width', window);
-            moves_emis = moves_table{:,'emis'}';
-            moves_emis = normalize_trend(moves_emis, years);
+            E = JLLErrors;
             
-            % next we need the VCD trends. maybe should add option to
-            % either do the national average or just around the locations
-            % used for the lifetimes.
-            behr_vcds = nan(size(years));
-            for i_yr = 1:numel(years)
-                behr_vcds(i_yr) = avg_national_vcds(years(i_yr), window);
-            end
-            % normalize, like the others
-            behr_vcds = normalize_trend(behr_vcds, years);
+            % need to get median emissions and lifetime
+            window = 3;
             
-            % finally, let's calculated the expected VCDs from the
-            % emissions and lifetime, since at steady state:
-            %    E = [NO2] * k_loss
-            % => E = [NO2] / tau
-            % => E*tau = [NO2]
-            expected_vcds = moves_emis .* behr_tau;
+            common_params = {'plot_averaging', 'VCD weighted avg.', 'normalize', true, 'window_width', window, 'remove_decreasing_cities', false,...
+                'always_restrict_to_moves', true, 'no_fig', true};
+            [~,years,behr_emis,behr_emis_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Emissions', common_params{:});
+            [~,~,moves_emis,moves_emis_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'MOVES', common_params{:});
+            [~,~,behr_tau,behr_tau_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Lifetime', common_params{:});
+            [~,~,behr_vcds,behr_vcds_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'VCDs', common_params{:});
+            [~,~,expected_vcds,expected_vcds_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Expected VCDs', common_params{:});
             
             figs = figure;
             subplot(2,1,1);
-            l = plot(years, moves_emis, 'bo-', years, behr_emis, 'b^--', years, behr_tau, 'rv:');
+            l = plot(years-0.1, moves_emis, 'ko-', years, behr_emis, 'b^--', years+0.1, behr_tau, 'rv:');
+            %scatter_errorbars(years-0.1, moves_emis, moves_emis_err(1,:), moves_emis_err(2,:), 'color', 'k')
+            %scatter_errorbars(years, behr_emis, behr_emis_err(1,:), behr_emis_err(2,:), 'color', 'b')
+            %scatter_errorbars(years+0.1, behr_tau, behr_tau_err(1,:), behr_tau_err(2,:), 'color', 'r')
             legend(l, {'MOVES emissions', 'BEHR-derived emis', 'BEHR-derived \tau'});
             
             subplot(2,1,2);
-            l2 = plot(years, behr_vcds, 'ko-', years, expected_vcds, 'mh--', years, moves_emis, 'bo:');
-            legend(l2, {'BEHR VCDs', 'Expected VCDs', 'Without lifetime'});
-            
-            function vcds = avg_national_vcds(year, window)
-                if mod(window,2) ~= 1
-                    E.notimplemented('Even number of years in window')
-                end
-                width = (window-1)/2;
-                all_years = (year-width):(year+width);
-                v_loaded = misc_emissions_analysis.load_vcds_for_years(all_years, 'TWRF');
-                vcds = nanmean(v_loaded.daily_vcds(:));
-            end
-            
-            function vals = normalize_trend(vals, years)
-                %xx = years == norm_year;
-                %vals = vals ./ vals(xx);
-                vals = vals ./ nanmean(vals);
-            end
+            l2 = plot(years-0.1, behr_vcds, 'ko-', years, expected_vcds, 'mh--', years+0.1, moves_emis, 'bo:');
+            %scatter_errorbars(years-0.1, behr_vcds, behr_vcds_err(1,:), behr_vcds_err(2,:), 'color', 'k')
+            %scatter_errorbars(years, expected_vcds, expected_vcds_err(1,:), expected_vcds_err(2,:), 'color', 'm')
+            %scatter_errorbars(years+0.1, moves_emis, moves_emis_err(1,:), moves_emis_err(2,:), 'color', 'b')
+            legend(l2, {'BEHR VCDs', 'Expected VCDs'});
         end
         
         function [figs, x_vals, y, yerr] = plot_avg_lifetime_change(varargin)
@@ -3594,8 +3644,10 @@ classdef misc_emissions_analysis
                 end
                 good_week_fits = misc_emissions_analysis.is_fit_good_by_loc(week_locs, 'DEBUG_LEVEL', 0);
                 week_vals(~good_week_fits,i_yr) = nan;
+                week_vcds(~good_week_fits,i_yr) = nan;
                 good_weekend_fits = misc_emissions_analysis.is_fit_good_by_loc(weekend_locs, 'DEBUG_LEVEL', 0);
                 weekend_vals(~good_weekend_fits,i_yr) = nan;
+                weekend_vcds(~good_weekend_fits,i_yr) = nan;
             end
             
             good_for_trends = sum(~isnan(week_vals),2) >= size(week_vals,2) - 1;
@@ -3607,8 +3659,10 @@ classdef misc_emissions_analysis
 %                 
 %             end
             week_vals = week_vals(good_for_trends, :);
+            week_vcds = week_vcds(good_for_trends, :);
             week_locs = week_locs(good_for_trends);
             weekend_vals = weekend_vals(good_for_trends, :);
+            weekend_vcds = weekend_vcds(good_for_trends, :);
             names = names(good_for_trends);
             
             plotting_fxn = @(x,y,style) plot(x,y,style);
@@ -3642,6 +3696,7 @@ classdef misc_emissions_analysis
                 case avgopts.median
                     yerr = quantile(y,[0.25 0.75],1);
                     y = nanmedian(y,1);
+                    yerr = abs(yerr - repmat(y, 2, 1));
                     lstyle = 'o';
                 case avgopts.vcdwt
                     [y, yerr] = weighted_mean(y, week_vcds, 1);
@@ -3660,7 +3715,7 @@ classdef misc_emissions_analysis
                         % scatter_errorbars assumes that the errors are
                         % differences from the y value, so we need to convert
                         % them to such here.
-                        scatter_errorbars(x_vals, y, abs(yerr(1,:) - y), abs(yerr(2,:) - y));
+                        scatter_errorbars(x_vals, y, yerr(1,:), yerr(2,:));
                     end
                 end
                 if add_legend
