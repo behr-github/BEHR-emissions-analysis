@@ -1542,7 +1542,9 @@ classdef misc_emissions_analysis
         
         function make_location_wrf_avgs_file(time_periods, overwrite)
             E = JLLErrors;
-            wrf_vars = {'ndens', 'temperature', 'ho', 'LNOXHNO3', 'LNOXA'};
+            wrf_2d_vars = {'ndens', 'temperature', 'ho', 'LNOXHNO3', 'LNOXA'};
+            wrf_3d_vars = {'no', 'no2', 'ho'};
+            wrf_vars = veccat(wrf_2d_vars, wrf_3d_vars);
 
             if ~exist('overwrite', 'var')
                 overwrite = -1;
@@ -1552,7 +1554,10 @@ classdef misc_emissions_analysis
             base_locs_names = {base_locs.ShortName};
             
             n_files_per_day = 6; % should match the assumed number for the winds files
+            n_2d_vars = numel(wrf_2d_vars);
+            n_3d_vars = numel(wrf_3d_vars);
             n_vars = numel(wrf_vars);
+            n_wrf_levels = 29;
             n_locs = numel(base_locs);
             n_times = numel(time_periods);
             
@@ -1575,9 +1580,12 @@ classdef misc_emissions_analysis
                 % Append a substructure to put the WRF data into. Have one
                 % value per day, we'll average together whichever hours are
                 % used.
-                
-                data_struct = make_empty_struct_from_cell(wrf_vars, nan(size(tmp_locs.WindUsedBool,1),1));
-                tmp_locs.WRFData = data_struct;
+                field_2d = 'Averaged';
+                field_3d = 'Profile';
+                data_struct_2d = make_empty_struct_from_cell(wrf_2d_vars, nan(size(tmp_locs.WindUsedBool,1),1));
+                data_struct_3d = make_empty_struct_from_cell(wrf_3d_vars, nan(size(tmp_locs.WindUsedBool,1),1));
+                tmp_locs.WRFData.(field_2d) = data_struct_2d;
+                tmp_locs.WRFData.(field_3d) = data_struct_3d;
                 winds_data{i_time}.locs = tmp_locs;
                 
                 winds_data{i_time}.savename = misc_emissions_analysis.wrf_data_file_name(start_date, end_date);
@@ -1586,8 +1594,8 @@ classdef misc_emissions_analysis
             [total_starts, total_ends] = misc_emissions_analysis.select_start_end_dates([first_year, last_year]);
             total_dvec = make_datevec(total_starts, total_ends);
             
-            last_month = nan;
-            last_year = nan;
+            WRF_Files_Getter = BEHRMatchedWRFFiles('DEBUG_LEVEL', 1);
+            
             for d=1:numel(total_dvec)
                 this_date = total_dvec(d);
                 fprintf('Now on %s (%d of %d)\n', datestr(this_date), d, numel(total_dvec));
@@ -1603,26 +1611,9 @@ classdef misc_emissions_analysis
                 % directory listing of the WRF directory again (because it
                 % should be organized by month and year).
                 fprintf('%s: Gathering WRF files\n', datestr(total_dvec(d)));
-                try
-                    if month(total_dvec(d)) == last_month && year(total_dvec(d)) == last_year
-                        fprintf('     Using existing list of WRF files\n');
-                        wrf_files = misc_emissions_analysis.closest_wrf_file_in_time(total_dvec(d), all_months_wrf_files);
-                    else
-                        fprintf('     New month: need to get the directory listing\n');
-                        [wrf_files, all_months_wrf_files] = misc_emissions_analysis.closest_wrf_file_in_time(total_dvec(d));
-                        last_month = month(total_dvec(d));
-                        last_year = year(total_dvec(d));
-                    end
-                catch err
-                    if strcmp(err.identifier, 'MATLAB:load:couldNotReadFile')
-                        fprintf('Cannot load file for %s, skipping\n', datestr(total_dvec(d)));
-                        continue
-                    else
-                        rethrow(err)
-                    end
-                end
+                wrf_files = WRF_Files_Getter.get_files_for_date(total_dvec(d));
                 
-                data_for_today = nan(n_files_per_day, n_vars, n_locs);
+                data_for_today = nan(n_wrf_levels, n_files_per_day, n_vars, n_locs);
                 
                 for i_file=1:numel(wrf_files)
                     % Load the bottom five layers of each variable in turn,
@@ -1632,15 +1623,30 @@ classdef misc_emissions_analysis
                     % it.
                     wrf_lon = ncread(wrf_files{i_file}, 'XLONG');
                     wrf_lat = ncread(wrf_files{i_file}, 'XLAT');
-                    for i_var = 1:numel(wrf_vars)
-                        fprintf('    Loading %s\n', wrf_vars{i_var});
-                        wrf_value = read_wrf_preproc(wrf_files{i_file}, wrf_vars{i_var}, [1 1 1 1], [Inf Inf 5 Inf]);
-                        wrf_value = nanmean(wrf_value, 3);
+                    for i_var = 1:n_vars
+                        is_2d = i_var <= n_2d_vars;
+                        var_name = wrf_vars{i_var};
+                        fprintf('    Loading %s\n', wrf_2d_vars{i_var});
+                        wrf_value = read_wrf_preproc(wrf_files{i_file}, var_name, [1 1 1 1], [Inf Inf 5 Inf]);
+                        if is_2d
+                            wrf_value = nanmean(wrf_value, 3);
+                        else
+                            wrf_value = permute(wrf_value, [3 1 2]);
+                            if size(wrf_value,1) ~= n_wrf_levels
+                                E.callError('wrf_level_mismatch', 'WRF levels for variable "%s" not the expected %d', var_name, n_wrf_levels);
+                            end
+                        end
+                        
                         for i_loc = 1:n_locs
                             xx = misc_emissions_analysis.find_indices_in_radius_around_loc(base_locs(i_loc), wrf_lon, wrf_lat);
-                            data_for_today(i_file, i_var, i_loc) = nanmean(wrf_value(xx));
+                            if is_2d
+                                data_for_today(1, i_file, i_var, i_loc) = nanmean(wrf_value(xx));
+                            else
+                                data_for_today(:, i_file, i_var, i_loc) = nanmean(wrf_value(:,xx),2);
+                            end
                         end
                     end
+                    
                 end
                 
                 fprintf('Average to locations...\n');
@@ -1656,8 +1662,14 @@ classdef misc_emissions_analysis
                     for i_loc=1:n_locs
                         xx_hours = winds_data{i_time}.locs(i_loc).WindUsedBool(xx_date, :);
                         for i_var=1:n_vars
-                            loc_var_value = nanmean(data_for_today(xx_hours, i_var, i_loc));
-                            winds_data{i_time}.locs(i_loc).WRFData.(wrf_vars{i_var})(xx_date) = loc_var_value;
+                            if is_2d
+                                loc_var_value = nanmean(data_for_today(1,xx_hours, i_var, i_loc));
+                                substruct = field_2d;
+                            else
+                                loc_var_value = nanmean(data_for_today(:,xx_hours, i_var, i_loc),2);
+                                substruct = field_3d;
+                            end
+                            winds_data{i_time}.locs(i_loc).WRFData.(substruct).(wrf_vars{i_var})(xx_date) = loc_var_value;
                         end
                     end
                 end
