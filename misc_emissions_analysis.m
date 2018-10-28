@@ -1557,11 +1557,7 @@ classdef misc_emissions_analysis
             n_times = numel(time_periods);
             
             winds_data = cell(n_times,1);
-            first_year = nan;
-            last_year = nan;
             for i_time = 1:n_times
-                first_year = min(veccat(first_year, time_periods{i_time}));
-                last_year = max(veccat(last_year, time_periods{i_time}));
                 [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_periods{i_time});
                 winds_data{i_time} = load(misc_emissions_analysis.winds_file_name(start_date, end_date));
                 
@@ -1575,15 +1571,17 @@ classdef misc_emissions_analysis
                 % Append a substructure to put the WRF data into. Have one
                 % value per day, we'll average together whichever hours are
                 % used.
-                
-                data_struct = make_empty_struct_from_cell(wrf_vars, nan(size(tmp_locs.WindUsedBool,1),1));
-                tmp_locs.WRFData = data_struct;
+                for i_loc=1:n_locs
+                    data_struct = make_empty_struct_from_cell(wrf_vars, nan(size(tmp_locs(i_loc).WindUsedBool,1),1));
+                    tmp_locs(i_loc).WRFData = data_struct;
+                end
                 winds_data{i_time}.locs = tmp_locs;
                 
                 winds_data{i_time}.savename = misc_emissions_analysis.wrf_data_file_name(start_date, end_date);
             end
             
-            [total_starts, total_ends] = misc_emissions_analysis.select_start_end_dates([first_year, last_year]);
+            all_years = unique(veccat(time_periods{:}));
+            [total_starts, total_ends] = misc_emissions_analysis.select_start_end_dates(all_years);
             total_dvec = make_datevec(total_starts, total_ends);
             
             last_month = nan;
@@ -1615,7 +1613,10 @@ classdef misc_emissions_analysis
                     end
                 catch err
                     if strcmp(err.identifier, 'MATLAB:load:couldNotReadFile')
-                        fprintf('Cannot load file for %s, skipping\n', datestr(total_dvec(d)));
+                        fprintf('Cannot load BEHR file for %s, skipping\n', datestr(total_dvec(d)));
+                        continue
+                    elseif strcmp(err.identifier, 'find_wrf_path:dir_does_not_exist')
+                        fprintf('No WRF file for %s, skipping\n', datestr(total_dvec(d)));
                         continue
                     else
                         rethrow(err)
@@ -1634,7 +1635,16 @@ classdef misc_emissions_analysis
                     wrf_lat = ncread(wrf_files{i_file}, 'XLAT');
                     for i_var = 1:numel(wrf_vars)
                         fprintf('    Loading %s\n', wrf_vars{i_var});
-                        wrf_value = read_wrf_preproc(wrf_files{i_file}, wrf_vars{i_var}, [1 1 1 1], [Inf Inf 5 Inf]);
+                        try
+                            wrf_value = read_wrf_preproc(wrf_files{i_file}, wrf_vars{i_var}, [1 1 1 1], [Inf Inf 5 Inf]);
+                        catch err
+                            if any(strcmpi(err.identifier, {'MATLAB:imagesci:netcdf:unableToOpenFileforRead','MATLAB:imagesci:netcdf:unknownLocation'}))
+                                fprintf('Cannot read %s from %s, it will stay a NaN\n', wrf_vars{i_var}, wrf_files{i_file});
+                                continue
+                            else
+                                rethrow(err)
+                            end
+                        end
                         wrf_value = nanmean(wrf_value, 3);
                         for i_loc = 1:n_locs
                             xx = misc_emissions_analysis.find_indices_in_radius_around_loc(base_locs(i_loc), wrf_lon, wrf_lat);
