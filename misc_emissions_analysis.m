@@ -1543,7 +1543,7 @@ classdef misc_emissions_analysis
         function make_location_wrf_avgs_file(time_periods, overwrite)
             E = JLLErrors;
             wrf_2d_vars = {'ndens', 'temperature', 'ho', 'LNOXHNO3', 'LNOXA'};
-            wrf_3d_vars = {'no', 'no2', 'ho'};
+            wrf_3d_vars = {'no', 'no2', 'ho', 'pres'};
             wrf_vars = veccat(wrf_2d_vars, wrf_3d_vars);
 
             if ~exist('overwrite', 'var')
