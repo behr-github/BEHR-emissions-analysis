@@ -536,7 +536,7 @@ classdef misc_emissions_analysis
                 % 6 month periods. The NEI emissions are the same in both, so
                 % we can just pick one.
                 inputs_path = fullfile(wrf_share, 'Inputs', num2str(nei_year(a)), 'IC-BC-Emis');
-                if nei_year(a) == 2012
+                if nei_year(a) == 2012 || nei_year(a) == 2011
                     inputs_path = fullfile(inputs_path, 'Months01-06');
                 elseif nei_year(a) == 2014
                     inputs_path = fullfile(inputs_path, 'Jan-Aug');
@@ -1579,8 +1579,8 @@ classdef misc_emissions_analysis
                 field_2d = 'Averaged';
                 field_3d = 'Profile';
                 for i_loc=1:n_locs
-                    data_struct_2d = make_empty_struct_from_cell(wrf_2d_vars, nan(size(tmp_locs(i_loc).WindUsedBool,1),1));
-                    data_struct_3d = make_empty_struct_from_cell(wrf_3d_vars, nan(size(tmp_locs(i_loc).WindUsedBool,1),1));
+                    data_struct_2d = make_empty_struct_from_cell(wrf_2d_vars, nan(1, size(tmp_locs(i_loc).WindUsedBool,1)));
+                    data_struct_3d = make_empty_struct_from_cell(wrf_3d_vars, nan(n_wrf_levels, size(tmp_locs(i_loc).WindUsedBool,1)));
                     tmp_locs(i_loc).WRFData.(field_2d) = data_struct_2d;
                     tmp_locs(i_loc).WRFData.(field_3d) = data_struct_3d;
                 end
@@ -1626,11 +1626,18 @@ classdef misc_emissions_analysis
                     wrf_lon = ncread(wrf_files{i_file}, 'XLONG');
                     wrf_lat = ncread(wrf_files{i_file}, 'XLAT');
                     for i_var = 1:n_vars
-                        is_2d = i_var <= n_2d_vars;
+                        is_2d = is_var_2d(i_var);
                         var_name = wrf_vars{i_var};
-                        fprintf('    Loading %s\n', wrf_2d_vars{i_var});
+                        fprintf('    Loading %s\n', wrf_vars{i_var});
+
+                        if is_2d
+                            num_lev = 5;
+                        else
+                            num_lev = Inf;
+                        end
+
                         try
-                            wrf_value = read_wrf_preproc(wrf_files{i_file}, var_name, [1 1 1 1], [Inf Inf 5 Inf]);
+                            wrf_value = read_wrf_preproc(wrf_files{i_file}, var_name, [1 1 1 1], [Inf Inf num_lev Inf]);
                         catch err
                             if any(strcmpi(err.identifier, {'MATLAB:imagesci:netcdf:unableToOpenFileforRead','MATLAB:imagesci:netcdf:unknownLocation'}))
                                 fprintf('Cannot read %s from %s, it will stay a NaN\n', wrf_vars{i_var}, wrf_files{i_file});
@@ -1664,7 +1671,7 @@ classdef misc_emissions_analysis
                 fprintf('Average to locations...\n');
                 for i_time = 1:n_times
                     xx_date = winds_data{i_time}.dvec == this_date;
-                    if sum(xx_date) < 0
+                    if sum(xx_date) < 1
                         fprintf('  %s not in time period %d\n', datestr(this_date), i_time);
                         continue
                     elseif sum(xx_date) > 1
@@ -1674,14 +1681,15 @@ classdef misc_emissions_analysis
                     for i_loc=1:n_locs
                         xx_hours = winds_data{i_time}.locs(i_loc).WindUsedBool(xx_date, :);
                         for i_var=1:n_vars
+                            is_2d = is_var_2d(i_var);
                             if is_2d
-                                loc_var_value = nanmean(data_for_today(1,xx_hours, i_var, i_loc));
+                                loc_var_value = nanmean(data_for_today(1, xx_hours, i_var, i_loc));
                                 substruct = field_2d;
                             else
-                                loc_var_value = nanmean(data_for_today(:,xx_hours, i_var, i_loc),2);
+                                loc_var_value = nanmean(data_for_today(:, xx_hours, i_var, i_loc),2);
                                 substruct = field_3d;
                             end
-                            winds_data{i_time}.locs(i_loc).WRFData.(substruct).(wrf_vars{i_var})(xx_date) = loc_var_value;
+                            winds_data{i_time}.locs(i_loc).WRFData.(substruct).(wrf_vars{i_var})(:, xx_date) = loc_var_value;
                         end
                     end
                 end
@@ -1691,6 +1699,10 @@ classdef misc_emissions_analysis
                 savename = winds_data{i_time}.savename;
                 savedata = rmfield(winds_data{i_time}, 'savename');
                 save(savename, '-v7.3', '-struct', 'savedata' );
+            end
+
+            function yn = is_var_2d(ind)
+                yn = ind <= n_2d_vars;
             end
         end
         
