@@ -79,6 +79,10 @@ classdef misc_emissions_analysis
             value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.emis_wrf_dir, 'WRF-VCDs');
         end
         
+        function value = oh_dir
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'OHData');
+        end
+        
         function filename = avg_file_name(year_in, days_of_week, varargin)
             p = advInputParser;
             p.addOptional('species', 'NO2');
@@ -166,6 +170,22 @@ classdef misc_emissions_analysis
             end_date = validate_date(end_date);
             filename = sprintf('%s_emg_%s_fits_%s_%sto%s_%s.mat', product_string, fit_type, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
             filename = fullfile(misc_emissions_analysis.emg_fit_dir, filename);
+        end
+        
+        function filename = oh_file_name(start_date, end_date, varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('fit_type', 'lu');
+            p.parse(varargin{:});
+            pout = p.Results;
+            loc_inds = pout.loc_inds;
+            fit_type = pout.fit_type;
+            
+            start_date = validate_date(start_date);
+            end_date = validate_date(end_date);
+            locs_string = sprintf_ranges(loc_inds);
+            filename = sprintf('BEHR_OH_data_%s_fits_%s_%sto%s.mat', fit_type, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'));
+            filename = fullfile(misc_emissions_analysis.oh_dir, filename);
         end
         
         function filename = wrf_grid_area_file()
@@ -1190,7 +1210,7 @@ classdef misc_emissions_analysis
             counties = shaperead(misc_emissions_analysis.county_shape_file);
         end
         
-        function wkday_locs = compute_oh_concentrations(varargin)
+        function [wkday_locs, wkend_locs] = compute_oh_concentrations(varargin)
             
             % We'll compute 3 OH concentrations:
             %   1. OH from the steady state model
@@ -1215,13 +1235,22 @@ classdef misc_emissions_analysis
             p.addParameter('loc_indicies', 1:71); % for if loading EMG files
             p.addParameter('locs', {}); % to pass directly - must be {weekday, weekend}
             p.addParameter('n_levels', 5);
+            p.addParameter('phox', 6.25e6);
+            p.addParameter('alpha', 0.04);
+            p.addParameter('tau_uncert', '0');
             p.addParameter('DEBUG_LEVEL', 1);
             p.parse(varargin{:});
             pout = p.Results;
             
+            t1=tic;
+            
             [start_dates, end_dates, time_period] = misc_emissions_analysis.select_start_end_dates(pout.time_period);
             loc_indicies = misc_emissions_analysis.ask_for_loc_inds(pout.loc_indicies);
             locs_in = pout.locs;
+            
+            phox = pout.phox;
+            alpha = pout.alpha;
+            tau_uncert = pout.tau_uncert;
             DEBUG_LEVEL = pout.DEBUG_LEVEL;
             
             levels = 1:pout.n_levels;
@@ -1248,94 +1277,98 @@ classdef misc_emissions_analysis
             wkday_vcds = misc_emissions_analysis.avg_vcds_around_loc(wkday_locs, time_period, 'TWRF');
             wkend_vcds = misc_emissions_analysis.avg_vcds_around_loc(wkday_locs, time_period, 'US');
             
-            phox = 6.25e6;
-            alpha = 0.04;
-            
             oh_results = cell(size(wkday_locs));
             
+            load_time = toc(t1);
+            
+            
             for i_loc = 1:numel(wkday_locs)
+                t2 = tic;
                 this_wkday_loc = wkday_locs(i_loc);
                 this_wkend_loc = wkend_locs(i_loc);
-                is_fit_good = misc_emissions_analysis.is_fit_good_by_loc(this_wkday_loc);
+                is_wkday_fit_good = misc_emissions_analysis.is_fit_good_by_loc(this_wkday_loc);
                 is_wkend_fit_good = misc_emissions_analysis.is_fit_good_by_loc(this_wkend_loc);
                 
-                % Reset the OH values to NaN each loop, that way if the fit
-                % isn't good, they'll automatically be set to NaNs
-                nox_invert = nan;
-                wrf_nox = nan;
-                
-                ho_ss = nan;
-                ho_hno3 = nan;
-                ho_wrf = nan;
-                ho_wkday = nan;
-                ho_wkend = nan;
-                
-                ho2_invert = nan;
-                ro2_invert = nan;
-                vocr_invert = nan;
-                
-                nox_wkday = nan;
-                nox_wkend = nan;
-                ho2_wkday = nan;
-                ho2_wkend = nan;
-                ro2_wkday = nan;
-                ro2_wkend = nan;
-                vocr_wkday = nan;
-                vocr_wkend = nan;
-                
-                if is_fit_good
-                    if DEBUG_LEVEL > 0
-                        fprintf('Calculating OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
-                    end
-                    % Option 1: solve steady state equations assuming P(HOx),
-                    % alpha, NO:NO2 ratio, and rate constants from Murphy et
-                    % al. 2006 (ACPD, pp. 11971-12019). Could update to use
-                    % NO:NO2 ratio from WRF.
-                    % need NOx in molec. cm^-3. ndens in molec. cm^-3, behr_nox
-                    % in ppm.
-                    wrf_nox = this_wkday_loc.WRFData.ndens * this_wkday_loc.WRFData.nox * 1e-6;
-                    nox_invert = this_wkday_loc.WRFData.ndens * this_wkday_loc.WRFData.behr_nox * 1e-6;
-                    [ho_ss, ho2_invert, ro2_invert, vocr_invert] = hox_solve_tau_constraint(nox_invert, phox, this_wkday_loc.emis_tau.tau, alpha);
-                    
-                    % Option 2: compute from the lifetime assuming that the
-                    % only loss is to HNO3. Since tau = (k * [OH])^-1 =>
-                    % [OH] = (k * tau)^-1
-                    k_hno3 = KOHNO2a(this_wkday_loc.WRFData.temperature, this_wkday_loc.WRFData.ndens);
-                    % k in cm^3 molec.^-1 s^-1, tau in hours
-                    ho_hno3 = 1 ./ (k_hno3 .* this_wkday_loc.emis_tau.tau*3600);
-                    
-                    % Option 3: what does WRF think it is
-                    ho_wrf = this_wkday_loc.WRFData.ho * 1e-6 * this_wkday_loc.WRFData.ndens;
-                    
-                    if is_wkend_fit_good
-                        % Option 4: solve using the weekend/weekday NO2 VCD
-                        % ratio and weekend/weekday lifetimes
-                        vcd_ratio = wkend_vcds(i_loc) ./ wkday_vcds(i_loc);
-                        [wkday_soln, wkend_soln] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
-                            this_wkend_loc.emis_tau.tau, phox, alpha);
-                        
-                        ho_wkday = wkday_soln.oh;
-                        ho_wkend = wkend_soln.oh;
-                        nox_wkday = wkday_soln.nox;
-                        nox_wkend = wkend_soln.nox;
-                        ho2_wkday = wkday_soln.ho2;
-                        ho2_wkend = wkend_soln.ho2;
-                        ro2_wkday = wkday_soln.ro2;
-                        ro2_wkend = wkend_soln.ro2;
-                        vocr_wkday = wkday_soln.vocr;
-                        vocr_wkend = wkend_soln.vocr;
-                    end
-                else
-                    if DEBUG_LEVEL > 0
-                        fprintf('Not calculating OH for %s - fit not good\n', this_wkday_loc.ShortName);
-                    end
+                if strcmpi(tau_uncert, '+')
+                    this_wkday_loc.emis_tau.tau = this_wkday_loc.emis_tau.tau + this_wkday_loc.emis_tau.tau_uncert;
+                    this_wkend_loc.emis_tau.tau = this_wkend_loc.emis_tau.tau + this_wkend_loc.emis_tau.tau_uncert;
+                elseif strcmpi(tau_uncert, '-')
+                    this_wkday_loc.emis_tau.tau = this_wkday_loc.emis_tau.tau - this_wkday_loc.emis_tau.tau_uncert;
+                    this_wkend_loc.emis_tau.tau = this_wkend_loc.emis_tau.tau - this_wkend_loc.emis_tau.tau_uncert;
+                elseif ~strcmpi(tau_uncert, '0')
+                    E.badinput('Only allowed values for "tau_uncert" are: "+", "-", "0"');
                 end
                 
-                %wkday_locs(i_loc).OH = struct('NOx', nox, 'WRF_NOx', wrf_nox,...
-                %    'SteadyState', ho_ss, 'SteadyStateHO2', ho2_invert,...
-                %    'SteadyStateRO2', ro2_invert, 'SteadyStateVOCR', vocr_invert,...
-                %    'HNO3tau', ho_hno3, 'WRF', ho_wrf);
+                wkday = struct();
+                wkend = struct();
+                
+                if is_wkday_fit_good
+                    if DEBUG_LEVEL > 0
+                        fprintf('Calculating weekday OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
+                    end
+                    % Option 1: invert BEHR VCD -> surface NOx
+                    wkday.invert = misc_emissions_analysis.get_invert_oh(this_wkday_loc, phox, alpha);
+                    % Option 2: assume all is HNO3
+                    wkday.hno3 = misc_emissions_analysis.get_hno3_oh(this_wkday_loc);
+                    % Option 3: what does WRF think it is
+                    wkday.wrf = misc_emissions_analysis.get_wrf_oh(this_wkday_loc);
+                    
+                else
+                    if DEBUG_LEVEL > 0
+                        fprintf('Not calculating weekday OH for %s - fit not good\n', this_wkday_loc.ShortName);
+                    end
+                    wkday.invert = misc_emissions_analysis.get_invert_oh();
+                    wkday.hno3 = misc_emissions_analysis.get_hno3_oh();
+                    wkday.wrf = misc_emissions_analysis.get_wrf_oh();
+                end
+                
+                if is_wkend_fit_good
+                    if DEBUG_LEVEL > 0
+                        fprintf('Calculating weekend OH for %s (%d of %d)\n', this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
+                    end
+                    wkend.invert = misc_emissions_analysis.get_invert_oh(this_wkend_loc, phox, alpha);
+                    wkend.hno3 = misc_emissions_analysis.get_hno3_oh(this_wkend_loc);
+                    wkend.wrf = misc_emissions_analysis.get_wrf_oh(this_wkend_loc); % this shouldn't differ from the weekday one
+                else
+                    if DEBUG_LEVEL > 0
+                        fprintf('Not calculating weekend OH for %s (%d of %d)\n', this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
+                    end
+                    wkend.invert = misc_emissions_analysis.get_invert_oh();
+                    wkend.hno3 = misc_emissions_analysis.get_hno3_oh();
+                    wkend.wrf = misc_emissions_analysis.get_wrf_oh();
+                end
+                
+                if is_wkday_fit_good && is_wkend_fit_good
+                    if DEBUG_LEVEL > 0
+                        fprintf('Calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
+                    end
+                    
+                    % Option 4: solve using the weekend/weekday NO2 VCD
+                    % ratio and weekend/weekday lifetimes
+                    vcd_ratio = wkend_vcds(i_loc) ./ wkday_vcds(i_loc);
+                    [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
+                        this_wkend_loc.emis_tau.tau, phox, alpha);
+                else
+                    if DEBUG_LEVEL > 0
+                        fprintf('Not calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
+                    end
+                    % be sure to update these if the structures returned
+                    % from the solver change
+                    wkday.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                    wkend.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                end
+                
+                oh_results{i_loc} = struct('weekday', wkday, 'weekend', wkend);
+                compute_time = toc(t2);
+                fprintf('Load time = %.2f s, compute time (1 site) = %.2f s\n', load_time, compute_time);
             end
+            
+            for i_loc = 1:numel(wkday_locs)
+                wkday_locs(i_loc).OH = oh_results{i_loc}.weekday;
+                wkend_locs(i_loc).OH = oh_results{i_loc}.weekend;
+            end
+            
+            
         end
         
         function compute_oh_uncertainties()
@@ -2494,6 +2527,47 @@ classdef misc_emissions_analysis
             write_date = datestr(now);
             
             save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
+        end
+        
+        function make_oh_data_file(varargin)
+            p = advInputParser;
+            p.addFlag('no_uncertainty');
+            p.parse(varargin{:});
+            pout = p.Results;
+            include_uncertainty = ~pout.no_uncertainty;
+            
+            time_periods = {2005:2007, 2006:2008, 2007:2009, 2008:2010, 2009:2011, 2010:2012, 2011:2013, 2012:2014};
+            phox = 6.25e6;
+            phox_del = [5.25e6, 7.25e6];
+            alpha = 0.04;
+            alpha_del = [0.03, 0.05];
+            
+            deltas = make_empty_struct_from_cell({'wkday', 'wkend', 'phox', 'alpha', 'tau'}, cell(6,1));
+            
+            for i_time = 1:numel(time_periods)
+                this_tp = time_periods{i_time};
+                [locs_wkday, locs_wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', this_tp,...
+                    'phox', phox, 'alpha', alpha, 'tau_uncert', '0');
+                
+                if include_uncertainty
+                    deltas(1) = do_uncertainty(this_tp, phox, alpha, '-');
+                    deltas(2) = do_uncertainty(this_tp, phox, alpha, '+');
+                    deltas(3) = do_uncertainty(this_tp, phox_del(1), alpha, '0');
+                    deltas(4) = do_uncertainty(this_tp, phox_del(2), alpha, '0');
+                    deltas(5) = do_uncertainty(this_tp, phox, alpha_del(1), '0');
+                    deltas(6) = do_uncertainty(this_tp, phox, alpha_del(2), '0');
+                end
+                
+                [sdate, edate] = misc_emissions_analysis.select_start_end_dates(this_tp);
+                save_file = misc_emissions_analysis.oh_file_name(sdate, edate);
+                save(save_file, 'locs_wkday', 'locs_wkend', 'deltas');
+            end
+            
+            function delta = do_uncertainty(time_per, phox_in, alpha_in, tau)
+                [wkday, wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', time_per,...
+                    'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau);
+                delta = struct('wkday', wkday.OH, 'wkend', wkend.OH, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
+            end
         end
         
         function make_average_wrf_profiles(varargin)
@@ -5553,6 +5627,59 @@ classdef misc_emissions_analysis
             end
         end
         
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        % Helper functions for OH calculation %
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        function results = get_invert_oh(this_loc, phox, alpha)
+            if nargin < 1
+                % used to return consistent struct if the fit isn't
+                % good. be sure to update if new fields added.
+                results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'nox'}, nan);
+                return
+            end
+            
+            % Option 1: solve steady state equations assuming P(HOx),
+            % alpha, NO:NO2 ratio, and rate constants from Murphy et
+            % al. 2006 (ACPD, pp. 11971-12019). Could update to use
+            % NO:NO2 ratio from WRF.
+            % need NOx in molec. cm^-3. ndens in molec. cm^-3, behr_nox
+            % in ppm.
+            
+            nox_inv = this_loc.WRFData.ndens * this_loc.WRFData.behr_nox * 1e-6;
+            [results.oh, results.ho2, results.ro2, results.vocr] = hox_solve_tau_constraint(nox_inv, phox, this_loc.emis_tau.tau, alpha);
+            results.nox = nox_inv;
+        end
+        
+        function results = get_hno3_oh(this_loc)
+            if nargin < 1
+                % used to return consistent struct if the fit isn't
+                % good. be sure to update if new fields added.
+                results = make_empty_struct_from_cell({'oh'}, nan);
+                return
+            end
+            
+            % Option 2: compute from the lifetime assuming that the
+            % only loss is to HNO3. Since tau = (k * [OH])^-1 =>
+            % [OH] = (k * tau)^-1
+            
+            k_hno3 = KOHNO2a(this_loc.WRFData.temperature, this_loc.WRFData.ndens);
+            % k in cm^3 molec.^-1 s^-1, tau in hours
+            results.oh = 1 ./ (k_hno3 .* this_loc.emis_tau.tau*3600);
+        end
+        
+        function results = get_wrf_oh(this_loc)
+            if nargin < 1
+                % used to return consistent struct if the fit isn't
+                % good. be sure to update if new fields added.
+                results = make_empty_struct_from_cell({'oh', 'nox'}, nan);
+                return
+            end
+            
+            % Option 3: use the WRF values
+            
+            results.oh = this_loc.WRFData.ho * 1e-6 * this_loc.WRFData.ndens;
+            results.nox = this_loc.WRFData.nox * 1e-6 * this_loc.WRFData.ndens;
+        end
     end
     
 end
