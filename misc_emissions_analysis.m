@@ -1347,7 +1347,7 @@ classdef misc_emissions_analysis
                     % ratio and weekend/weekday lifetimes
                     vcd_ratio = wkend_vcds(i_loc) ./ wkday_vcds(i_loc);
                     [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
-                        this_wkend_loc.emis_tau.tau, phox, alpha);
+                        this_wkend_loc.emis_tau.tau, phox, alpha, 'nox_initial', wkday.wrf.nox ./ wkday.wrf.ndens * 1e9);
                 else
                     if DEBUG_LEVEL > 0
                         fprintf('Not calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
@@ -3511,35 +3511,55 @@ classdef misc_emissions_analysis
             series_mode = pout.series;
             
             loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
-            days_of_week = misc_emissions_analysis.select_days_of_week(pout.days_of_week);
             years = 2006:2013;
             
             n_locs = numel(loc_inds);
             n_yrs = numel(years);
             
-            oh_conc = nan(n_yrs, n_locs, 3);
-            oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
+            
             for i_yr = 1:n_yrs
                 fprintf('Working on %d\n', years(i_yr));
                 year_window = (years(i_yr)-1):(years(i_yr)+1);
-                locs = misc_emissions_analysis.compute_oh_concentrations('time_period', year_window, 'days_of_week', days_of_week, 'loc_indicies', loc_inds);
+                [win_start, win_end] = misc_emissions_analysis.select_start_end_dates(year_window);
+                oh_filename = misc_emissions_analysis.oh_file_name(win_start, win_end);
+                OH = load(oh_filename);
+                
+                OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
+                OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
+                
+                if i_yr == 1
+                    fns = fieldnames(OH.locs_wkday(1).OH);
+                    n_fn = numel(fns);
+                    oh_conc = nan(n_yrs, n_locs, n_fn, 2);
+                    nox_conc = nan(n_yrs, n_locs, n_fn, 2);
+                    oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
+                end
+                
                 for i_loc = 1:n_locs
-                    oh_conc(i_yr, i_loc, 1) = locs(i_loc).OH.SteadyState;
-                    oh_conc(i_yr, i_loc, 2) = locs(i_loc).OH.HNO3tau;
-                    oh_conc(i_yr, i_loc, 3) = locs(i_loc).OH.WRF;
-                    
-                    oh_values(i_yr, i_loc).Location = locs(i_loc).Location;
-                    oh_values(i_yr, i_loc).OH = locs(i_loc).OH;
+                    for i_fn = 1:n_fn
+                        oh_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
+                        oh_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
+                        if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
+                            nox_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox;
+                            nox_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox;
+                        end
+                    end
+                    oh_values(i_yr, i_loc).Location = OH.locs_wkday(i_loc).Location;
+                    oh_values(i_yr, i_loc).OH = OH.locs_wkday(i_loc).OH;
+                    oh_values(i_yr, i_loc).OH(2) = OH.locs_wkend(i_loc).OH;
                 end
                 
             end
             
             switch lower(plot_type)
                 case 'line'
-                    plot_fxn = @(oh) plot(oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
+                    plot_fxn = @(oh,nox) plot(oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
                     post_formatting = @set_line_plot_colors;
                 case 'bar'
-                    plot_fxn = @(oh) bar(oh);
+                    plot_fxn = @(oh,nox) bar(oh);
+                    post_formatting = @(h) h;
+                case 'scatter'
+                    plot_fxn = @nox_scatterplot;
                     post_formatting = @(h) h;
             end
 %             oh_conc = seq_mat(n_yrs, 2, 3);
@@ -3550,19 +3570,21 @@ classdef misc_emissions_analysis
                     figs = gobjects(n_locs,1);
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
-                        this_oh = squeeze(oh_conc(:,i_loc,:));
-                        h = plot_fxn(this_oh);
+                        this_oh = squeeze(oh_conc(:,i_loc,:,1));
+                        this_nox = squeeze(nox_conc(:,i_loc,:,1));
+                        h = plot_fxn(this_oh, this_nox);
                         post_formatting(h);
-                        legend(h, {'Steady state', 'HNO_3', 'WRF'});
-                        title(locs(i_loc).Location);
+                        legend(h, fns);
+                        title(oh_values(1, i_loc).Location);
                         set_axis_properties();
                     end
                 case 'city'
                     figs = figure;
-                    this_oh = squeeze(oh_conc(:,:,1));
-                    h = plot_fxn(this_oh);
+                    this_oh = squeeze(oh_conc(:,:,4,1));
+                    this_nox = squeeze(nox_conc(:,:,4,1));
+                    h = plot_fxn(this_oh, this_nox);
                     post_formatting(h);
-                    legend(h, {locs.Location});
+                    legend(h, {oh_values(1, i_loc).Location});
                     set_axis_properties();
             end
             
@@ -3579,6 +3601,24 @@ classdef misc_emissions_analysis
                 ylabel('[OH] (molec. cm^{-3})')
                 xlim([0 n_yrs+1]);
                 set(gca, 'fontsize', 12, 'xtick', 1:n_yrs, 'xticklabels', years);
+            end
+            
+            function myh = nox_scatterplot(oh, nox)
+                n_col = size(oh,2);
+                x = 1:size(oh,1);
+                myh = gobjects(n_col,1);
+                
+                markers = {'o', '^', 'v', '<', '>', 'p', 'h', 's','d'};
+                markers = repmat(markers, 1, ceil(numel(markers)/n_col));
+                
+                % put series without NOx data at the bottom of the colorbar
+                nox(isnan(nox)) = 0.9*min(nox(:));
+                for i_col = 1:n_col
+                    myh(i_col) = scatter(x, oh(:,i_col), 72, nox(:,i_col)/2e10, 'filled', 'marker', markers{i_col});
+                    hold on
+                end
+                cb=colorbar;
+                cb.Label.String = '[NO_x] (molec. cm^{-3})';
             end
         end
         
@@ -5679,6 +5719,7 @@ classdef misc_emissions_analysis
             
             results.oh = this_loc.WRFData.ho * 1e-6 * this_loc.WRFData.ndens;
             results.nox = this_loc.WRFData.nox * 1e-6 * this_loc.WRFData.ndens;
+            results.ndens = this_loc.WRFData.ndens;
         end
     end
     
