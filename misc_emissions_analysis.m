@@ -1254,7 +1254,8 @@ classdef misc_emissions_analysis
             DEBUG_LEVEL = pout.DEBUG_LEVEL;
             
             levels = 1:pout.n_levels;
-            
+           
+            fprintf('Compute OH: loading EMG files\n'); 
             if isempty(locs_in)
                 fits_file = misc_emissions_analysis.fits_file_name(start_dates, end_dates, false, 1:71, 'TWRF', 'lu');
                 fits = load(fits_file);
@@ -2546,6 +2547,7 @@ classdef misc_emissions_analysis
             
             for i_time = 1:numel(time_periods)
                 this_tp = time_periods{i_time};
+                fprintf('Calculating OH for %d-%d\n', this_tp(1), this_tp(end));
                 [locs_wkday, locs_wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', this_tp,...
                     'phox', phox, 'alpha', alpha, 'tau_uncert', '0');
                 
@@ -2560,7 +2562,7 @@ classdef misc_emissions_analysis
                 
                 [sdate, edate] = misc_emissions_analysis.select_start_end_dates(this_tp);
                 save_file = misc_emissions_analysis.oh_file_name(sdate, edate);
-                save(save_file, 'locs_wkday', 'locs_wkend', 'deltas');
+                save(save_file, 'locs_wkday', 'locs_wkend', 'deltas','-v7.3');
             end
             
             function delta = do_uncertainty(time_per, phox_in, alpha_in, tau)
