@@ -95,6 +95,12 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
+        function filename = wrf_avg_name(years_in, variable)
+            years_str = strjoin(sprintfmulti('%d', years_in), '_');
+            filename = sprintf('Summer_WRF_avg_%s_%s.mat', years_str, variable);
+            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, filename);
+        end
+        
         function filename = winds_file_name(start_date, end_date)
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
@@ -1628,6 +1634,29 @@ classdef misc_emissions_analysis
             save(save_name, 'monthly', 'daily');
         end
         
+        function make_wrf_averages(avg_year)
+            E = JLLErrors;
+            
+            variables = {'no','no2','ho'};
+            
+            start_dates = cell(size(avg_year));
+            end_dates = cell(size(avg_year));
+            for i_yr = 1:numel(avg_year)
+                start_dates{i_yr} = datenum(avg_year(i_yr), 4, 1);
+                end_dates{i_yr} = datenum(avg_year{i_yr}, 9, 30);
+            end
+            
+            averages = wrf_time_average(start_dates, end_dates, variables);
+            xlon = averages.XLONG;
+            xlat = averages.XLAT;
+            for i_var = 1:numel(variables)
+                this_var = variables{i_var};
+                profiles = averages.(this_var);
+                save_name = misc_emissions_analysis.wrf_avg_name(avg_year, this_var);
+                save(save_name, 'xlon', 'xlat', 'profiles');
+            end
+        end
+        
         function make_location_winds_file(time_period, overwrite)
             % As in Laughner, Zare, and Cohen (2016, ACP) we will calculate
             % wind direction by averaging over the first 5 WRF layers in a
@@ -2568,11 +2597,15 @@ classdef misc_emissions_analysis
             function delta = do_uncertainty(time_per, phox_in, alpha_in, tau)
                 [wkday, wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', time_per,...
                     'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau);
-                delta = struct('wkday', wkday.OH, 'wkend', wkend.OH, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
+                wkday_oh = make_empty_struct_from_cell(fieldnames(wkday(1).OH), cell(size(wkday)));
+                wkend_oh = make_empty_struct_from_cell(fieldnames(wkend(1).OH), cell(size(wkend)));
+                delta = struct('wkday', wkday_oh, 'wkend', wkend_oh, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
             end
         end
         
         function make_average_wrf_profiles(varargin)
+            
+            warning('This function is deprecated in favor of make_wrf_averages')
             
             p = advInputParser;
             p.addParameter('time_period','');
@@ -3501,15 +3534,18 @@ classdef misc_emissions_analysis
         end
         
         function [figs, oh_values] = plot_oh_conc_by_year(varargin)
+            E = JLLErrors;
             p = advInputParser;
             p.addParameter('loc_inds', nan);
             p.addParameter('days_of_week', '');
             p.addParameter('plot_type', 'line');
+            p.addParameter('y2var', 'nox'); % nox or lhno3
             p.addParameter('series', 'oh_type');
             p.parse(varargin{:});
             pout = p.Results;
             
             plot_type = pout.plot_type;
+            y2_var = pout.y2var;
             series_mode = pout.series;
             
             loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
@@ -3529,11 +3565,17 @@ classdef misc_emissions_analysis
                 OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
                 OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
                 
+                if strcmpi(y2_var, 'LHNO3')
+                    wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
+                    wrf_dat = load(wrf_dat_filename);
+                    wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
+                end
+                
                 if i_yr == 1
                     fns = fieldnames(OH.locs_wkday(1).OH);
                     n_fn = numel(fns);
                     oh_conc = nan(n_yrs, n_locs, n_fn, 2);
-                    nox_conc = nan(n_yrs, n_locs, n_fn, 2);
+                    y2_values = nan(n_yrs, n_locs, n_fn, 2);
                     oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
                 end
                 
@@ -3541,9 +3583,17 @@ classdef misc_emissions_analysis
                     for i_fn = 1:n_fn
                         oh_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
                         oh_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
-                        if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
-                            nox_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox;
-                            nox_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox;
+                        switch lower(y2_var)
+                            case 'nox'
+                                if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
+                                    y2_values(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
+                                    y2_values(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
+                                end
+                            case 'lhno3'
+                                avg = wrf_dat.locs(i_loc).WRFData.Averaged;
+                                y2_values(i_yr, i_loc, i_fn, :) = nanmean(avg.LNOXHNO3 ./ (avg.LNOXHNO3 + avg.LNOXA));
+                            otherwise
+                                E.notimplemented('No method to compute y2_var "%s"', y2_var)
                         end
                     end
                     oh_values(i_yr, i_loc).Location = OH.locs_wkday(i_loc).Location;
@@ -3555,7 +3605,7 @@ classdef misc_emissions_analysis
             
             switch lower(plot_type)
                 case 'line'
-                    plot_fxn = @(oh,nox) plot(oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
+                    plot_fxn = @oh_nox_yy;
                     post_formatting = @set_line_plot_colors;
                 case 'bar'
                     plot_fxn = @(oh,nox) bar(oh);
@@ -3570,20 +3620,21 @@ classdef misc_emissions_analysis
             switch lower(series_mode)
                 case 'oh_type'
                     figs = gobjects(n_locs,1);
+                    oh_types = [1 2 3 4];
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
-                        this_oh = squeeze(oh_conc(:,i_loc,:,1));
-                        this_nox = squeeze(nox_conc(:,i_loc,:,1));
+                        this_oh = squeeze(oh_conc(:,i_loc,oh_types,1));
+                        this_nox = squeeze(y2_values(:,i_loc,oh_types,1));
                         h = plot_fxn(this_oh, this_nox);
                         post_formatting(h);
-                        legend(h, fns);
+                        legend(h, fns(oh_types));
                         title(oh_values(1, i_loc).Location);
                         set_axis_properties();
                     end
                 case 'city'
                     figs = figure;
                     this_oh = squeeze(oh_conc(:,:,4,1));
-                    this_nox = squeeze(nox_conc(:,:,4,1));
+                    this_nox = squeeze(y2_values(:,:,4,1));
                     h = plot_fxn(this_oh, this_nox);
                     post_formatting(h);
                     legend(h, {oh_values(1, i_loc).Location});
@@ -3599,10 +3650,29 @@ classdef misc_emissions_analysis
                 end
             end
             
-            function set_axis_properties
-                ylabel('[OH] (molec. cm^{-3})')
-                xlim([0 n_yrs+1]);
-                set(gca, 'fontsize', 12, 'xtick', 1:n_yrs, 'xticklabels', years);
+            function set_axis_properties()
+                xlim_vals = [0 n_yrs+1];
+                fntsize = 12;
+                all_ax = findobj(gcf,'type','axes');
+                if numel(all_ax) == 2
+                    % if this is a yy plot, format the right axes as well
+                    switch lower(y2_var)
+                        case 'nox'
+                            label_str = '[NO_x] (ppb)';
+                        case 'lhno3'
+                            label_str = 'Frac. loss to HNO_3';
+                    end
+                    right_ax = all_ax(1);
+                    ylabel(right_ax, label_str);
+                    xlim(right_ax, xlim_vals);
+                    set(right_ax, 'fontsize', fntsize);
+                    ax = all_ax(2);
+                else
+                    ax = all_ax(1);
+                end
+                ylabel(ax, '[OH] (molec. cm^{-3})')
+                xlim(ax, xlim_vals);
+                set(ax, 'fontsize', fntsize, 'xtick', 1:n_yrs, 'xticklabels', years);
             end
             
             function myh = nox_scatterplot(oh, nox)
@@ -3620,7 +3690,14 @@ classdef misc_emissions_analysis
                     hold on
                 end
                 cb=colorbar;
-                cb.Label.String = '[NO_x] (molec. cm^{-3})';
+                cb.Label.String = 'WRF [NO_x] (molec. cm^{-3})';
+            end
+            
+            function myh = oh_nox_yy(oh, nox)
+                x = 1:size(oh,1);
+                plotoh = @(x,oh) plot(x, oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
+                plotnox = @(x,nox) plot(x, nox, '--', 'linewidth', 2, 'color', 'k');
+                [~, myh] = plotyy(x, oh, x, nox(:,3), plotoh, plotnox);
             end
         end
         
@@ -4127,6 +4204,7 @@ classdef misc_emissions_analysis
             E = JLLErrors;
             
             p = advInputParser;
+            p.addParameter('locations', {});
             p.addParameter('plot_quantity', '');
             p.addParameter('normalize', nan);
             p.addParameter('plot_averaging', '');
@@ -4138,6 +4216,7 @@ classdef misc_emissions_analysis
             p.parse(varargin{:});
             pout = p.Results;
             
+            location_inds_or_names = pout.locations;
             do_plot_fig = ~pout.no_fig;
             allow_missing_vcds = pout.allow_missing_vcds;
             
@@ -4149,7 +4228,7 @@ classdef misc_emissions_analysis
             pqopts.moves = 'MOVES';
             pqopts.vcds = 'VCDs';
             pqopts.expected_vcds = 'Expected VCDs';
-            pqopts.ohss = 'Steady state [OH]';
+            pqopts.ohss = 'Inverted [OH]';
             pqopts.ohhno3 = 'HNO3 [OH]';
             pqopts.ohwrf = 'WRF [OH]';
             
@@ -4175,8 +4254,8 @@ classdef misc_emissions_analysis
                 years = {2005 2006 2007 2008 2009 2012 2013 2014};
                 x_vals = cell2mat(years);
             elseif window_width == 3
-                years = {2005:2007, 2006:2008, 2007:2009, 2009:2011, 2010:2012, 2011:2013, 2012:2014};
-                x_vals = [2006, 2007, 2008, 2010, 2011, 2012, 2013];
+                years = {2005:2007, 2006:2008, 2007:2009, 2008:2010, 2009:2011, 2010:2012, 2011:2013, 2012:2014};
+                x_vals = [2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013];
             end
             
             n_years = numel(years);
@@ -4187,16 +4266,22 @@ classdef misc_emissions_analysis
                 % locations/times with bad fits
                 [sdates, edates] = misc_emissions_analysis.select_start_end_dates(years{i_yr});
                 fprintf('Loading %d\n', x_vals(i_yr));
-                year_week_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'TWRF', 'lu'));
-                year_weekend_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'US', 'lu'));
-                xx = misc_emissions_analysis.loc_types_to_inds('Cities');
-                week_locs = misc_emissions_analysis.append_new_spreadsheet_fields(year_week_fits.locs(xx));
-                weekend_locs = misc_emissions_analysis.append_new_spreadsheet_fields(year_weekend_fits.locs(xx));
+                oh_data = load(misc_emissions_analysis.oh_file_name(sdates, edates));
                 
-                if any(strcmpi(plot_quantity, {pqopts.ohss, pqopts.ohhno3, pqopts.ohwrf}))
-                    week_locs = misc_emissions_analysis.compute_oh_concentrations('locs', week_locs, 'time_period', years{i_yr}, 'days_of_week', 'TWRF');
-                    weekend_locs = misc_emissions_analysis.compute_oh_concentrations('locs', weekend_locs, 'time_period', years{i_yr}, 'days_of_week', 'US');
+                %year_week_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'TWRF', 'lu'));
+                %year_weekend_fits = load(misc_emissions_analysis.fits_file_name(sdates, edates, false, 1:71, 'US', 'lu'));
+                if isempty(location_inds_or_names)
+                    xx = misc_emissions_analysis.loc_types_to_inds('Cities');
+                else
+                    xx = misc_emissions_analysis.convert_input_loc_inds(location_inds_or_names);
                 end
+                week_locs = misc_emissions_analysis.append_new_spreadsheet_fields(oh_data.locs_wkday(xx));
+                weekend_locs = misc_emissions_analysis.append_new_spreadsheet_fields(oh_data.locs_wkend(xx));
+                
+                %if any(strcmpi(plot_quantity, {pqopts.ohss, pqopts.ohhno3, pqopts.ohwrf}))
+                %    week_locs = misc_emissions_analysis.compute_oh_concentrations('locs', week_locs, 'time_period', years{i_yr}, 'days_of_week', 'TWRF');
+                %    weekend_locs = misc_emissions_analysis.compute_oh_concentrations('locs', weekend_locs, 'time_period', years{i_yr}, 'days_of_week', 'US');
+                %end
                 
                 if restrict_to_moves || ismember(plot_quantity, needs_moves)
                     week_locs = remove_locs_missing_county(week_locs);
@@ -4234,14 +4319,14 @@ classdef misc_emissions_analysis
                         % MOVES doesn't have separate weekend values
                         this_weekend_val = NaN;
                     elseif strcmpi(plot_quantity, pqopts.ohss)
-                        this_week_val = week_locs(i_loc).OH.SteadyState;
-                        this_weekend_val = weekend_locs(i_loc).OH.SteadyState;
+                        this_week_val = week_locs(i_loc).OH.invert.oh;
+                        this_weekend_val = weekend_locs(i_loc).OH.invert.oh;
                     elseif strcmpi(plot_quantity, pqopts.ohhno3)
-                        this_week_val = week_locs(i_loc).OH.HNO3tau;
-                        this_weekend_val = weekend_locs(i_loc).OH.HNO3tau;
+                        this_week_val = week_locs(i_loc).OH.hno3.oh;
+                        this_weekend_val = weekend_locs(i_loc).OH.hno3.oh;
                     elseif strcmpi(plot_quantity, pqopts.ohwrf)
-                        this_week_val = week_locs(i_loc).OH.WRF;
-                        this_weekend_val = weekend_locs(i_loc).OH.WRF;
+                        this_week_val = week_locs(i_loc).OH.wrf.oh;
+                        this_weekend_val = weekend_locs(i_loc).OH.wrf.oh;
                     else
                         this_week_val = week_locs(i_loc).emis_tau.tau;
                         this_weekend_val = weekend_locs(i_loc).emis_tau.tau;
