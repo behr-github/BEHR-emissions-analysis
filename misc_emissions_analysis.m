@@ -3537,14 +3537,15 @@ classdef misc_emissions_analysis
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('loc_inds', nan);
-            p.addParameter('days_of_week', '');
             p.addParameter('plot_type', 'line');
             p.addParameter('y2var', 'nox'); % nox or lhno3
-            p.addParameter('series', 'oh_type');
+            p.addParameter('series', 'oh_type'); % oh_type or cities
+            p.addParameter('oh_types', 'all'); % match the fns (invert, hno3, wrf, ratio). cell array if oh_type plot, string if cities plot
             p.parse(varargin{:});
             pout = p.Results;
             
             plot_type = pout.plot_type;
+            oh_types = pout.oh_types;
             y2_var = pout.y2var;
             series_mode = pout.series;
             
@@ -3565,36 +3566,45 @@ classdef misc_emissions_analysis
                 OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
                 OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
                 
-                if strcmpi(y2_var, 'LHNO3')
-                    wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
-                    wrf_dat = load(wrf_dat_filename);
-                    wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
-                end
+                
+                wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
+                wrf_dat = load(wrf_dat_filename);
+                wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
+
                 
                 if i_yr == 1
                     fns = fieldnames(OH.locs_wkday(1).OH);
+                    i_invert = find(strcmpi(fns, 'invert'));
+                    i_hno3 = find(strcmpi(fns, 'hno3'));
+                    i_insert = max(i_invert, i_hno3);
+                    if ~isempty(i_invert) && ~isempty(i_hno3)
+                        fns = [fns(1:i_insert); {'frac_weighted'}; fns(i_insert+1:end)];
+                        oh_types{end+1} = 'frac_weighted';
+                    end
                     n_fn = numel(fns);
                     oh_conc = nan(n_yrs, n_locs, n_fn, 2);
-                    y2_values = nan(n_yrs, n_locs, n_fn, 2);
+                    nox_conc = nan(n_yrs, n_locs, n_fn, 2);
+                    frac_hno3 = nan(n_yrs, n_locs, n_fn, 2);
                     oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
                 end
                 
                 for i_loc = 1:n_locs
                     for i_fn = 1:n_fn
-                        oh_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
-                        oh_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
-                        switch lower(y2_var)
-                            case 'nox'
-                                if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
-                                    y2_values(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
-                                    y2_values(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
-                                end
-                            case 'lhno3'
-                                avg = wrf_dat.locs(i_loc).WRFData.Averaged;
-                                y2_values(i_yr, i_loc, i_fn, :) = nanmean(avg.LNOXHNO3 ./ (avg.LNOXHNO3 + avg.LNOXA));
-                            otherwise
-                                E.notimplemented('No method to compute y2_var "%s"', y2_var)
+                        if strcmpi(fns{i_fn}, 'frac_weighted')
+                            fhno3 = frac_hno3(i_yr, i_loc, 1);
+                            oh_conc(i_yr, i_loc, i_fn, :) = fhno3 .* oh_conc(i_yr, i_loc, i_hno3, :) + (1-fhno3) .* oh_conc(i_yr, i_loc, i_invert, :);
+                        else
+                            oh_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
+                            oh_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
+                            
+                            if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
+                                nox_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
+                                nox_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
+                            end
+                            avg = wrf_dat.locs(i_loc).WRFData.Averaged;
                         end
+                        
+                        frac_hno3(i_yr, i_loc, i_fn, :) = nanmean(avg.LNOXHNO3 ./ (avg.LNOXHNO3 + avg.LNOXA));
                     end
                     oh_values(i_yr, i_loc).Location = OH.locs_wkday(i_loc).Location;
                     oh_values(i_yr, i_loc).OH = OH.locs_wkday(i_loc).OH;
@@ -3608,7 +3618,7 @@ classdef misc_emissions_analysis
                     plot_fxn = @oh_nox_yy;
                     post_formatting = @set_line_plot_colors;
                 case 'bar'
-                    plot_fxn = @(oh,nox) bar(oh);
+                    plot_fxn = @(oh,nox,frac) bar(oh);
                     post_formatting = @(h) h;
                 case 'scatter'
                     plot_fxn = @nox_scatterplot;
@@ -3616,28 +3626,44 @@ classdef misc_emissions_analysis
             end
 %             oh_conc = seq_mat(n_yrs, 2, 3);
 %             locs = struct('Location', {'Alpha', 'Beta'});
+
+            legend_names = struct('invert', 'Lifetime + SS', 'hno3', 'NO_2 + OH \rightarrow HNO_3',... 
+                'wrf', 'WRF-Chem', 'ratio', 'Wkend/wkday NO_2 ratio',...
+                'frac_weighted', 'HNO_3/ANs weighted');
             
             switch lower(series_mode)
                 case 'oh_type'
                     figs = gobjects(n_locs,1);
-                    oh_types = [1 2 3 4];
+                    if strcmpi(oh_types, 'all')
+                        oh_type_inds = true(size(fns));
+                    else
+                        oh_type_inds = ismember(fns, oh_types);
+                    end
+                    i_wrf = find(strcmpi(fns, 'wrf'));
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
-                        this_oh = squeeze(oh_conc(:,i_loc,oh_types,1));
-                        this_nox = squeeze(y2_values(:,i_loc,oh_types,1));
-                        h = plot_fxn(this_oh, this_nox);
+                        this_oh = squeeze(oh_conc(:,i_loc,oh_type_inds,1));
+                        % always use WRF NOx (and it doesn't really matter
+                        % which fraction we use)
+                        this_nox = squeeze(nox_conc(:,i_loc,i_wrf,1));
+                        this_frac = squeeze(frac_hno3(:,i_loc,i_wrf,1));
+                        h = plot_fxn(this_oh, this_nox, this_frac);
                         post_formatting(h);
-                        legend(h, fns(oh_types));
-                        title(oh_values(1, i_loc).Location);
-                        set_axis_properties();
+                        legend(h, get_legend_strings(fns(oh_type_inds)));
+                        set_axis_properties(oh_values(1, i_loc).Location);
                     end
                 case 'city'
                     figs = figure;
-                    this_oh = squeeze(oh_conc(:,:,4,1));
-                    this_nox = squeeze(y2_values(:,:,4,1));
-                    h = plot_fxn(this_oh, this_nox);
+                    if strcmpi(oh_types, 'all')
+                        oh_type = 'invert';
+                    end
+                    oh_type_ind = strcmpi(oh_type, fns);
+                    this_oh = squeeze(oh_conc(:,:,oh_type_ind,1));
+                    this_nox = squeeze(nox_conc(:,:,oh_type_ind,1));
+                    this_frac = squeeze(frac_hno3(:,:,oh_type_ind,1));
+                    h = plot_fxn(this_oh, this_nox, this_frac);
                     post_formatting(h);
-                    legend(h, {oh_values(1, i_loc).Location});
+                    legend(h, {oh_values(1, i_loc).Location}, 'location', 'best');
                     set_axis_properties();
             end
             
@@ -3650,32 +3676,40 @@ classdef misc_emissions_analysis
                 end
             end
             
-            function set_axis_properties()
-                xlim_vals = [0 n_yrs+1];
-                fntsize = 12;
-                all_ax = findobj(gcf,'type','axes');
-                if numel(all_ax) == 2
-                    % if this is a yy plot, format the right axes as well
-                    switch lower(y2_var)
-                        case 'nox'
-                            label_str = '[NO_x] (ppb)';
-                        case 'lhno3'
-                            label_str = 'Frac. loss to HNO_3';
+            function set_axis_properties(title_str)
+                all_ax = flipud(findobj(gcf,'type','axes'));
+                ax_labels = {'[OH] (molec. cm^{-3})', '[NO_x] (ppb)', 'Frac. loss to HNO_3'};
+                
+                min_width = 1;
+                horiz_shift = 0.05;
+                vertical_shift = 0.1;
+                
+                for i_ax = 1:numel(all_ax)
+                    ax = all_ax(i_ax);
+                    set(ax, 'xlim', [0.5, n_yrs+0.5], 'xtick', 1:n_yrs, 'xticklabels', years, 'fontsize', 12, 'xticklabelrotation',45);
+                    ylabel(ax, ax_labels{i_ax});
+                    
+                    min_width = min(ax.Position(3) - 0.05, min_width);
+                    % expand the top axes some at the expense of the bottom
+                    % two. apparently the two plotyy axes positions are
+                    % linked, so I only need to change one.
+                    %
+                    % also move the axes' right edge over so the second y
+                    % axis in the bottom keeps its label in the space.
+                    if i_ax == 1
+                        ax.Position(2) = ax.Position(2) - vertical_shift;
+                        ax.Position(3) = ax.Position(3) - horiz_shift;
+                        ax.Position(4) = ax.Position(4) + vertical_shift;
+                    elseif i_ax == 2
+                        ax.Position(3) = ax.Position(3) - horiz_shift;
+                        ax.Position(4) = ax.Position(4) - vertical_shift;
                     end
-                    right_ax = all_ax(1);
-                    ylabel(right_ax, label_str);
-                    xlim(right_ax, xlim_vals);
-                    set(right_ax, 'fontsize', fntsize);
-                    ax = all_ax(2);
-                else
-                    ax = all_ax(1);
-                end
-                ylabel(ax, '[OH] (molec. cm^{-3})')
-                xlim(ax, xlim_vals);
-                set(ax, 'fontsize', fntsize, 'xtick', 1:n_yrs, 'xticklabels', years);
+                end 
+                
+                title(all_ax(1), title_str);
             end
             
-            function myh = nox_scatterplot(oh, nox)
+            function myh = nox_scatterplot(oh, nox, ~)
                 n_col = size(oh,2);
                 x = 1:size(oh,1);
                 myh = gobjects(n_col,1);
@@ -3693,11 +3727,23 @@ classdef misc_emissions_analysis
                 cb.Label.String = 'WRF [NO_x] (molec. cm^{-3})';
             end
             
-            function myh = oh_nox_yy(oh, nox)
+            function [oh_handles, nox_handles, frac_handles] = oh_nox_yy(oh, nox, frac)
+                subplot(2,1,1);
                 x = 1:size(oh,1);
-                plotoh = @(x,oh) plot(x, oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
-                plotnox = @(x,nox) plot(x, nox, '--', 'linewidth', 2, 'color', 'k');
-                [~, myh] = plotyy(x, oh, x, nox(:,3), plotoh, plotnox);
+                oh_handles = plot(x, oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
+                
+                subplot(2,1,2);
+                % not tested for the city style plot anymore
+                plotnox = @(x,nox) plot(x, nox, 'o-', 'linewidth', 2, 'color', 'k', 'markerfacecolor',[0.7 0.7 0.7], 'markersize', 10);
+                plotfrac = @(x,frac) plot(x, frac, '*', 'color', 'r',  'markersize', 10, 'linewidth', 2);
+                [~, nox_handles, frac_handles] = plotyy(x, nox, x, frac, plotnox, plotfrac);
+            end
+            
+            function legstr = get_legend_strings(oh_types)
+                legstr = cell(size(oh_types));
+                for i=1:numel(oh_types)
+                    legstr{i} = legend_names.(oh_types{i});
+                end
             end
         end
         
