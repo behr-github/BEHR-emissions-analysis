@@ -1358,8 +1358,20 @@ classdef misc_emissions_analysis
                     % Option 4: solve using the weekend/weekday NO2 VCD
                     % ratio and weekend/weekday lifetimes
                     vcd_ratio = wkend_vcds(i_loc) ./ wkday_vcds(i_loc);
-                    [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
-                        this_wkend_loc.emis_tau.tau, phox, alpha, 'nox_initial', wkday.wrf.nox ./ wkday.wrf.ndens * 1e9);
+                    try
+                        [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
+                            this_wkend_loc.emis_tau.tau, phox, alpha, 'nox_initial', wkday.wrf.nox ./ wkday.wrf.ndens * 1e9);
+                    catch err
+                        if strcmpi(err.identifier, 'symbolic:numeric:InvalidStartingPoint')
+                            if DEBUG_LEVEL > 0
+                                fprintf('Weekend/weekday ratio solver failed with message:\n  "%s"\n\n', err.message)
+                            end
+                            wkday.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                            wkend.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                        else
+                            rethrow(err)
+                        end
+                    end
                 else
                     if DEBUG_LEVEL > 0
                         fprintf('Not calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
