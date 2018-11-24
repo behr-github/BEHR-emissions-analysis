@@ -194,6 +194,11 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.oh_dir, filename);
         end
         
+        function filename = wrf_matched_oh_file_name()
+            filename = 'WRF_matched_OH.mat';
+            filename = fullfile(misc_emissions_analysis.oh_dir, filename);
+        end
+        
         function filename = wrf_grid_area_file()
             filename = fullfile(misc_emissions_analysis.emis_wrf_dir, 'wrfgridarea_d01');
         end
@@ -2599,6 +2604,10 @@ classdef misc_emissions_analysis
                     'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau);
                 wkday_oh = make_empty_struct_from_cell(fieldnames(wkday(1).OH), cell(size(wkday)));
                 wkend_oh = make_empty_struct_from_cell(fieldnames(wkend(1).OH), cell(size(wkend)));
+                for i_loc = 1:numel(wkday)
+                    wkday_oh(i_loc) = wkday(i_loc).OH;
+                    wkend_oh(i_loc) = wkend(i_loc).OH;
+                end
                 delta = struct('wkday', wkday_oh, 'wkend', wkend_oh, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
             end
         end
@@ -3533,6 +3542,132 @@ classdef misc_emissions_analysis
             
         end
         
+        function fit_wrf_oh_with_ss(loc_names)
+            ss_locs = misc_emissions_analysis.read_locs_file();
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(loc_names);
+            years = 2006:2013;
+            %years = 2011;
+            
+            n_locs = numel(loc_inds);
+            n_years = numel(years);
+            
+            dummy_cell = repmat({nan(1,n_years)},n_locs,1);
+            fit_values = make_empty_struct_from_cell({'oh_wrf', 'oh_fit', 'tau_obs', 'tau_fit', 'vocr_fit', 'phox_fit', 'alpha_fit'}, dummy_cell);
+            
+            for i_yr = 1:n_years
+                y = years(i_yr);
+                fprintf('Working on %d\n', y);
+                year_window = (y-1):(y+1);
+                
+                [fns, oh, nox, ~, tau] = misc_emissions_analysis.load_oh_by_year(year_window, loc_inds, 'extra_vars', {'tau'});
+                i_wrf = strcmpi(fns, 'wrf');
+                if sum(i_wrf) ~= 1
+                    error('did not find WRF index')
+                end
+                
+                wrf_wkday_oh = oh(:, i_wrf, 1);
+                wrf_wkday_nox = nox(:, i_wrf, 1);
+                obs_wkday_tau = tau(:, i_wrf, 1); % which index we use in the second dim doesn't matter here
+                
+                for i_loc = 1:n_locs
+                    fit_values(i_loc).Location = ss_locs(loc_inds(i_loc)).Location;
+                    fit_values(i_loc).ShortName = ss_locs(loc_inds(i_loc)).ShortName;
+                    
+                    fit_values(i_loc).oh_wrf(i_yr) = wrf_wkday_oh(i_loc);
+                    fit_values(i_loc).tau_obs(i_yr) = obs_wkday_tau(i_loc);
+                    
+                    if any([isnan(wrf_wkday_oh(i_loc)), isnan(wrf_wkday_nox(i_loc)), isnan(obs_wkday_tau(i_loc))])
+                        fprintf('  No OH, NOx, or tau value for %d of %d, skipping\n', i_loc, n_locs)
+                        continue
+                    end
+                    
+                    fprintf('  Solving for VOCR, PHOx, ALPHA for location %d of %d\n', i_loc, n_locs);
+                    [fit_values(i_loc).oh_fit(i_yr), fit_values(i_loc).vocr_fit(i_yr), fit_values(i_loc).phox_fit(i_yr),...
+                        fit_values(i_loc).alpha_fit(i_yr), fit_values(i_loc).tau_fit(i_yr)] ...
+                        = match_wrf_oh(wrf_wkday_oh(i_loc), wrf_wkday_nox(i_loc)*2e10, obs_wkday_tau(i_loc));
+                    % multiply NOx by 2e10 to approximately convert from
+                    % ppb to molec/cm^3
+                end
+            end
+            
+            save(misc_emissions_analysis.wrf_matched_oh_file_name(), 'fit_values')
+        end
+        
+        function [fns, oh_conc, nox_conc, oh_values, varargout] = load_oh_by_year(year_window, loc_inds, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('extra_vars', {});
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            extra_vars = pout.extra_vars;
+            calc_frac_hno3 = ismember('frac_hno3', extra_vars);
+
+            [win_start, win_end] = misc_emissions_analysis.select_start_end_dates(year_window);
+            oh_filename = misc_emissions_analysis.oh_file_name(win_start, win_end);
+            OH = load(oh_filename);
+            
+            OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
+            OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
+            n_locs = numel(OH.locs_wkday);
+            
+            fns = fieldnames(OH.locs_wkday(1).OH);
+            i_invert = find(strcmpi(fns, 'invert'));
+            i_hno3 = find(strcmpi(fns, 'hno3'));
+            i_insert = max(i_invert, i_hno3);
+            if ~isempty(i_invert) && ~isempty(i_hno3) && calc_frac_hno3
+                fns = [fns(1:i_insert); {'frac_weighted'}; fns(i_insert+1:end)];
+                i_frac_var = strcmpi(extra_vars, 'frac_hno3');
+            end
+            n_fn = numel(fns);
+            
+            if calc_frac_hno3
+                wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
+                wrf_dat = load(wrf_dat_filename);
+                wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
+            end
+            
+            oh_conc = nan(n_locs, n_fn, 2);
+            nox_conc = nan(n_locs, n_fn, 2);
+            oh_values = repmat(struct('Location', '', 'OH', struct()), 1, n_locs);
+            varargout = repmat({nan(n_locs, n_fn, 2)}, 1, numel(extra_vars));
+            for i_loc = 1:n_locs
+                
+                for i_fn = 1:n_fn
+                    if strcmpi(fns{i_fn}, 'frac_weighted')
+                        fhno3 = varargout{i_frac_var}(i_loc, 1, 1);
+                        oh_conc(i_yr, i_loc, i_fn, :) = fhno3 .* oh_conc(i_yr, i_loc, i_hno3, :) + (1-fhno3) .* oh_conc(i_yr, i_loc, i_invert, :);
+                    else
+                        oh_conc(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
+                        oh_conc(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
+                        
+                        if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
+                            nox_conc(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
+                            nox_conc(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
+                        end
+                        
+                    end
+                    
+                    for i_var = 1:numel(extra_vars)
+                        this_var = extra_vars{i_var};
+                        switch lower(this_var)
+                            case 'frac_hno3'
+                                avg = wrf_dat.locs(i_loc).WRFData.Averaged;
+                                varargout{i_var}(i_fn, :, :) = nanmean(avg.LNOXHNO3 ./ (avg.LNOXHNO3 + avg.LNOXA));
+                            case 'tau'
+                                varargout{i_var}(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).emis_tau.tau;
+                                varargout{i_var}(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).emis_tau.tau;
+                            otherwise
+                                E.notimplemented('No method to compute the extra variable "%s" defined', this_var);
+                        end
+                    end
+                end
+                oh_values(i_loc).Location = OH.locs_wkday(i_loc).Location;
+                oh_values(i_loc).OH = OH.locs_wkday(i_loc).OH;
+                oh_values(i_loc).OH(2) = OH.locs_wkend(i_loc).OH;
+            end
+        end
+        
         function [figs, oh_values] = plot_oh_conc_by_year(varargin)
             E = JLLErrors;
             p = advInputParser;
@@ -3559,58 +3694,21 @@ classdef misc_emissions_analysis
             for i_yr = 1:n_yrs
                 fprintf('Working on %d\n', years(i_yr));
                 year_window = (years(i_yr)-1):(years(i_yr)+1);
-                [win_start, win_end] = misc_emissions_analysis.select_start_end_dates(year_window);
-                oh_filename = misc_emissions_analysis.oh_file_name(win_start, win_end);
-                OH = load(oh_filename);
-                
-                OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
-                OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
-                
-                
-                wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
-                wrf_dat = load(wrf_dat_filename);
-                wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
-
                 
                 if i_yr == 1
-                    fns = fieldnames(OH.locs_wkday(1).OH);
-                    i_invert = find(strcmpi(fns, 'invert'));
-                    i_hno3 = find(strcmpi(fns, 'hno3'));
-                    i_insert = max(i_invert, i_hno3);
-                    if ~isempty(i_invert) && ~isempty(i_hno3)
-                        fns = [fns(1:i_insert); {'frac_weighted'}; fns(i_insert+1:end)];
-                        oh_types{end+1} = 'frac_weighted';
-                    end
-                    n_fn = numel(fns);
+                    
                     oh_conc = nan(n_yrs, n_locs, n_fn, 2);
                     nox_conc = nan(n_yrs, n_locs, n_fn, 2);
                     frac_hno3 = nan(n_yrs, n_locs, n_fn, 2);
                     oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
                 end
                 
-                for i_loc = 1:n_locs
-                    for i_fn = 1:n_fn
-                        if strcmpi(fns{i_fn}, 'frac_weighted')
-                            fhno3 = frac_hno3(i_yr, i_loc, 1);
-                            oh_conc(i_yr, i_loc, i_fn, :) = fhno3 .* oh_conc(i_yr, i_loc, i_hno3, :) + (1-fhno3) .* oh_conc(i_yr, i_loc, i_invert, :);
-                        else
-                            oh_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
-                            oh_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
-                            
-                            if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
-                                nox_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
-                                nox_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
-                            end
-                            avg = wrf_dat.locs(i_loc).WRFData.Averaged;
-                        end
-                        
-                        frac_hno3(i_yr, i_loc, i_fn, :) = nanmean(avg.LNOXHNO3 ./ (avg.LNOXHNO3 + avg.LNOXA));
-                    end
-                    oh_values(i_yr, i_loc).Location = OH.locs_wkday(i_loc).Location;
-                    oh_values(i_yr, i_loc).OH = OH.locs_wkday(i_loc).OH;
-                    oh_values(i_yr, i_loc).OH(2) = OH.locs_wkend(i_loc).OH;
-                end
+                [fns, oh_conc(i_yr, :, :, :), nox_conc(i_yr, :, :, :), oh_values(i_yr, :), frac_hno3(i_yr, :, :, :)] ...
+                    = misc_emissions_analysis.load_oh_by_year(year_window, loc_inds, 'extra_vars', {'frac_hno3'});
                 
+                if ismember('frac_weighted', fns) && ~ismember('frac_weighted', oh_types)
+                    oh_types{end+1} = 'frac_weighted';
+                end
             end
             
             switch lower(plot_type)
