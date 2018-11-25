@@ -8,9 +8,18 @@ classdef misc_wrf_lifetime_analysis
     
     methods(Static)
         
+        %%%%%%%%%%%%%%%%%%%%%%%%%
+        % Property-like methods %
+        %%%%%%%%%%%%%%%%%%%%%%%%%
         function workdir = workspace_dir
             mydir = fileparts(mfilename('fullpath'));
             workdir = fullfile(mydir, 'Workspaces', 'WRFData');
+        end
+        
+        function filename = wrf_avg_name(years_in, variable)
+            years_str = strjoin(sprintfmulti('%d', years_in), '_');
+            filename = sprintf('Summer_WRF_avg_%s_%s.mat', years_str, variable);
+            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, filename);
         end
         
         function savename = diag_lifetime_savename(start_dates, end_dates)
@@ -18,6 +27,10 @@ classdef misc_wrf_lifetime_analysis
             savename = sprintf('WRF_diagnostic_lifetime_%s_to_%s.mat', datestr(dvec(1),'yyyy-mm-dd'), datestr(dvec(end), 'yyyy-mm-dd'));
             savename = fullfile(misc_wrf_lifetime_analysis.workspace_dir, savename);
         end
+        
+        %%%%%%%%%%%%%%%%%%%
+        % Utility Methods %
+        %%%%%%%%%%%%%%%%%%%
         
         function average_wrf_diag_lifetime(start_dates, end_dates, varargin)
             p = advInputParser;
@@ -295,6 +308,192 @@ classdef misc_wrf_lifetime_analysis
             
         end
         
+        function [profiles, xlon, xlat] = load_wrf_profiles_for_years(years, specie, varargin)
+            p = advInputParser;
+            p.addParameter('avg_levels', []);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_levels = pout.avg_levels;
+            
+            avg = RunningAverage();
+            for i_yr = 1:numel(years)
+                Profs = load(misc_wrf_lifetime_analysis.wrf_avg_name(years(i_yr), specie));
+                if i_yr == 1
+                    xlon = double(Profs.xlon);
+                    xlat = double(Profs.xlat);
+                end
+                
+                if ~isempty(avg_levels)
+                    prof_data = nanmean(Profs.profiles(:,:,avg_levels), 3);
+                else
+                    prof_data = Profs.profiles;
+                end
+                
+                % unlike the BEHR VCDs in the main emissions class, the WRF
+                % data isn't weighted by area (since all grid cells should
+                % have about the same area) so to go from 1 year to
+                % multi-year averages, we can just do a simple
+                % average-of-averages.
+                avg.addData(double(prof_data));
+            end
+            profiles = avg.getWeightedAverage();
+        end
+        
+        function [wrf_lon, wrf_lat, wrf_data] = wrf_data_in_box(center_lon, center_lat, box_radius, wrf_lon, wrf_lat, wrf_data)
+            xx_old = [];
+            yy_old = [];
+            
+            [x_center, y_center] = find_closest_ind(center_lon, center_lat);
+            xx = abs(wrf_lon(:, y_center) - center_lon) < box_radius;
+            yy = abs(wrf_lat(x_center,:) - center_lat) < box_radius;
+            
+            while ~isequal(xx, xx_old) || ~isequal(yy, yy_old)
+                % Since the WRF data isn't in an equirectangular grid, the
+                % x-indices that give the right width at the top of the box
+                % might not at the bottom, and likewise for the y-indices.
+                % What this loop does is iterate until it finds indices
+                % that give at least the requested width at all edges of
+                % the box. It has to iterate since the x-indices chosen
+                % will affect the width spanned by the y-indices and
+                % vice-versa.
+                xx_old = xx;
+                yy_old = yy;
+                
+                xx1 = abs(wrf_lon(:, find(yy,1,'first')) - center_lon) < box_radius;
+                xx2 = abs(wrf_lon(:, find(yy,1,'last')) - center_lon) < box_radius;
+                yy1 = abs(wrf_lat(find(xx,1,'first'), :) - center_lat) < box_radius;
+                yy2 = abs(wrf_lat(find(xx,1,'last'), :) - center_lat) < box_radius;
+                
+                xx = xx1 | xx2;
+                yy = yy1 | yy2;
+
+            end
+            
+            wrf_lon = wrf_lon(xx,yy);
+            wrf_lat = wrf_lat(xx,yy);
+            wrf_data = wrf_data(xx,yy,:);
+            
+            function [xc, yc] = find_closest_ind(target_lon, target_lat)
+                r = (wrf_lon(:) - target_lon(:)).^2 + (wrf_lat(:) - target_lat).^2;
+                [~, imin] = min(r);
+                [xc, yc] = ind2sub(size(wrf_lon), imin);
+            end
+        end
+        
+        function locs = convert_locs(locs)
+            E = JLLErrors;
+            if iscellstr(locs)
+                loc_inds = misc_emissions_analysis.convert_input_loc_inds(locs);
+                locs = misc_emissions_analysis.read_locs_file();
+                locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            elseif isnumeric(locs)
+                loc_inds = locs;
+                locs = misc_emissions_analysis.read_locs_file();
+                locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            elseif ~isstruct(locs)
+                E.badinput('LOCS must be a cell array of strings/chars, a numeric array, or a structure')
+            end
+        end
+        
+        %%%%%%%%%%%%%%%%%%%%
+        % Plotting Methods %
+        %%%%%%%%%%%%%%%%%%%%
+        function [oh_conc, oh_std, radii] = sample_wrf_oh_radii_by_year(locs, years)
+            E = JLLErrors;
+            locs = misc_wrf_lifetime_analysis.convert_locs(locs);
+            
+            radii = 0:0.1:2;
+            angles = linspace(0, 2*pi, 72);
+            
+            n_years = numel(years);
+            n_locs = numel(locs);
+            n_radii = numel(radii);
+            
+            oh_conc = nan(n_radii, n_years, n_locs);
+            oh_std = nan(n_radii, n_years, n_locs);
+            
+            for i_yr = 1:n_years
+                y = years(i_yr);
+                window = (y-1):(y+1);
+                [OH.oh, OH.lon, OH.lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(window, 'ho', 'avg_levels', 1:5);
+                OH.oh = OH.oh * 1e-6; % convert ppm to pure mixing ratio
+                for i_loc = 1:n_locs
+                    max_radius = unique(locs(i_loc).BoxSize(3:4));
+                    if numel(max_radius) > 1
+                        E.notimplemented('Did not expect the box width to be different on opposite sides')
+                    end
+                    
+                    % What we want is to compute the average OH at
+                    % different distances from the city center, so we'll
+                    % create an interpolate for a small box around the city
+                    % and sample at a number of points in circles with
+                    % different radii for the average.
+                    this_loc = locs(i_loc);
+                    [loc_lon, loc_lat, loc_oh] = misc_wrf_lifetime_analysis.wrf_data_in_box(this_loc.Longitude, this_loc.Latitude, max_radius*2,...
+                        OH.lon, OH.lat, OH.oh);
+                    loc_interp = scatteredInterpolant(loc_lon(:), loc_lat(:), loc_oh(:));
+                    
+                    for i_r = 1:n_radii
+                        radius = radii(i_r);
+                        if radius > max_radius
+                            continue
+                        end
+                        if radius == 0
+                            oh_conc(i_r, i_yr, i_loc) = loc_interp(this_loc.Longitude, this_loc.Latitude);
+                        else
+                            sample_lons = this_loc.Longitude + radius .* cos(angles);
+                            sample_lats = this_loc.Latitude + radius .* sin(angles);
+                            
+                            sample_oh = loc_interp(sample_lons, sample_lats);
+                            oh_conc(i_r, i_yr, i_loc) = nanmean(sample_oh);
+                            oh_std(i_r, i_yr, i_loc) = nanstd(sample_oh);
+                        end
+                    end
+                end
+            end
+        end
+        
+        function figs = plot_wrf_oh_radii(locs)
+            locs = misc_wrf_lifetime_analysis.convert_locs(locs);
+            years = 2006:2013;
+            [oh_conc, oh_stds, radii] = misc_wrf_lifetime_analysis.sample_wrf_oh_radii_by_year(locs, years);
+            
+            n_locs = numel(locs);
+            n_years = numel(years);
+            line_cols = nan(n_years,3);
+            cmap = 'jet';
+            for i_yr = 1:n_years
+                line_cols(i_yr,:) = map2colmap(i_yr, 1, n_years, cmap);
+            end
+            
+            figs = gobjects(n_locs,1);
+            for i_loc = 1:n_locs
+                this_loc = locs(i_loc);
+                figs(i_loc) = figure;
+                %l = gobjects(n_years,1);
+                for i_yr = 1:n_years
+                    this_oh_conc = oh_conc(:,i_yr,i_loc)*2e19; % convert mixing ratio to approx number density
+                    this_oh_std = oh_stds(:,i_yr,i_loc)*2e19;
+                    line(radii, this_oh_conc, 'linewidth', 2, 'marker', 'o', 'color', line_cols(i_yr,:),...
+                        'markerfacecolor', line_cols(i_yr,:), 'markeredgecolor', 'k');
+                    scatter_errorbars(radii, this_oh_conc, this_oh_std, 'color', line_cols(i_yr,:));
+                end
+                
+                rr_has_data = any(~isnan(oh_conc(:,:,i_loc)),2);
+                l1 = find(rr_has_data,1,'first');
+                l2 = find(rr_has_data,1,'last')+2;
+                lim_radii = veccat(radii(1) - mean(diff(radii)), radii, radii(2) + mean(diff(radii)));
+                xlim([lim_radii(l1), lim_radii(l2)]);
+                
+                cb = colorbar;
+                caxis([min(years), max(years)]);
+                colormap(cmap);
+                title(this_loc.Location);
+                xlabel('Distance from city center (deg.)');
+                ylabel('[OH] (molec. cm^{-3})');
+            end
+        end
     end
 end
 

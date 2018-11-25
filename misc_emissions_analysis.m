@@ -95,12 +95,6 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
-        function filename = wrf_avg_name(years_in, variable)
-            years_str = strjoin(sprintfmulti('%d', years_in), '_');
-            filename = sprintf('Summer_WRF_avg_%s_%s.mat', years_str, variable);
-            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, filename);
-        end
-        
         function filename = winds_file_name(start_date, end_date)
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
@@ -1441,6 +1435,47 @@ classdef misc_emissions_analysis
                     locs(i_loc).WRFData.(spec) = nanmean(reshape(value(levels_i, :), [], 1));
                 end
             end
+        end
+        
+        function locs = cutdown_locs_by_index(locs, loc_inds, varargin)
+            % Cuts down the structure LOCS to the locations specified by
+            % LOCS_INDS by matching the site names from LOCS against the
+            % location names in the structure read in from the spreadsheet.
+            % If LOCS_INDS is an empty array, do not cut the locations down
+            % at all.
+            
+            E = JLLErrors;
+            p = advInputParser;
+            p.addFlag('keep_order');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            keep_order = pout.keep_order;
+            
+            if isempty(loc_inds)
+                return 
+            end
+            
+            locs_ss = misc_emissions_analysis.read_locs_file();
+            ss_names = {locs_ss(loc_inds).Location};
+            in_names = {locs.Location};
+            if ~keep_order
+                xx = ismember(in_names, ss_names);
+                if sum(xx) ~= numel(loc_inds)
+                    E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
+                end
+            else
+                xx = nan(size(ss_names));
+                for i=1:numel(xx)
+                    xx_i = find(strcmp(ss_names{i}, in_names));
+                    if isempty(xx_i)
+                        E.callError('loc_lookup_error', 'Could not find "%s" in the given locs structure', ss_names{i});
+                    end
+                    xx(i) = xx_i;
+                end
+            end
+            locs = locs(xx);
+            
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -5763,47 +5798,6 @@ classdef misc_emissions_analysis
             r = sqrt((lon_grid - lon_pt).^2 + (lat_grid - lat_pt).^2);
             [~, i_min] = min(r(:));
             [xx, yy] = ind2sub(size(lon_grid), i_min); 
-        end
-        
-        function locs = cutdown_locs_by_index(locs, loc_inds, varargin)
-            % Cuts down the structure LOCS to the locations specified by
-            % LOCS_INDS by matching the site names from LOCS against the
-            % location names in the structure read in from the spreadsheet.
-            % If LOCS_INDS is an empty array, do not cut the locations down
-            % at all.
-            
-            E = JLLErrors;
-            p = advInputParser;
-            p.addFlag('keep_order');
-            p.parse(varargin{:});
-            pout = p.Results;
-            
-            keep_order = pout.keep_order;
-            
-            if isempty(loc_inds)
-                return 
-            end
-            
-            locs_ss = misc_emissions_analysis.read_locs_file();
-            ss_names = {locs_ss(loc_inds).Location};
-            in_names = {locs.Location};
-            if ~keep_order
-                xx = ismember(in_names, ss_names);
-                if sum(xx) ~= numel(loc_inds)
-                    E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
-                end
-            else
-                xx = nan(size(ss_names));
-                for i=1:numel(xx)
-                    xx_i = find(strcmp(ss_names{i}, in_names));
-                    if isempty(xx_i)
-                        E.callError('loc_lookup_error', 'Could not find "%s" in the given locs structure', ss_names{i});
-                    end
-                    xx(i) = xx_i;
-                end
-            end
-            locs = locs(xx);
-            
         end
         
         function new_locs = match_locs_structs(new_locs, base_locs)
