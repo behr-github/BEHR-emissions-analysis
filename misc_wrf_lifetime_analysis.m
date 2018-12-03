@@ -340,6 +340,36 @@ classdef misc_wrf_lifetime_analysis
             profiles = avg.getWeightedAverage();
         end
         
+        function [vcds, lon, lat] = compute_wrf_vcds_for_years(years, specie)
+            E = JLLErrors;
+            [profs, lon, lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, specie);
+            profs = profs * 1e-6; % assume profiles are in ppm
+            [pres, plon, plat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, 'pres');
+            
+            if ~isequal(plon, lon) || ~isequal(plat,lat)
+                E.callError('grid_mismatch', 'Profiles and pressure defined on different grids')
+            end
+            
+            % Put the third dimension first, so that iterating over the
+            % second and third dims goes over all profiles.
+            if ndims(profs) ~= 3 || ndims(pres) ~= 3
+                E.notimplemented('profiles or pressures are not 3D')
+            end
+            
+            profs = shiftdim(profs, 2);
+            pres = shiftdim(pres, 2);
+            
+            sz = size(profs);
+            vcds = nan(sz(2:end));
+            n_vcd = numel(vcds);
+            wb = waitbar(0,'Computing WRF VCDs');
+            for i_prof = 1:n_vcd
+                waitbar(i_prof/n_vcd, wb);
+                vcds(i_prof) = integPr2(profs(:,i_prof), pres(:,i_prof), pres(1,i_prof));
+            end
+            delete(wb);
+        end
+        
         function [wrf_lon, wrf_lat, wrf_data] = wrf_data_in_box(center_lon, center_lat, box_radius, wrf_lon, wrf_lat, wrf_data)
             xx_old = [];
             yy_old = [];
@@ -470,28 +500,35 @@ classdef misc_wrf_lifetime_analysis
             figs = gobjects(n_locs,1);
             for i_loc = 1:n_locs
                 this_loc = locs(i_loc);
+                loc_lat = this_loc.Latitude;
+                % convert radii to distance in kilometers
+                distance = nan(size(radii));
+                for i_r = 1:numel(radii)
+                    distance(i_r) = m_idist(0, loc_lat, radii(i_r), loc_lat)/1000;
+                end
                 figs(i_loc) = figure;
                 %l = gobjects(n_years,1);
                 for i_yr = 1:n_years
                     this_oh_conc = oh_conc(:,i_yr,i_loc)*2e19; % convert mixing ratio to approx number density
                     this_oh_std = oh_stds(:,i_yr,i_loc)*2e19;
-                    line(radii, this_oh_conc, 'linewidth', 2, 'marker', 'o', 'color', line_cols(i_yr,:),...
+                    line(distance, this_oh_conc, 'linewidth', 2, 'marker', 'o', 'color', line_cols(i_yr,:),...
                         'markerfacecolor', line_cols(i_yr,:), 'markeredgecolor', 'k');
-                    scatter_errorbars(radii, this_oh_conc, this_oh_std, 'color', line_cols(i_yr,:));
+                    scatter_errorbars(distance, this_oh_conc, this_oh_std, 'color', line_cols(i_yr,:));
                 end
                 
                 rr_has_data = any(~isnan(oh_conc(:,:,i_loc)),2);
                 l1 = find(rr_has_data,1,'first');
                 l2 = find(rr_has_data,1,'last')+2;
-                lim_radii = veccat(radii(1) - mean(diff(radii)), radii, radii(2) + mean(diff(radii)));
+                lim_radii = veccat(distance(1) - mean(diff(distance)), distance, distance(2) + mean(diff(distance)));
                 xlim([lim_radii(l1), lim_radii(l2)]);
                 
                 cb = colorbar;
                 caxis([min(years), max(years)]);
                 colormap(cmap);
                 title(this_loc.Location);
-                xlabel('Distance from city center (deg.)');
+                xlabel('Distance from city center (km)');
                 ylabel('[OH] (molec. cm^{-3})');
+                set(gca,'fontsize',16)
             end
         end
     end

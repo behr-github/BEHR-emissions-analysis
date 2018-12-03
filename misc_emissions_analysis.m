@@ -3864,6 +3864,11 @@ classdef misc_emissions_analysis
                             case 'n_dofs'
                                 varargout{i_var}(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).emis_tau.n_dofs;
                                 varargout{i_var}(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).emis_tau.n_dofs;
+                            case 'behr_vcds'
+                                if i_fn == 1
+                                    varargout{i_var}(i_loc,:,1) = misc_emissions_analysis.avg_vcds_around_loc(OH.locs_wkday(i_loc), year_window, 'TWRF', 'radius', 0.25);
+                                    varargout{i_var}(i_loc,:,2) = misc_emissions_analysis.avg_vcds_around_loc(OH.locs_wkday(i_loc), year_window, 'US', 'radius', 0.25);
+                                end
                             otherwise
                                 E.notimplemented('No method to compute the extra variable "%s" defined', this_var);
                         end
@@ -3887,6 +3892,7 @@ classdef misc_emissions_analysis
             p.addParameter('oh_types', 'all'); % match the fns (invert, hno3, wrf, ratio). cell array if oh_type plot, string if cities plot
             p.addParameter('include_wrf_center', true);
             p.addParameter('days_of_week','TWRF');
+            p.addParameter('nox_value', 'vcds');
             p.parse(varargin{:});
             pout = p.Results;
             
@@ -3895,8 +3901,9 @@ classdef misc_emissions_analysis
             y2_var = pout.y2var;
             include_wrf_center = pout.include_wrf_center;
             series_mode = pout.series;
+            nox_value = pout.nox_value;
             
-            extra_vars = {'frac_hno3'};
+            extra_vars = {'frac_hno3', 'behr_vcds'};
             if include_wrf_center
                 extra_oh_types = {'city_center_wrf'};
             else
@@ -3926,18 +3933,20 @@ classdef misc_emissions_analysis
                 
                 
                 
-                [fns, loaded_oh_conc, loaded_oh_error, loaded_nox_conc, loaded_oh_values, loaded_frac_hno3] ...
+                [fns, loaded_oh_conc, loaded_oh_error, loaded_nox_conc, loaded_oh_values, loaded_frac_hno3, loaded_vcds] ...
                     = misc_emissions_analysis.load_oh_by_year(year_window, loc_inds, 'extra_vars', extra_vars, 'extra_oh_types', extra_oh_types);
                 
                 if i_yr == 1
                     n_fn = numel(fns);
+                    n_std_oh = n_fn - numel(extra_oh_types);
                     if strcmpi(oh_types, 'all')
                         oh_types = fns;
                     end
                     oh_conc = nan(n_yrs, n_locs, n_fn, 2);
                     oh_error = nan(n_yrs, n_locs, n_fn, 2, 2);
-                    nox_conc = nan(n_yrs, n_locs, n_fn - numel(extra_oh_types), 2);
-                    frac_hno3 = nan(n_yrs, n_locs, n_fn - numel(extra_oh_types), 2);
+                    nox_conc = nan(n_yrs, n_locs, n_std_oh, 2);
+                    frac_hno3 = nan(n_yrs, n_locs, n_std_oh, 2);
+                    behr_vcds = nan(n_yrs, n_locs, n_std_oh, 2);
                     oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
                 end
                 
@@ -3946,7 +3955,7 @@ classdef misc_emissions_analysis
                 nox_conc(i_yr,:,:,:) = loaded_nox_conc;
                 oh_values(i_yr,:) = loaded_oh_values;
                 frac_hno3(i_yr,:,:,:) = loaded_frac_hno3;
-                
+                behr_vcds(i_yr,:,:,:) = loaded_vcds;
             end
             
             switch lower(plot_type)
@@ -3972,16 +3981,28 @@ classdef misc_emissions_analysis
                 case 'oh_type'
                     figs = gobjects(n_locs,1);
                     oh_type_inds = ismember(fns, oh_types);
-
+                    
+                    i_inv = find(strcmpi(fns, 'invert'));
                     i_wrf = find(strcmpi(fns, 'wrf'));
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
                         this_oh = squeeze(oh_conc(:,i_loc,oh_type_inds, dow_ind));
                         this_oh_err = squeeze(oh_error(:,i_loc,oh_type_inds,dow_ind,:));
-                        % always use WRF NOx (and it doesn't really matter
+                        % always use inverted NOx (and it doesn't really matter
                         % which fraction we use)
-                        this_nox = squeeze(nox_conc(:, i_loc, i_wrf, dow_ind));
-                        this_frac = squeeze(frac_hno3(:, i_loc, i_wrf, dow_ind));
+                        nox_ax_label = '[NO_x] (ppb)';
+                        switch lower(nox_value)
+                            case 'invert'
+                                this_nox = squeeze(nox_conc(:, i_loc, i_inv, dow_ind));
+                            case 'wrf'
+                                this_nox = squeeze(nox_conc(:, i_loc, i_wrf, dow_ind)); %#ok<FNDSB>
+                            case 'vcds'
+                                this_nox = squeeze(behr_vcds(:, i_loc, 1, dow_ind));
+                                nox_ax_label = 'NO_2 VCD (molec. cm^{-2})';
+                            otherwise
+                                error('No method to compute nox type "%s"', nox_value);
+                        end
+                        this_frac = squeeze(frac_hno3(:, i_loc, i_inv, dow_ind));
                         [h, herr] = plot_fxn(this_oh, this_oh_err, this_nox, this_frac);
                         post_formatting(h);
                         post_formatting(herr);
@@ -4016,7 +4037,7 @@ classdef misc_emissions_analysis
             
             function set_axis_properties(title_str)
                 all_ax = flipud(findobj(gcf,'type','axes'));
-                ax_labels = {'[OH] (molec. cm^{-3})', '[NO_x] (ppb)', 'Frac. loss to HNO_3'};
+                ax_labels = {'[OH] (molec. cm^{-3})', nox_ax_label, 'Frac. loss to HNO_3'};
                 
                 min_width = 1;
                 horiz_shift = 0.05;
@@ -4188,7 +4209,10 @@ classdef misc_emissions_analysis
                                 yr_err = [this_oh_err(i_yr, 1), this_oh_err(j_yr, 2)];
                             end
                             yr_dofs = this_ndofs([i_yr, j_yr])';
-                            is_diff(i_yr, j_yr) = misc_emissions_analysis.is_change_significant(yr_oh, yr_err, yr_dofs);
+                            %sig = misc_emissions_analysis.is_change_significant(yr_oh, yr_err, yr_dofs);
+                            sig = misc_emissions_analysis.is_change_significant_alt(yr_oh, yr_err, yr_dofs);
+                            is_diff(i_yr, j_yr) = sig;
+                            is_diff(j_yr, i_yr) = sig;
                         end
                     end
                     
@@ -5741,6 +5765,92 @@ classdef misc_emissions_analysis
                 title(this_loc.ShortName);
             end
         end
+        
+        function figs = plot_vcd_diff_around_locs(locs, years, varargin)
+            p = inputParser;
+            p.addParameter('only_diff', true);
+            p.addParameter('diff_type', 'abs');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            only_diff = pout.only_diff;
+            diff_type = pout.diff_type;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(locs);
+            locs = misc_emissions_analysis.read_locs_file();
+            locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            n_locs = numel(locs);
+            
+            [wrf_vcds, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.compute_wrf_vcds_for_years(years, 'no2');
+            behr = misc_emissions_analysis.load_vcds_for_years(years, 'TWRF');
+            behr_vcds = behr.daily_vcds;
+            behr_lon = behr.lon;
+            behr_lat = behr.lat;
+            
+            figs = gobjects(n_locs,1);
+            for i_loc = 1:n_locs
+                this_loc = locs(i_loc);
+                % get the BEHR VCDs w/i the box width of the city. Get the
+                % WRF VCDs over a bit larger area and interpolate them to
+                % the BEHR VCDs lat/lon
+                radius = this_loc.BoxSize(3)/0.05; % the radius is the number of grid points, not distance.
+                [xx,yy] = misc_emissions_analysis.find_indicies_in_box_around_point(this_loc, behr_lon, behr_lat, radius);
+                these_behr_vcds = behr_vcds(xx,yy);
+                these_behr_lon = behr_lon(xx,yy);
+                these_behr_lat = behr_lat(xx,yy);
+                
+                xx_wrf = misc_emissions_analysis.find_indices_in_radius_around_loc(this_loc, wrf_lon, wrf_lat, radius*3);
+                WI = scatteredInterpolant(wrf_lon(xx_wrf), wrf_lat(xx_wrf), wrf_vcds(xx_wrf));
+                these_wrf_vcds = reshape(WI(these_behr_lon(:), these_behr_lat(:)), size(these_behr_vcds));
+                
+                figs(i_loc) = figure;
+                if ~only_diff
+                    figs(i_loc).Position(3) = 2 * figs(i_loc).Position(3);
+                    ax=subplot(1,3,1);
+                    pcolor_vcds(ax, these_behr_lon, these_behr_lat, these_behr_vcds, 'none');
+                    title('BEHR');
+                    
+                    ax = subplot(1,3,2);
+                    pcolor_vcds(ax, these_behr_lon, these_behr_lat, these_wrf_vcds, 'none');
+                    title('WRF-Chem');
+                    
+                    ax = subplot(1,3,3);
+                else
+                    ax = axes();
+                end
+                
+                switch lower(diff_type)
+                    case 'abs'
+                        this_diff = these_wrf_vcds - these_behr_vcds;
+                    case 'rel'
+                        this_diff = reldiff(these_wrf_vcds, these_behr_vcds)*100;
+                    otherwise
+                        error('diff type not recognized')
+                end
+                pcolor_vcds(ax, these_behr_lon, these_behr_lat, this_diff, diff_type);
+                title(this_loc.Location);
+            end
+            
+            function pcolor_vcds(ax,lon,lat,vcds,diff_type)
+                pcolor(ax, lon, lat, vcds);
+                shading flat;
+                cb = colorbar;
+                switch lower(diff_type)
+                    case 'abs'
+                        cb.Label.String = '\Delta VCD (molec. cm^{-2})';
+                        colormap(ax, blue_red_cmap)
+                        caxis(calc_plot_limits(vcds(:), 'diff', 'pow10'))
+                    case 'rel'
+                        cb.Label.String = '%\Delta VCD';
+                        colormap(ax, blue_red_cmap)
+                        caxis(calc_plot_limits(vcds(:), 'diff', 'pow10'))
+                    case 'none'
+                        cb.Label.String = 'VCD (molec. cm^{-2})';
+                        caxis(calc_plot_limits(vcds(:), 'zero', 'pow10'))
+                end
+                state_outlines('k');
+            end
+        end
     end
     
     methods(Static = true, Access = private)
@@ -6021,6 +6131,21 @@ classdef misc_emissions_analysis
                     [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
                         values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
                         sum(value_dofs(i_chng,:)), 'confidence', 0.95);
+                end
+            end
+        end
+        
+        function difference_is_significant = is_change_significant_alt(values, value_sds, value_dofs)
+            difference_is_significant = false(size(values,1),1);
+            for i_chng = 1:size(values,1)
+                if any(isnan(values(i_chng,:))) || any(isnan(value_sds(i_chng,:))) || any(imag(value_sds(i_chng,:)) ~= 0) || any(isnan(value_dofs(i_chng,:)))
+                    difference_is_significant(i_chng) = false;
+                else
+                    % assume five parameters are fit, so the number of
+                    % measurements is the number of DoFs + 5.
+                    [~, ~, sig] = two_sample_t_test_alt(values(i_chng,1), value_sds(i_chng, 1), value_dofs(i_chng,1)+5,...
+                        values(i_chng,2), value_sds(i_chng,2), value_dofs(i_chng,2)+5);
+                    difference_is_significant(i_chng) = sig;
                 end
             end
         end
