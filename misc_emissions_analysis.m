@@ -1453,9 +1453,8 @@ classdef misc_emissions_analysis
                     % bounds. For the error, we can just take the
                     % difference.
                     if ismember('tau', uncertainties)
-                        
-                        lower_oh = deltas(1).(delta_fn)(i_loc).(fn).oh;
-                        upper_oh = deltas(2).(delta_fn)(i_loc).(fn).oh;
+                        [lower_oh, upper_oh] = get_upper_lower_oh(deltas(1), deltas(2));
+
                         oh_err(1) = oh_err(1) + (lower_oh - base_oh).^2;
                         oh_err(2) = oh_err(2) + (upper_oh - base_oh).^2;
                     end
@@ -1478,8 +1477,7 @@ classdef misc_emissions_analysis
                         % Fig 6a doesn't go below 0.1 ppt/s, so that'll be
                         % the lower limit.
                         sigma_phox = [0.1 1] * 1e-12/2e19 - deltas(1).phox; % ppt/s to molec. cm^-3 s^-1
-                        lower_oh = deltas(3).(delta_fn)(i_loc).(fn).oh;
-                        upper_oh = deltas(4).(delta_fn)(i_loc).(fn).oh;
+                        [lower_oh, upper_oh] = get_upper_lower_oh(deltas(3), deltas(4));
                         
                         oh_err(1) = oh_err(1) + err_helper(base_oh, lower_oh, deltas(1).phox, deltas(3).phox, sigma_phox(1));
                         oh_err(2) = oh_err(2) + err_helper(base_oh, upper_oh, deltas(1).phox, deltas(4).phox, sigma_phox(2));
@@ -1495,8 +1493,7 @@ classdef misc_emissions_analysis
                         % https://www.atmos-chem-phys.net/7/2691/2007/acp-7-2691-2007.pdf
                         % gets an alpha of 6.3% for Mexico city.
                         sigma_alpha = [0.035 0.07] - deltas(1).alpha;
-                        lower_oh = deltas(5).(delta_fn)(i_loc).(fn).oh;
-                        upper_oh = deltas(6).(delta_fn)(i_loc).(fn).oh;
+                        [lower_oh, upper_oh] = get_upper_lower_oh(deltas(5), deltas(6));
                         
                         oh_err(1) = oh_err(1) + err_helper(base_oh, lower_oh, deltas(1).alpha, deltas(5).alpha, sigma_alpha(1));
                         oh_err(2) = oh_err(2) + err_helper(base_oh, upper_oh, deltas(1).alpha, deltas(6).alpha, sigma_alpha(2));
@@ -1504,6 +1501,26 @@ classdef misc_emissions_analysis
                     
                     % We added the squares of the errors, so this is the last step.
                     oh_err_struct(i_loc).OHerr.(fn) = sqrt(oh_err);
+                end
+            end
+            
+            function [lower_oh, upper_oh] = get_upper_lower_oh(delta_a, delta_b)
+                pert_oh = [delta_a.(delta_fn)(i_loc).(fn).oh, delta_b.(delta_fn)(i_loc).(fn).oh];
+                if any(isnan(pert_oh)) && ~isnan(base_oh)
+                    error('not implemented: nan in perturbed OH but not base OH')
+                end
+                is_lt = pert_oh < base_oh;
+                if any(is_lt)
+                    lower_oh = nanmean(pert_oh(is_lt));
+                else
+                    lower_oh = base_oh;
+                end
+                
+                is_gt = pert_oh > base_oh;
+                if any(is_gt)
+                    upper_oh = nanmean(pert_oh(is_gt));
+                else
+                    upper_oh = base_oh;
                 end
             end
             
@@ -3844,7 +3861,7 @@ classdef misc_emissions_analysis
                     for i_oh = 1:n_extra_oh
                         switch(lower(extra_oh_types{i_oh}))
                             case 'city_center_wrf'
-                                [oh_at_radii, oh_std_at_radii] = misc_wrf_lifetime_analysis.sample_wrf_oh_radii_by_year(OH.locs_wkday(i_loc), median(year_window));
+                                [oh_at_radii, oh_std_at_radii] = misc_wrf_lifetime_analysis.sample_wrf_conc_radii_by_year(OH.locs_wkday(i_loc), median(year_window), 'ho');
                                 oh_conc(i_loc, n_fn + i_oh, :) = oh_at_radii(1)*2e19; % convert approximately from mixing ratio to number density.
                                 oh_error(i_loc, n_fn + i_oh, :) = oh_std_at_radii(1)*2e19;
                             otherwise

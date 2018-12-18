@@ -429,7 +429,7 @@ classdef misc_wrf_lifetime_analysis
         %%%%%%%%%%%%%%%%%%%%
         % Plotting Methods %
         %%%%%%%%%%%%%%%%%%%%
-        function [oh_conc, oh_std, radii] = sample_wrf_oh_radii_by_year(locs, years)
+        function [oh_conc, oh_std, radii] = sample_wrf_conc_radii_by_year(locs, years, specie)
             E = JLLErrors;
             locs = misc_wrf_lifetime_analysis.convert_locs(locs);
             
@@ -446,8 +446,8 @@ classdef misc_wrf_lifetime_analysis
             for i_yr = 1:n_years
                 y = years(i_yr);
                 window = (y-1):(y+1);
-                [OH.oh, OH.lon, OH.lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(window, 'ho', 'avg_levels', 1:5);
-                OH.oh = OH.oh * 1e-6; % convert ppm to pure mixing ratio
+                [WRF.oh, WRF.lon, WRF.lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(window, specie, 'avg_levels', 1:5);
+                WRF.oh = WRF.oh * 1e-6; % convert ppm to pure mixing ratio
                 for i_loc = 1:n_locs
                     max_radius = unique(locs(i_loc).BoxSize(3:4));
                     if numel(max_radius) > 1
@@ -461,7 +461,7 @@ classdef misc_wrf_lifetime_analysis
                     % different radii for the average.
                     this_loc = locs(i_loc);
                     [loc_lon, loc_lat, loc_oh] = misc_wrf_lifetime_analysis.wrf_data_in_box(this_loc.Longitude, this_loc.Latitude, max_radius*2,...
-                        OH.lon, OH.lat, OH.oh);
+                        WRF.lon, WRF.lat, WRF.oh);
                     loc_interp = scatteredInterpolant(loc_lon(:), loc_lat(:), loc_oh(:));
                     
                     for i_r = 1:n_radii
@@ -484,10 +484,11 @@ classdef misc_wrf_lifetime_analysis
             end
         end
         
-        function figs = plot_wrf_oh_radii(locs)
+        function figs = plot_wrf_conc_radii(locs, specie)
+            
             locs = misc_wrf_lifetime_analysis.convert_locs(locs);
             years = 2006:2013;
-            [oh_conc, oh_stds, radii] = misc_wrf_lifetime_analysis.sample_wrf_oh_radii_by_year(locs, years);
+            [oh_conc, oh_stds, radii] = misc_wrf_lifetime_analysis.sample_wrf_conc_radii_by_year(locs, years, specie);
             
             n_locs = numel(locs);
             n_years = numel(years);
@@ -527,7 +528,7 @@ classdef misc_wrf_lifetime_analysis
                 colormap(cmap);
                 title(this_loc.Location);
                 xlabel('Distance from city center (km)');
-                ylabel('[OH] (molec. cm^{-3})');
+                ylabel(sprintf('[%s] (molec. cm^{-3})', upper(specie)));
                 set(gca,'fontsize',16)
             end
         end
