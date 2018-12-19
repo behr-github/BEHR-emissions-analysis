@@ -1634,16 +1634,19 @@ classdef misc_emissions_analysis
             save(save_name, 'monthly', 'daily');
         end
         
-        function make_wrf_averages(avg_year)
+        function make_wrf_averages(avg_year, varargin)
             E = JLLErrors;
-            
-            variables = {'no','no2','ho'};
+            p = advInputParser;
+            p.addParameter('variables',{'pres','no','no2','ho'});
+            p.parse(varargin{:});
+            pout = p.Results;
+            variables = pout.variables;
             
             start_dates = cell(size(avg_year));
             end_dates = cell(size(avg_year));
             for i_yr = 1:numel(avg_year)
                 start_dates{i_yr} = datenum(avg_year(i_yr), 4, 1);
-                end_dates{i_yr} = datenum(avg_year{i_yr}, 9, 30);
+                end_dates{i_yr} = datenum(avg_year(i_yr), 9, 30);
             end
             
             averages = wrf_time_average(start_dates, end_dates, variables);
