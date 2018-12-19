@@ -95,12 +95,6 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
-        function filename = wrf_avg_name(years_in, variable)
-            years_str = strjoin(sprintfmulti('%d', years_in), '_');
-            filename = sprintf('Summer_WRF_avg_%s_%s.mat', years_str, variable);
-            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, filename);
-        end
-        
         function filename = winds_file_name(start_date, end_date)
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
@@ -191,6 +185,11 @@ classdef misc_emissions_analysis
             end_date = validate_date(end_date);
             locs_string = sprintf_ranges(loc_inds);
             filename = sprintf('BEHR_OH_data_%s_fits_%s_%sto%s.mat', fit_type, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'));
+            filename = fullfile(misc_emissions_analysis.oh_dir, filename);
+        end
+        
+        function filename = wrf_matched_oh_file_name()
+            filename = 'WRF_matched_OH.mat';
             filename = fullfile(misc_emissions_analysis.oh_dir, filename);
         end
         
@@ -1353,8 +1352,20 @@ classdef misc_emissions_analysis
                     % Option 4: solve using the weekend/weekday NO2 VCD
                     % ratio and weekend/weekday lifetimes
                     vcd_ratio = wkend_vcds(i_loc) ./ wkday_vcds(i_loc);
-                    [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
-                        this_wkend_loc.emis_tau.tau, phox, alpha, 'nox_initial', wkday.wrf.nox ./ wkday.wrf.ndens * 1e9);
+                    try
+                        [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
+                            this_wkend_loc.emis_tau.tau, phox, alpha, 'nox_initial', wkday.wrf.nox ./ wkday.wrf.ndens * 1e9);
+                    catch err
+                        if strcmpi(err.identifier, 'symbolic:numeric:InvalidStartingPoint')
+                            if DEBUG_LEVEL > 0
+                                fprintf('Weekend/weekday ratio solver failed with message:\n  "%s"\n\n', err.message)
+                            end
+                            wkday.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                            wkend.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                        else
+                            rethrow(err)
+                        end
+                    end
                 else
                     if DEBUG_LEVEL > 0
                         fprintf('Not calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
@@ -1378,9 +1389,145 @@ classdef misc_emissions_analysis
             
         end
         
-        function compute_oh_uncertainties()
-            % https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2001JD000932
-            % gives a range of P(HOx) values
+        function oh_err_struct = compute_oh_uncertainties(main_locs, deltas, days_of_week, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('uncertainties','all'); % 'all', 'tau', 'phox', 'alpha' or a cell array with some combo of the last three
+            p.addParameter('oh_types', {});
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            if strcmpi(days_of_week, 'TWRF')
+                delta_fn = 'wkday';
+            elseif strcmpi(days_of_week, 'US')
+                delta_fn = 'wkend';
+            else
+                E.badinput('DAYS_OF_WEEK must be "TWRF" or "US"')
+            end
+            
+            for i_del = 1:numel(deltas)
+                if ~isequal(size(main_locs), size(deltas(i_del).(delta_fn)))
+                    E.badinput('Size of MAIN_LOCS and DELTAS(%d).%s differ', i_del, delta_fn);
+                end
+            end
+            
+            uncertainties = pout.uncertainties;
+            allowed_uncertainties = {'tau', 'phox', 'alpha'};
+            if ischar(uncertainties)
+                if strcmpi(uncertainties, 'all')
+                    uncertainties = allowed_uncertainties;
+                else
+                    uncertainties = {uncertainties};
+                end
+            elseif ~iscellstr(uncertainties)
+                E.badinput('"uncertainties" must be a char/string or cell array of such')
+            end
+            
+            if any(~ismember(uncertainties, allowed_uncertainties))
+                E.badinput('"allowed values for uncertainties: %s', strjoin(allowed_uncertainties, ', '));
+            end
+            
+            if ~isempty(pout.oh_types)
+                oh_fns = pout.oh_types;
+            else
+                oh_fns = fieldnames(main_locs(1).OH);
+            end
+            n_locs = numel(main_locs);
+            n_fn = numel(oh_fns);
+            
+            oh_err_struct = struct('Location', cell(n_locs,1), 'ShortName', cell(n_locs,1), 'OHerr', struct());
+            
+            for i_loc = 1:n_locs
+                loc_name = main_locs(i_loc).Location;
+                short_name = main_locs(i_loc).ShortName;
+                oh_err_struct(i_loc).Location = loc_name;
+                oh_err_struct(i_loc).ShortName = short_name;
+                for i_fn = 1:n_fn
+                    oh_err = zeros(1, 2);
+                    fn = oh_fns{i_fn};
+                    base_oh = main_locs(i_loc).OH.(fn).oh;
+                    
+                    
+                    % Since we have the lifetime uncertainties, we computed
+                    % what the OH would be at the upper and lower lifetime
+                    % bounds. For the error, we can just take the
+                    % difference.
+                    if ismember('tau', uncertainties)
+                        [lower_oh, upper_oh] = get_upper_lower_oh(deltas(1), deltas(2));
+
+                        oh_err(1) = oh_err(1) + (lower_oh - base_oh).^2;
+                        oh_err(2) = oh_err(2) + (upper_oh - base_oh).^2;
+                    end
+                    
+                    % For PHOx and alpha, since I didn't know what the
+                    % error in each of them were, I just changed them by an
+                    % arbitrary amount. So to get our d[OH]/dPHOx or
+                    % d[OH]/dalpha, we need to compute the difference in OH
+                    % divided by the change in the parameter. Then multiply
+                    % by the estimate error in PHOx or alpha to get the
+                    % actual contribution to the uncertainty.
+                    
+                    if ismember('phox', uncertainties)
+                        % https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2001JD000932
+                        % gives a range of P(HOx) values. They compute PHOx
+                        % from 0 to 1 ppt/s around Nashville in 1999. Even
+                        % though the number of points above 0.5 ppt/s is <<
+                        % than below (fig. 6a), since Nashville isn't a
+                        % huge city, I'll take 1 ppt/s as the upper limit.
+                        % Fig 6a doesn't go below 0.1 ppt/s, so that'll be
+                        % the lower limit.
+                        sigma_phox = [0.1 1] * 1e-12/2e19 - deltas(1).phox; % ppt/s to molec. cm^-3 s^-1
+                        [lower_oh, upper_oh] = get_upper_lower_oh(deltas(3), deltas(4));
+                        
+                        oh_err(1) = oh_err(1) + err_helper(base_oh, lower_oh, deltas(1).phox, deltas(3).phox, sigma_phox(1));
+                        oh_err(2) = oh_err(2) + err_helper(base_oh, upper_oh, deltas(1).phox, deltas(4).phox, sigma_phox(2));
+                    end
+                    
+                    if ismember('alpha', uncertainties)
+                        % https://www.atmos-chem-phys.net/11/4085/2011/acp-11-4085-2011.pdf
+                        % observed a 7% branching ratio in Mexico City,
+                        % which they say was higher than other observed
+                        % cities. They use 3.5% as a hypothetical target
+                        % for reductions.
+                        %
+                        % https://www.atmos-chem-phys.net/7/2691/2007/acp-7-2691-2007.pdf
+                        % gets an alpha of 6.3% for Mexico city.
+                        sigma_alpha = [0.035 0.07] - deltas(1).alpha;
+                        [lower_oh, upper_oh] = get_upper_lower_oh(deltas(5), deltas(6));
+                        
+                        oh_err(1) = oh_err(1) + err_helper(base_oh, lower_oh, deltas(1).alpha, deltas(5).alpha, sigma_alpha(1));
+                        oh_err(2) = oh_err(2) + err_helper(base_oh, upper_oh, deltas(1).alpha, deltas(6).alpha, sigma_alpha(2));
+                    end
+                    
+                    % We added the squares of the errors, so this is the last step.
+                    oh_err_struct(i_loc).OHerr.(fn) = sqrt(oh_err);
+                end
+            end
+            
+            function [lower_oh, upper_oh] = get_upper_lower_oh(delta_a, delta_b)
+                pert_oh = [delta_a.(delta_fn)(i_loc).(fn).oh, delta_b.(delta_fn)(i_loc).(fn).oh];
+                if any(isnan(pert_oh)) && ~isnan(base_oh)
+                    error('not implemented: nan in perturbed OH but not base OH')
+                end
+                is_lt = pert_oh < base_oh;
+                if any(is_lt)
+                    lower_oh = nanmean(pert_oh(is_lt));
+                else
+                    lower_oh = base_oh;
+                end
+                
+                is_gt = pert_oh > base_oh;
+                if any(is_gt)
+                    upper_oh = nanmean(pert_oh(is_gt));
+                else
+                    upper_oh = base_oh;
+                end
+            end
+            
+            function err = err_helper(base_oh, perturbed_oh, base_param, perturbed_param, param_sigma)
+                doh_dparam = (perturbed_oh - base_oh) ./ (perturbed_param - base_param);
+                err = (doh_dparam .* param_sigma).^2;
+            end
         end
         
         function locs = average_profiles_for_locations(time_period, days_of_week, locs, varargin)
@@ -1424,6 +1571,47 @@ classdef misc_emissions_analysis
                     locs(i_loc).WRFData.(spec) = nanmean(reshape(value(levels_i, :), [], 1));
                 end
             end
+        end
+        
+        function [locs, xx] = cutdown_locs_by_index(locs, loc_inds, varargin)
+            % Cuts down the structure LOCS to the locations specified by
+            % LOCS_INDS by matching the site names from LOCS against the
+            % location names in the structure read in from the spreadsheet.
+            % If LOCS_INDS is an empty array, do not cut the locations down
+            % at all.
+            
+            E = JLLErrors;
+            p = advInputParser;
+            p.addFlag('keep_order');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            keep_order = pout.keep_order;
+            
+            if isempty(loc_inds)
+                return 
+            end
+            
+            locs_ss = misc_emissions_analysis.read_locs_file();
+            ss_names = {locs_ss(loc_inds).Location};
+            in_names = {locs.Location};
+            if ~keep_order
+                xx = ismember(in_names, ss_names);
+                if sum(xx) ~= numel(loc_inds)
+                    E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
+                end
+            else
+                xx = nan(size(ss_names));
+                for i=1:numel(xx)
+                    xx_i = find(strcmp(ss_names{i}, in_names));
+                    if isempty(xx_i)
+                        E.callError('loc_lookup_error', 'Could not find "%s" in the given locs structure', ss_names{i});
+                    end
+                    xx(i) = xx_i;
+                end
+            end
+            locs = locs(xx);
+            
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1632,32 +1820,6 @@ classdef misc_emissions_analysis
             
             save_name = misc_emissions_analysis.avg_file_name(avg_year, days_of_week, species);
             save(save_name, 'monthly', 'daily');
-        end
-        
-        function make_wrf_averages(avg_year, varargin)
-            E = JLLErrors;
-            p = advInputParser;
-            p.addParameter('variables',{'pres','no','no2','ho'});
-            p.parse(varargin{:});
-            pout = p.Results;
-            variables = pout.variables;
-            
-            start_dates = cell(size(avg_year));
-            end_dates = cell(size(avg_year));
-            for i_yr = 1:numel(avg_year)
-                start_dates{i_yr} = datenum(avg_year(i_yr), 4, 1);
-                end_dates{i_yr} = datenum(avg_year(i_yr), 9, 30);
-            end
-            
-            averages = wrf_time_average(start_dates, end_dates, variables);
-            xlon = averages.XLONG;
-            xlat = averages.XLAT;
-            for i_var = 1:numel(variables)
-                this_var = variables{i_var};
-                profiles = averages.(this_var);
-                save_name = misc_emissions_analysis.wrf_avg_name(avg_year, this_var);
-                save(save_name, 'xlon', 'xlat', 'profiles');
-            end
         end
         
         function make_location_winds_file(time_period, overwrite)
@@ -2602,6 +2764,10 @@ classdef misc_emissions_analysis
                     'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau);
                 wkday_oh = make_empty_struct_from_cell(fieldnames(wkday(1).OH), cell(size(wkday)));
                 wkend_oh = make_empty_struct_from_cell(fieldnames(wkend(1).OH), cell(size(wkend)));
+                for i_loc = 1:numel(wkday)
+                    wkday_oh(i_loc) = wkday(i_loc).OH;
+                    wkend_oh(i_loc) = wkend(i_loc).OH;
+                end
                 delta = struct('wkday', wkday_oh, 'wkend', wkend_oh, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
             end
         end
@@ -3536,20 +3702,236 @@ classdef misc_emissions_analysis
             
         end
         
+        function fit_wrf_oh_with_ss(loc_names)
+            ss_locs = misc_emissions_analysis.read_locs_file();
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(loc_names);
+            years = 2006:2013;
+            %years = 2011;
+            
+            n_locs = numel(loc_inds);
+            n_years = numel(years);
+            
+            dummy_cell = repmat({nan(1,n_years)},n_locs,1);
+            fit_values = make_empty_struct_from_cell({'oh_wrf', 'oh_fit', 'tau_obs', 'tau_fit', 'vocr_fit', 'phox_fit', 'alpha_fit'}, dummy_cell);
+            
+            for i_yr = 1:n_years
+                y = years(i_yr);
+                fprintf('Working on %d\n', y);
+                year_window = (y-1):(y+1);
+                
+                [fns, oh, nox, ~, tau] = misc_emissions_analysis.load_oh_by_year(year_window, loc_inds, 'extra_vars', {'tau'});
+                i_wrf = strcmpi(fns, 'wrf');
+                if sum(i_wrf) ~= 1
+                    error('did not find WRF index')
+                end
+                
+                wrf_wkday_oh = oh(:, i_wrf, 1);
+                wrf_wkday_nox = nox(:, i_wrf, 1);
+                obs_wkday_tau = tau(:, i_wrf, 1); % which index we use in the second dim doesn't matter here
+                
+                for i_loc = 1:n_locs
+                    fit_values(i_loc).Location = ss_locs(loc_inds(i_loc)).Location;
+                    fit_values(i_loc).ShortName = ss_locs(loc_inds(i_loc)).ShortName;
+                    
+                    fit_values(i_loc).oh_wrf(i_yr) = wrf_wkday_oh(i_loc);
+                    fit_values(i_loc).tau_obs(i_yr) = obs_wkday_tau(i_loc);
+                    
+                    if any([isnan(wrf_wkday_oh(i_loc)), isnan(wrf_wkday_nox(i_loc)), isnan(obs_wkday_tau(i_loc))])
+                        fprintf('  No OH, NOx, or tau value for %d of %d, skipping\n', i_loc, n_locs)
+                        continue
+                    end
+                    
+                    fprintf('  Solving for VOCR, PHOx, ALPHA for location %d of %d\n', i_loc, n_locs);
+                    [fit_values(i_loc).oh_fit(i_yr), fit_values(i_loc).vocr_fit(i_yr), fit_values(i_loc).phox_fit(i_yr),...
+                        fit_values(i_loc).alpha_fit(i_yr), fit_values(i_loc).tau_fit(i_yr)] ...
+                        = match_wrf_oh(wrf_wkday_oh(i_loc), wrf_wkday_nox(i_loc)*2e10, obs_wkday_tau(i_loc));
+                    % multiply NOx by 2e10 to approximately convert from
+                    % ppb to molec/cm^3
+                end
+            end
+            
+            save(misc_emissions_analysis.wrf_matched_oh_file_name(), 'fit_values')
+        end
+        
+        function [oh_types, oh_conc, oh_error, nox_conc, oh_values, varargout] = load_oh_by_year(year_window, loc_inds, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('extra_vars', {});
+            p.addParameter('extra_oh_types', {});
+            p.addParameter('uncertainty', 'all');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            extra_vars = pout.extra_vars;
+            extra_oh_types = pout.extra_oh_types;
+            n_extra_oh = numel(extra_oh_types);
+            do_calc_frac_hno3 = ismember('frac_hno3', extra_vars);
+            do_add_center_wrf_oh = ismember('city_center_wrf', extra_oh_types);
+
+            [win_start, win_end] = misc_emissions_analysis.select_start_end_dates(year_window);
+            oh_filename = misc_emissions_analysis.oh_file_name(win_start, win_end);
+            OH = load(oh_filename);
+            
+            [OH.locs_wkday, xx] = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
+            OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
+            for i_delta = 1:numel(OH.deltas)
+                % since I forgot to include the location name in the delta
+                % structures, we have to assume that they are the same as
+                % the weekday main structure.
+                OH.deltas(i_delta).wkday = OH.deltas(i_delta).wkday(xx);
+                OH.deltas(i_delta).wkend = OH.deltas(i_delta).wkend(xx);
+            end
+            n_locs = numel(OH.locs_wkday);
+            
+            fns = fieldnames(OH.locs_wkday(1).OH);
+            i_invert = find(strcmpi(fns, 'invert'));
+            i_hno3 = find(strcmpi(fns, 'hno3'));
+            n_fn = numel(fns);
+            
+            if do_calc_frac_hno3
+                wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
+                wrf_dat = load(wrf_dat_filename);
+                wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
+            end
+            
+            oh_conc = nan(n_locs, n_fn + n_extra_oh, 2);
+            oh_error = nan(n_locs, n_fn + n_extra_oh, 2, 2); % the extra dim is for upper and lower uncertainty
+            nox_conc = nan(n_locs, n_fn, 2);
+            oh_values = repmat(struct('Location', '', 'OH', struct()), 1, n_locs);
+            varargout = repmat({nan(n_locs, n_fn, 2)}, 1, numel(extra_vars));
+            
+            % we can precompute the errors, but then we'll have to be
+            % careful to match up the types, because the given errors won't
+            % have the extra field names
+            uncert = {'tau'};
+            oh_err_struct_wkday = misc_emissions_analysis.compute_oh_uncertainties(OH.locs_wkday, OH.deltas, 'TWRF', 'uncertainties', uncert);
+            oh_err_struct_wkend = misc_emissions_analysis.compute_oh_uncertainties(OH.locs_wkend, OH.deltas, 'US', 'uncertainties', uncert);
+            
+            for i_loc = 1:n_locs
+                
+                for i_fn = 1:n_fn
+
+                    oh_conc(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
+                    oh_error(i_loc, i_fn, 1, :) = oh_err_struct_wkday(i_loc).OHerr.(fns{i_fn});
+                    oh_conc(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
+                    oh_error(i_loc, i_fn, 2, :) = oh_err_struct_wkend(i_loc).OHerr.(fns{i_fn});
+                    
+                    if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
+                        nox_conc(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
+                        nox_conc(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
+                    end
+                    
+                    % Many of the extra variables will be the same in each
+                    % loop. If they are relatively cheap to calculate, we
+                    % will just do that each time around and assign them to
+                    % the current fieldname index. For ones that take more
+                    % time, we'll just compute them once and assign the
+                    % value to the whole slice at once. 
+                    %
+                    % There are some variables that need to be inside the
+                    % loop over OH fieldnames (e.g. vocr), which is why
+                    % this is inside that loop at all.
+                    for i_var = 1:numel(extra_vars)
+                        this_var = extra_vars{i_var};
+                        switch lower(this_var)
+                            case 'frac_hno3'
+                                varargout{i_var}(i_loc, i_fn, :) = get_avg_frac_hno3(i_loc);
+                            case 'tau'
+                                varargout{i_var}(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).emis_tau.tau;
+                                varargout{i_var}(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).emis_tau.tau;
+                            case 'n_dofs'
+                                varargout{i_var}(i_loc, i_fn, 1) = OH.locs_wkday(i_loc).emis_tau.n_dofs;
+                                varargout{i_var}(i_loc, i_fn, 2) = OH.locs_wkend(i_loc).emis_tau.n_dofs;
+                            case 'behr_vcds'
+                                if i_fn == 1
+                                    varargout{i_var}(i_loc,:,1) = misc_emissions_analysis.avg_vcds_around_loc(OH.locs_wkday(i_loc), year_window, 'TWRF', 'radius', 0.25);
+                                    varargout{i_var}(i_loc,:,2) = misc_emissions_analysis.avg_vcds_around_loc(OH.locs_wkday(i_loc), year_window, 'US', 'radius', 0.25);
+                                end
+                            case 'vocr'
+                                if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'vocr')
+                                    wkday_vocr = OH.locs_wkday(i_loc).OH.(fns{i_fn}).vocr;
+                                    wkend_vocr = OH.locs_wkend(i_loc).OH.(fns{i_fn}).vocr;
+                                else
+                                    wkday_vocr = NaN;
+                                    wkend_vocr = NaN;
+                                end
+                                varargout{i_var}(i_loc, i_fn, 1) = wkday_vocr;
+                                varargout{i_var}(i_loc, i_fn, 2) = wkend_vocr;
+                            otherwise
+                                E.notimplemented('No method to compute the extra variable "%s" defined', this_var);
+                        end
+                    end
+                end
+                
+                for i_oh = 1:n_extra_oh
+                    i_oh_out = n_fn + i_oh;
+                    switch(lower(extra_oh_types{i_oh}))
+                        case 'frac_weighted'
+                            fhno3 = get_avg_frac_hno3(i_loc);
+                            oh_conc(i_loc, i_oh_out, :) = fhno3 .* oh_conc(i_loc, i_hno3, :) + (1-fhno3) .* oh_conc(i_loc, i_invert, :);
+                            % propagate the uncertainty. for OH3 = f*OH1 +
+                            % (1-f)*OH2, (s_OH3)^2 = (f * s_OH1)^2 + ([1-f]
+                            % s_OH2)^2.
+                            oh_error(i_loc, i_oh_out, :) = sqrt((fhno3 .* oh_error(i_loc, i_hno3, :)).^2 + ((1-fhno3) .* oh_error(i_loc, i_hno3, :)).^2);
+                        case 'city_center_wrf'
+                            [oh_at_radii, oh_std_at_radii] = misc_wrf_lifetime_analysis.sample_wrf_conc_radii_by_year(OH.locs_wkday(i_loc), median(year_window), 'ho');
+                            oh_conc(i_loc, i_oh_out, :) = oh_at_radii(1)*2e19; % convert approximately from mixing ratio to number density.
+                            oh_error(i_loc, i_oh_out, :) = oh_std_at_radii(1)*2e19;
+                        otherwise
+                            E.notimplemented('No method to compute the OH type "%s" defined', extra_oh_types{i_oh});
+                    end
+                end
+                
+                oh_values(i_loc).Location = OH.locs_wkday(i_loc).Location;
+                oh_values(i_loc).OH = OH.locs_wkday(i_loc).OH;
+                oh_values(i_loc).OH(2) = OH.locs_wkend(i_loc).OH;
+            end
+            
+            oh_types = veccat(fns, extra_oh_types, 'column');
+            
+            function frac_hno3 = get_avg_frac_hno3(j_loc)
+                myavg = wrf_dat.locs(j_loc).WRFData.Averaged;
+                frac_hno3 = nanmean(myavg.LNOXHNO3 ./ (myavg.LNOXHNO3 + myavg.LNOXA));
+            end
+        end
+        
         function [figs, oh_values] = plot_oh_conc_by_year(varargin)
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('loc_inds', nan);
-            p.addParameter('days_of_week', '');
             p.addParameter('plot_type', 'line');
-            p.addParameter('y2var', 'nox'); % nox or lhno3
-            p.addParameter('series', 'oh_type');
+            p.addParameter('y2var', 'vocr'); % 'vocr' or 'lhno3'
+            p.addParameter('series', 'oh_type'); % 'oh_type' or 'cities'
+            p.addParameter('oh_types', 'all'); % match the fns (invert, hno3, wrf, ratio). cell array if oh_type plot, string if cities plot
+            p.addParameter('include_wrf_center', true);
+            p.addParameter('days_of_week','TWRF');
+            p.addParameter('nox_value', 'vcds');
             p.parse(varargin{:});
             pout = p.Results;
             
             plot_type = pout.plot_type;
+            oh_types = pout.oh_types;
             y2_var = pout.y2var;
+            include_wrf_center = pout.include_wrf_center;
             series_mode = pout.series;
+            nox_value = pout.nox_value;
+            
+            extra_vars = {'frac_hno3', 'behr_vcds', 'vocr'};
+            if include_wrf_center
+                extra_oh_types = {'frac_weighted', 'city_center_wrf'};
+            else
+                extra_oh_types = {};
+            end
+            
+            if strcmpi(pout.days_of_week, 'TWRF')
+                dow_ind = 1;
+                dow_str = 'weekdays';
+            elseif strcmpi(pout.days_of_week, 'US')
+                dow_ind = 2;
+                dow_str = 'weekends';
+            else
+                E.badinput('days_of_week must be "TWRF" or "US"')
+            end
             
             loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
             years = 2006:2013;
@@ -3561,49 +3943,34 @@ classdef misc_emissions_analysis
             for i_yr = 1:n_yrs
                 fprintf('Working on %d\n', years(i_yr));
                 year_window = (years(i_yr)-1):(years(i_yr)+1);
-                [win_start, win_end] = misc_emissions_analysis.select_start_end_dates(year_window);
-                oh_filename = misc_emissions_analysis.oh_file_name(win_start, win_end);
-                OH = load(oh_filename);
                 
-                OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
-                OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
                 
-                if strcmpi(y2_var, 'LHNO3')
-                    wrf_dat_filename = misc_emissions_analysis.wrf_data_file_name(win_start, win_end);
-                    wrf_dat = load(wrf_dat_filename);
-                    wrf_dat.locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_dat.locs, loc_inds);
-                end
+                
+                [fns, loaded_oh_conc, loaded_oh_error, loaded_nox_conc, loaded_oh_values, loaded_frac_hno3, loaded_vcds, loaded_vocr] ...
+                    = misc_emissions_analysis.load_oh_by_year(year_window, loc_inds, 'extra_vars', extra_vars, 'extra_oh_types', extra_oh_types);
                 
                 if i_yr == 1
-                    fns = fieldnames(OH.locs_wkday(1).OH);
                     n_fn = numel(fns);
+                    n_std_oh = n_fn - numel(extra_oh_types);
+                    if strcmpi(oh_types, 'all')
+                        oh_types = fns;
+                    end
                     oh_conc = nan(n_yrs, n_locs, n_fn, 2);
-                    y2_values = nan(n_yrs, n_locs, n_fn, 2);
+                    oh_error = nan(n_yrs, n_locs, n_fn, 2, 2);
+                    nox_conc = nan(n_yrs, n_locs, n_std_oh, 2);
+                    frac_hno3 = nan(n_yrs, n_locs, n_std_oh, 2);
+                    behr_vcds = nan(n_yrs, n_locs, n_std_oh, 2);
+                    vocr = nan(n_yrs, n_locs, n_std_oh, 2);
                     oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
                 end
                 
-                for i_loc = 1:n_locs
-                    for i_fn = 1:n_fn
-                        oh_conc(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).oh;
-                        oh_conc(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).oh;
-                        switch lower(y2_var)
-                            case 'nox'
-                                if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'nox')
-                                    y2_values(i_yr, i_loc, i_fn, 1) = OH.locs_wkday(i_loc).OH.(fns{i_fn}).nox/2e10; % convert (roughly) from molec./cm^3 to ppb
-                                    y2_values(i_yr, i_loc, i_fn, 2) = OH.locs_wkend(i_loc).OH.(fns{i_fn}).nox/2e10;
-                                end
-                            case 'lhno3'
-                                avg = wrf_dat.locs(i_loc).WRFData.Averaged;
-                                y2_values(i_yr, i_loc, i_fn, :) = nanmean(avg.LNOXHNO3 ./ (avg.LNOXHNO3 + avg.LNOXA));
-                            otherwise
-                                E.notimplemented('No method to compute y2_var "%s"', y2_var)
-                        end
-                    end
-                    oh_values(i_yr, i_loc).Location = OH.locs_wkday(i_loc).Location;
-                    oh_values(i_yr, i_loc).OH = OH.locs_wkday(i_loc).OH;
-                    oh_values(i_yr, i_loc).OH(2) = OH.locs_wkend(i_loc).OH;
-                end
-                
+                oh_conc(i_yr,:,:,:) = loaded_oh_conc;
+                oh_error(i_yr,:,:,:,:) = loaded_oh_error;
+                nox_conc(i_yr,:,:,:) = loaded_nox_conc;
+                oh_values(i_yr,:) = loaded_oh_values;
+                frac_hno3(i_yr,:,:,:) = loaded_frac_hno3;
+                behr_vcds(i_yr,:,:,:) = loaded_vcds;
+                vocr(i_yr,:,:,:) = loaded_vocr;
             end
             
             switch lower(plot_type)
@@ -3611,7 +3978,7 @@ classdef misc_emissions_analysis
                     plot_fxn = @oh_nox_yy;
                     post_formatting = @set_line_plot_colors;
                 case 'bar'
-                    plot_fxn = @(oh,nox) bar(oh);
+                    plot_fxn = @(oh,oh_err,nox,frac) bar(oh);
                     post_formatting = @(h) h;
                 case 'scatter'
                     plot_fxn = @nox_scatterplot;
@@ -3619,29 +3986,67 @@ classdef misc_emissions_analysis
             end
 %             oh_conc = seq_mat(n_yrs, 2, 3);
 %             locs = struct('Location', {'Alpha', 'Beta'});
+
+            legend_names = struct('invert', 'Lifetime + SS', 'hno3', 'NO_2 + OH \rightarrow HNO_3',... 
+                'wrf', 'WRF-Chem', 'ratio', 'Wkend/wkday NO_2 ratio',...
+                'frac_weighted', 'HNO_3/ANs weighted',...
+                'city_center_wrf', 'WRF (city center)');
             
             switch lower(series_mode)
                 case 'oh_type'
                     figs = gobjects(n_locs,1);
-                    oh_types = [1 2 3 4];
+                    oh_type_inds = ismember(fns, oh_types);
+                    
+                    i_inv = find(strcmpi(fns, 'invert'));
+                    i_wrf = find(strcmpi(fns, 'wrf'));
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
-                        this_oh = squeeze(oh_conc(:,i_loc,oh_types,1));
-                        this_nox = squeeze(y2_values(:,i_loc,oh_types,1));
-                        h = plot_fxn(this_oh, this_nox);
+                        this_oh = squeeze(oh_conc(:,i_loc,oh_type_inds, dow_ind));
+                        this_oh_err = squeeze(oh_error(:,i_loc,oh_type_inds,dow_ind,:));
+                        % always use inverted NOx (and it doesn't really matter
+                        % which fraction we use)
+                        nox_ax_label = '[NO_x] (ppb)';
+                        switch lower(nox_value)
+                            case 'invert'
+                                this_nox = squeeze(nox_conc(:, i_loc, i_inv, dow_ind));
+                            case 'wrf'
+                                this_nox = squeeze(nox_conc(:, i_loc, i_wrf, dow_ind)); %#ok<FNDSB>
+                            case 'vcds'
+                                this_nox = squeeze(behr_vcds(:, i_loc, 1, dow_ind));
+                                nox_ax_label = 'NO_2 VCD (molec. cm^{-2})';
+                            otherwise
+                                error('No method to compute nox type "%s"', nox_value);
+                        end
+                        if strcmpi(y2_var,'lhno3')
+                            this_y2 = squeeze(frac_hno3(:, i_loc, i_inv, dow_ind));
+                            y2_ax_label = 'Frac. loss to HNO_3';
+                        elseif strcmpi(y2_var,'vocr')
+                            this_y2 = squeeze(vocr(:, i_loc, i_inv, dow_ind));
+                            y2_ax_label = 'VOC_R';
+                        else
+                            E.notimplemented('No action defined for y2_var = %s', y2_var);
+                        end
+                        [h, herr] = plot_fxn(this_oh, this_oh_err, this_nox, this_y2);
                         post_formatting(h);
-                        legend(h, fns(oh_types));
-                        title(oh_values(1, i_loc).Location);
-                        set_axis_properties();
+                        post_formatting(herr);
+                        legend(h, get_legend_strings(fns(oh_type_inds)));
+                        set_axis_properties(sprintf('%s (%s)', oh_values(1, i_loc).Location, dow_str));
                     end
                 case 'city'
+                    warning('city plot type not tested with error')
                     figs = figure;
-                    this_oh = squeeze(oh_conc(:,:,4,1));
-                    this_nox = squeeze(y2_values(:,:,4,1));
-                    h = plot_fxn(this_oh, this_nox);
+                    if strcmpi(oh_types, 'all')
+                        oh_type = 'invert';
+                    end
+                    oh_type_ind = strcmpi(oh_type, fns);
+                    this_oh = squeeze(oh_conc(:,:,oh_type_ind,dow_ind));
+                    this_oh_err = squeeze(oh_error(:,:,oh_type_ind,dow_ind,:));
+                    this_nox = squeeze(nox_conc(:,:,oh_type_ind,dow_ind));
+                    this_y2 = squeeze(frac_hno3(:,:,oh_type_ind,dow_ind));
+                    h = plot_fxn(this_oh, this_oh_err, this_nox, this_y2);
                     post_formatting(h);
-                    legend(h, {oh_values(1, i_loc).Location});
-                    set_axis_properties();
+                    legend(h, {oh_values(1, i_loc).Location}, 'location', 'best');
+                    set_axis_properties(sprintf('OH type = %s', oh_type));
             end
             
             function set_line_plot_colors(lineh)
@@ -3653,32 +4058,40 @@ classdef misc_emissions_analysis
                 end
             end
             
-            function set_axis_properties()
-                xlim_vals = [0 n_yrs+1];
-                fntsize = 12;
-                all_ax = findobj(gcf,'type','axes');
-                if numel(all_ax) == 2
-                    % if this is a yy plot, format the right axes as well
-                    switch lower(y2_var)
-                        case 'nox'
-                            label_str = '[NO_x] (ppb)';
-                        case 'lhno3'
-                            label_str = 'Frac. loss to HNO_3';
+            function set_axis_properties(title_str)
+                all_ax = flipud(findobj(gcf,'type','axes'));
+                ax_labels = {'[OH] (molec. cm^{-3})', nox_ax_label, y2_ax_label};
+                
+                min_width = 1;
+                horiz_shift = 0.05;
+                vertical_shift = 0.1;
+                
+                for i_ax = 1:numel(all_ax)
+                    ax = all_ax(i_ax);
+                    set(ax, 'xlim', [0.5, n_yrs+0.5], 'xtick', 1:n_yrs, 'xticklabels', years, 'fontsize', 12, 'xticklabelrotation',45);
+                    ylabel(ax, ax_labels{i_ax});
+                    
+                    min_width = min(ax.Position(3) - 0.05, min_width);
+                    % expand the top axes some at the expense of the bottom
+                    % two. apparently the two plotyy axes positions are
+                    % linked, so I only need to change one.
+                    %
+                    % also move the axes' right edge over so the second y
+                    % axis in the bottom keeps its label in the space.
+                    if i_ax == 1
+                        ax.Position(2) = ax.Position(2) - vertical_shift;
+                        ax.Position(3) = ax.Position(3) - horiz_shift;
+                        ax.Position(4) = ax.Position(4) + vertical_shift;
+                    elseif i_ax == 2
+                        ax.Position(3) = ax.Position(3) - horiz_shift;
+                        ax.Position(4) = ax.Position(4) - vertical_shift;
                     end
-                    right_ax = all_ax(1);
-                    ylabel(right_ax, label_str);
-                    xlim(right_ax, xlim_vals);
-                    set(right_ax, 'fontsize', fntsize);
-                    ax = all_ax(2);
-                else
-                    ax = all_ax(1);
-                end
-                ylabel(ax, '[OH] (molec. cm^{-3})')
-                xlim(ax, xlim_vals);
-                set(ax, 'fontsize', fntsize, 'xtick', 1:n_yrs, 'xticklabels', years);
+                end 
+                
+                title(all_ax(1), title_str);
             end
             
-            function myh = nox_scatterplot(oh, nox)
+            function [myh, errh] = nox_scatterplot(oh, ~, nox, ~)
                 n_col = size(oh,2);
                 x = 1:size(oh,1);
                 myh = gobjects(n_col,1);
@@ -3694,13 +4107,235 @@ classdef misc_emissions_analysis
                 end
                 cb=colorbar;
                 cb.Label.String = 'WRF [NO_x] (molec. cm^{-3})';
+                
+                errh = gobjects(0);
             end
             
-            function myh = oh_nox_yy(oh, nox)
+            function [oh_handles, err_handles, nox_handles, frac_handles] = oh_nox_yy(oh, oh_err, nox, frac)
+                subplot(2,1,1);
                 x = 1:size(oh,1);
-                plotoh = @(x,oh) plot(x, oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
-                plotnox = @(x,nox) plot(x, nox, '--', 'linewidth', 2, 'color', 'k');
-                [~, myh] = plotyy(x, oh, x, nox(:,3), plotoh, plotnox);
+                oh_err = shiftdim(oh_err, ndims(oh_err)-1); % put the +/- error dimension first
+                oh_neg_err = reshape(oh_err(1,:), size(oh));
+                oh_pos_err = reshape(oh_err(2,:), size(oh));
+                
+                oh_handles = plot(x, oh, 'o-', 'markersize', 10, 'linewidth', 2, 'markeredgecolor', 'k');
+                err_handles = gobjects(size(oh,2),1);
+                for i=1:size(oh,2)
+                    err_handles(i) = scatter_errorbars(x', oh(:,i), oh_neg_err(:,i), oh_pos_err(:,i), 'linewidth', 2);
+                end
+                subplot(2,1,2);
+                % not tested for the city style plot anymore
+                plotnox = @(x,nox) plot(x, nox, 'o-', 'linewidth', 2, 'color', 'k', 'markerfacecolor',[0.7 0.7 0.7], 'markersize', 10);
+                plotfrac = @(x,frac) plot(x, frac, '*', 'color', 'r',  'markersize', 10, 'linewidth', 2);
+                [~, nox_handles, frac_handles] = plotyy(x, nox, x, frac, plotnox, plotfrac);
+            end
+            
+            function legstr = get_legend_strings(oh_types)
+                legstr = cell(size(oh_types));
+                for i=1:numel(oh_types)
+                    legstr{i} = legend_names.(oh_types{i});
+                end
+            end
+        end
+        
+        function figs = plot_if_oh_sig_different(varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('loc_inds', nan);
+            p.addParameter('oh_types', 'all'); % match the fns (invert, hno3, wrf, ratio). cell array if oh_type plot, string if cities plot
+            p.addParameter('include_wrf_center', false);
+            p.addParameter('days_of_week','TWRF');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            oh_types = pout.oh_types;
+            include_wrf_center = pout.include_wrf_center;
+            
+            extra_vars = {'n_dofs'};
+            if include_wrf_center
+                E.notimplemented('city_center_wrf')
+                extra_oh_types = {'city_center_wrf'};
+            else
+                extra_oh_types = {};
+            end
+            
+            if strcmpi(pout.days_of_week, 'TWRF')
+                dow_ind = 1;
+                dow_str = 'weekdays';
+            elseif strcmpi(pout.days_of_week, 'US')
+                dow_ind = 2;
+                dow_str = 'weekends';
+            else
+                E.badinput('days_of_week must be "TWRF" or "US"')
+            end
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            years = 2006:2013;
+            %years = 2006:2008;
+            
+            n_locs = numel(loc_inds);
+            n_yrs = numel(years);
+            
+            
+            for i_yr = 1:n_yrs
+                fprintf('Working on %d\n', years(i_yr));
+                year_window = (years(i_yr)-1):(years(i_yr)+1);
+                
+                [fns, loaded_oh_conc, loaded_oh_error, ~, loaded_oh_vals, loaded_ndofs] ...
+                    = misc_emissions_analysis.load_oh_by_year(year_window, loc_inds, 'extra_vars', extra_vars, 'extra_oh_types', extra_oh_types);
+                
+                if i_yr == 1
+                    n_fn = numel(fns);
+                    if strcmpi(oh_types, 'all')
+                        oh_types = fns;
+                    end
+                    oh_conc = nan(n_yrs, n_locs, n_fn, 2);
+                    oh_error = nan(n_yrs, n_locs, n_fn, 2, 2);
+                    n_dofs = nan(n_yrs, n_locs, n_fn-numel(extra_oh_types), 2);
+                    oh_values = repmat(struct('Location', '', 'OH', struct()), n_yrs, n_locs);
+                end
+                
+                oh_conc(i_yr,:,:,:) = loaded_oh_conc;
+                oh_error(i_yr,:,:,:,:) = loaded_oh_error;
+                n_dofs(i_yr,:,:,:) = loaded_ndofs;
+                oh_values(i_yr,:) = loaded_oh_vals;
+            end
+            
+            figs = gobjects(n_locs,1);
+            ny = floor(sqrt(n_fn));
+            nx = ceil(n_fn/ny);
+            [year_y, year_x] = meshgrid(years, years);
+            for i_loc = 1:n_locs
+                figs(i_loc) = figure;
+                figs(i_loc).Position(3) = 3*figs(i_loc).Position(3);
+                figs(i_loc).Position(4) = 2*figs(i_loc).Position(4);
+                for i_fn = 1:n_fn
+                    this_oh = squeeze(oh_conc(:,i_loc,i_fn,dow_ind));
+                    this_oh_err = squeeze(oh_error(:,i_loc,i_fn,dow_ind,:));
+                    this_ndofs = squeeze(n_dofs(:,i_loc,i_fn,dow_ind));
+                    
+                    is_diff = nan(n_yrs, n_yrs);
+                    for i_yr = 1:n_yrs
+                        for j_yr = (i_yr+1):n_yrs
+                            yr_oh = this_oh([i_yr, j_yr])';
+                            % We use a two-sided t-test because we aren't
+                            % testing that one OH is higher than another,
+                            % we're testing if the two OH concentrations
+                            % are different, period. However, since the
+                            % uncertainties are asymmetrical, we want to
+                            % use the uncertainties that "face" each other,
+                            % so if OH1 < OH2 use the upper error for OH1
+                            % and the lower error for OH2, or vice verse.
+                            if yr_oh(1) < yr_oh(2)
+                                yr_err = [this_oh_err(i_yr, 2), this_oh_err(j_yr, 1)];
+                            else
+                                yr_err = [this_oh_err(i_yr, 1), this_oh_err(j_yr, 2)];
+                            end
+                            yr_dofs = this_ndofs([i_yr, j_yr])';
+                            %sig = misc_emissions_analysis.is_change_significant(yr_oh, yr_err, yr_dofs);
+                            sig = misc_emissions_analysis.is_change_significant_alt(yr_oh, yr_err, yr_dofs);
+                            is_diff(i_yr, j_yr) = sig;
+                            is_diff(j_yr, i_yr) = sig;
+                        end
+                    end
+                    
+                    subplot(ny,nx,i_fn);
+                    xx_yes = is_diff == 1;
+                    xx_no = is_diff == 0;
+                    line(year_x(xx_yes), year_y(xx_yes), 'marker', 'o', 'color', [0 0.7 0], 'markersize', 10, 'markerfacecolor', [0 0.7 0], 'linestyle','none');
+                    line(year_x(xx_no), year_y(xx_no), 'marker', 'x', 'color', 'r', 'markersize', 10, 'markerfacecolor', 'r', 'linestyle','none','linewidth',2);
+                    set(gca,'XTick',years,'YTick',years);
+                    xlim([years(1)-1, years(end)+1])
+                    ylim([years(1)-1, years(end)+1])
+                    if i_fn == 1
+                        title(sprintf('%s (%s) %s', oh_values(1, i_loc).Location, dow_str, fns{i_fn}))
+                    else
+                        title(fns{i_fn});
+                    end
+                end
+            end
+        end
+        
+        function figs = plot_fit_ss_properties(varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('locs', {}); % give cell array of names
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            F = load(misc_emissions_analysis.wrf_matched_oh_file_name);
+            fit_values = restrict_to_locs(F.fit_values, pout.locs);
+            
+            figs = gobjects(size(fit_values));
+            years = (2006:2013)';
+            for i_loc = 1:numel(fit_values)
+                figs(i_loc) = figure;
+                this_fit = fit_values(i_loc);
+                
+                % plot the OH and taus actually produced and that we tried
+                % to fit on the first panel
+                subplot(4,1,1);
+                [ax,l1,l2] = plotyy(years, [this_fit.oh_wrf', this_fit.oh_fit'], years, [this_fit.tau_obs', this_fit.tau_fit']);
+                format_lines(l1(1), 'b', 'linestyle', '-', 'size', 14);
+                format_lines(l1(2), 'b', 'linestyle', '--', 'marker', 'd');
+                format_lines(l2(1), 'r', 'linestyle', '-', 'size', 14);
+                format_lines(l2(2), 'r', 'linestyle', '--', 'marker', 'd');
+                ylabel(ax(1),'[OH] (molec. cm^{-3})');
+                ylabel(ax(2),'\tau (h)');
+                title(ax(1), this_fit.Location);
+                
+                % plot the fitted VOCR, PHOx, and alpha on the next three
+                % panels
+                ax=subplot(4,1,2);
+                l=plot(years, this_fit.vocr_fit');
+                format_lines(l, [1 0.5 0]);
+                ylabel(ax, 'VOC_R (s^{-1})');
+                
+                ax=subplot(4,1,3);
+                l=plot(years, this_fit.phox_fit');
+                format_lines(l,[0 0.5 0]);
+                ylabel(ax, 'P(HO_x) (molec. cm^{-3} s^{-1})')
+                
+                ax=subplot(4,1,4);
+                l=plot(years, this_fit.alpha_fit');
+                format_lines(l,'k');
+                ylabel(ax, '\alpha');
+                
+                figs(i_loc).Position(4) = 2*figs(i_loc).Position(4);
+            end
+            
+            function fits = restrict_to_locs(fits, locs)
+                short_names = {fits.ShortName};
+                full_names = {fits.Location};
+                if isempty(locs)
+                    xx = true(size(fits));
+                else
+                    xx = ismember(short_names, locs) | ismember(full_names, locs);
+                end
+                yy = ~ismember(locs, short_names);
+                if any(yy)
+                    warning('The following locations are not present in the saved file: %s', strjoin(locs(yy), ', '));
+                end
+                fits = fits(xx);
+            end
+            
+            function format_lines(l, color, varargin)
+                p2 = advInputParser;
+                p2.addParameter('marker', 'o');
+                p2.addParameter('linestyle', '-');
+                p2.addParameter('size', 10);
+                p2.parse(varargin{:});
+                pout2 = p2.Results;
+                
+                marker = pout2.marker;
+                msize = pout2.size;
+                linestyle = pout2.linestyle;
+                linewidth = 2;
+                edge_color = 'k';
+                
+                set(l, 'color', color, 'marker', marker, 'linestyle', linestyle, 'markersize', msize,...
+                    'linewidth', linewidth,'markeredgecolor', edge_color, 'markerfacecolor', color);
+                
             end
         end
         
@@ -4150,25 +4785,6 @@ classdef misc_emissions_analysis
             %     %
         end
         
-        function figs = plot_emis_tau_vcd_trend_boxplots(varargin)
-            %p = advInputParser;
-            %p.parse(varargin{:});
-            %pout = p.Results;
-            
-            E = JLLErrors;
-            
-            % need to get median emissions and lifetime
-            window = 3;
-            
-            common_params = {'plot_averaging', 'VCD weighted avg.', 'normalize', true, 'window_width', window, 'remove_decreasing_cities', false,...
-                'always_restrict_to_moves', true, 'no_fig', true};
-            [~,years,behr_emis,behr_emis_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Emissions', common_params{:});
-            [~,~,moves_emis,moves_emis_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'MOVES', common_params{:});
-            [~,~,behr_tau,behr_tau_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Lifetime', common_params{:});
-            [~,~,behr_vcds,behr_vcds_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'VCDs', common_params{:});
-            [~,~,expected_vcds,expected_vcds_err] = misc_emissions_analysis.plot_avg_lifetime_change('plot_quantity', 'Expected VCDs', common_params{:});
-        end
-        
         function figs = plot_emis_tau_vcd_trends(varargin)
             %p = advInputParser;
             %p.parse(varargin{:});
@@ -4230,6 +4846,8 @@ classdef misc_emissions_analysis
             pqopts.emissions = 'Emissions';
             pqopts.moves = 'MOVES';
             pqopts.vcds = 'VCDs';
+            pqopts.wkend_wkday_vcds_ratio = 'Weekend/weekday VCDs';
+            pqopts.wkend_wkday_vcds_diff = 'Weekend - weekday VCDs';
             pqopts.expected_vcds = 'Expected VCDs';
             pqopts.ohss = 'Inverted [OH]';
             pqopts.ohhno3 = 'HNO3 [OH]';
@@ -4312,7 +4930,7 @@ classdef misc_emissions_analysis
                         this_week_val = get_moves_for_loc_and_year(week_locs(i_loc), years{i_yr});
                         % MOVES doesn't have separate weekend values
                         this_weekend_val = NaN;
-                    elseif strcmpi(plot_quantity, pqopts.vcds)
+                    elseif any(strcmpi(plot_quantity, {pqopts.vcds, pqopts.wkend_wkday_vcds_ratio, pqopts.wkend_wkday_vcds_diff}))
                         this_week_val = week_vcds(i_loc, i_yr);
                         this_weekend_val = weekend_vcds(i_loc, i_yr);
                     elseif strcmpi(plot_quantity, pqopts.expected_vcds)
@@ -4374,9 +4992,9 @@ classdef misc_emissions_analysis
             add_legend = false;
             
             switch plot_quantity
-                case pqopts.wkend_wkday_ratio
+                case {pqopts.wkend_wkday_ratio, pqopts.wkend_wkday_vcds_ratio}
                     y = weekend_vals ./ week_vals;
-                case pqopts.wkend_wkday_diff
+                case {pqopts.wkend_wkday_diff, pqopts.wkend_wkday_vcds_diff}
                     y = weekend_vals - week_vals;
                 otherwise
                     y = week_vals;
@@ -5170,6 +5788,92 @@ classdef misc_emissions_analysis
                 title(this_loc.ShortName);
             end
         end
+        
+        function figs = plot_vcd_diff_around_locs(locs, years, varargin)
+            p = inputParser;
+            p.addParameter('only_diff', true);
+            p.addParameter('diff_type', 'abs');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            only_diff = pout.only_diff;
+            diff_type = pout.diff_type;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(locs);
+            locs = misc_emissions_analysis.read_locs_file();
+            locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            n_locs = numel(locs);
+            
+            [wrf_vcds, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.compute_wrf_vcds_for_years(years, 'no2');
+            behr = misc_emissions_analysis.load_vcds_for_years(years, 'TWRF');
+            behr_vcds = behr.daily_vcds;
+            behr_lon = behr.lon;
+            behr_lat = behr.lat;
+            
+            figs = gobjects(n_locs,1);
+            for i_loc = 1:n_locs
+                this_loc = locs(i_loc);
+                % get the BEHR VCDs w/i the box width of the city. Get the
+                % WRF VCDs over a bit larger area and interpolate them to
+                % the BEHR VCDs lat/lon
+                radius = this_loc.BoxSize(3)/0.05; % the radius is the number of grid points, not distance.
+                [xx,yy] = misc_emissions_analysis.find_indicies_in_box_around_point(this_loc, behr_lon, behr_lat, radius);
+                these_behr_vcds = behr_vcds(xx,yy);
+                these_behr_lon = behr_lon(xx,yy);
+                these_behr_lat = behr_lat(xx,yy);
+                
+                xx_wrf = misc_emissions_analysis.find_indices_in_radius_around_loc(this_loc, wrf_lon, wrf_lat, radius*3);
+                WI = scatteredInterpolant(wrf_lon(xx_wrf), wrf_lat(xx_wrf), wrf_vcds(xx_wrf));
+                these_wrf_vcds = reshape(WI(these_behr_lon(:), these_behr_lat(:)), size(these_behr_vcds));
+                
+                figs(i_loc) = figure;
+                if ~only_diff
+                    figs(i_loc).Position(3) = 2 * figs(i_loc).Position(3);
+                    ax=subplot(1,3,1);
+                    pcolor_vcds(ax, these_behr_lon, these_behr_lat, these_behr_vcds, 'none');
+                    title('BEHR');
+                    
+                    ax = subplot(1,3,2);
+                    pcolor_vcds(ax, these_behr_lon, these_behr_lat, these_wrf_vcds, 'none');
+                    title('WRF-Chem');
+                    
+                    ax = subplot(1,3,3);
+                else
+                    ax = axes();
+                end
+                
+                switch lower(diff_type)
+                    case 'abs'
+                        this_diff = these_wrf_vcds - these_behr_vcds;
+                    case 'rel'
+                        this_diff = reldiff(these_wrf_vcds, these_behr_vcds)*100;
+                    otherwise
+                        error('diff type not recognized')
+                end
+                pcolor_vcds(ax, these_behr_lon, these_behr_lat, this_diff, diff_type);
+                title(this_loc.Location);
+            end
+            
+            function pcolor_vcds(ax,lon,lat,vcds,diff_type)
+                pcolor(ax, lon, lat, vcds);
+                shading flat;
+                cb = colorbar;
+                switch lower(diff_type)
+                    case 'abs'
+                        cb.Label.String = '\Delta VCD (molec. cm^{-2})';
+                        colormap(ax, blue_red_cmap)
+                        caxis(calc_plot_limits(vcds(:), 'diff', 'pow10'))
+                    case 'rel'
+                        cb.Label.String = '%\Delta VCD';
+                        colormap(ax, blue_red_cmap)
+                        caxis(calc_plot_limits(vcds(:), 'diff', 'pow10'))
+                    case 'none'
+                        cb.Label.String = 'VCD (molec. cm^{-2})';
+                        caxis(calc_plot_limits(vcds(:), 'zero', 'pow10'))
+                end
+                state_outlines('k');
+            end
+        end
     end
     
     methods(Static = true, Access = private)
@@ -5447,9 +6151,24 @@ classdef misc_emissions_analysis
                 if any(isnan(values(i_chng,:))) || any(isnan(value_sds(i_chng,:))) || any(imag(value_sds(i_chng,:)) ~= 0) || any(isnan(value_dofs(i_chng,:)))
                     difference_is_significant(i_chng) = false;
                 else
-                [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
-                    values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
-                    sum(value_dofs(i_chng,:)), 'confidence', 0.95);
+                    [~, ~, difference_is_significant(i_chng)] = two_sample_t_test(values(i_chng, 1), value_sds(i_chng, 1).^2 .* value_dofs(i_chng, 1), value_dofs(i_chng, 1) + 5,...
+                        values(i_chng, 2), value_sds(i_chng, 2).^2 .* value_dofs(i_chng, 2), value_dofs(i_chng, 2) + 5,...
+                        sum(value_dofs(i_chng,:)), 'confidence', 0.95);
+                end
+            end
+        end
+        
+        function difference_is_significant = is_change_significant_alt(values, value_sds, value_dofs)
+            difference_is_significant = false(size(values,1),1);
+            for i_chng = 1:size(values,1)
+                if any(isnan(values(i_chng,:))) || any(isnan(value_sds(i_chng,:))) || any(imag(value_sds(i_chng,:)) ~= 0) || any(isnan(value_dofs(i_chng,:)))
+                    difference_is_significant(i_chng) = false;
+                else
+                    % assume five parameters are fit, so the number of
+                    % measurements is the number of DoFs + 5.
+                    [~, ~, sig] = two_sample_t_test_alt(values(i_chng,1), value_sds(i_chng, 1), value_dofs(i_chng,1)+5,...
+                        values(i_chng,2), value_sds(i_chng,2), value_dofs(i_chng,2)+5);
+                    difference_is_significant(i_chng) = sig;
                 end
             end
         end
@@ -5610,47 +6329,6 @@ classdef misc_emissions_analysis
             r = sqrt((lon_grid - lon_pt).^2 + (lat_grid - lat_pt).^2);
             [~, i_min] = min(r(:));
             [xx, yy] = ind2sub(size(lon_grid), i_min); 
-        end
-        
-        function locs = cutdown_locs_by_index(locs, loc_inds, varargin)
-            % Cuts down the structure LOCS to the locations specified by
-            % LOCS_INDS by matching the site names from LOCS against the
-            % location names in the structure read in from the spreadsheet.
-            % If LOCS_INDS is an empty array, do not cut the locations down
-            % at all.
-            
-            E = JLLErrors;
-            p = advInputParser;
-            p.addFlag('keep_order');
-            p.parse(varargin{:});
-            pout = p.Results;
-            
-            keep_order = pout.keep_order;
-            
-            if isempty(loc_inds)
-                return 
-            end
-            
-            locs_ss = misc_emissions_analysis.read_locs_file();
-            ss_names = {locs_ss(loc_inds).Location};
-            in_names = {locs.Location};
-            if ~keep_order
-                xx = ismember(in_names, ss_names);
-                if sum(xx) ~= numel(loc_inds)
-                    E.callError('loc_lookup_error', 'A different number of locations was found in LOCS that specified by LOC_INDS');
-                end
-            else
-                xx = nan(size(ss_names));
-                for i=1:numel(xx)
-                    xx_i = find(strcmp(ss_names{i}, in_names));
-                    if isempty(xx_i)
-                        E.callError('loc_lookup_error', 'Could not find "%s" in the given locs structure', ss_names{i});
-                    end
-                    xx(i) = xx_i;
-                end
-            end
-            locs = locs(xx);
-            
         end
         
         function new_locs = match_locs_structs(new_locs, base_locs)

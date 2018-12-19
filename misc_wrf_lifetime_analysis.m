@@ -8,9 +8,18 @@ classdef misc_wrf_lifetime_analysis
     
     methods(Static)
         
+        %%%%%%%%%%%%%%%%%%%%%%%%%
+        % Property-like methods %
+        %%%%%%%%%%%%%%%%%%%%%%%%%
         function workdir = workspace_dir
             mydir = fileparts(mfilename('fullpath'));
             workdir = fullfile(mydir, 'Workspaces', 'WRFData');
+        end
+        
+        function filename = wrf_avg_name(years_in, variable)
+            years_str = strjoin(sprintfmulti('%d', years_in), '_');
+            filename = sprintf('Summer_WRF_avg_%s_%s.mat', years_str, variable);
+            filename = fullfile(misc_emissions_analysis.emis_wrf_dir, filename);
         end
         
         function savename = diag_lifetime_savename(start_dates, end_dates)
@@ -18,6 +27,103 @@ classdef misc_wrf_lifetime_analysis
             savename = sprintf('WRF_diagnostic_lifetime_%s_to_%s.mat', datestr(dvec(1),'yyyy-mm-dd'), datestr(dvec(end), 'yyyy-mm-dd'));
             savename = fullfile(misc_wrf_lifetime_analysis.workspace_dir, savename);
         end
+        
+        %%%%%%%%%%%%%%%%%%%%%%
+        % Generative Methods %
+        %%%%%%%%%%%%%%%%%%%%%%
+        function make_wrf_averages(avg_year, varargin)
+            E = JLLErrors;
+            
+            p = advInputParser;
+            p.addParameter('variables',{'pres','no','no2','ho','vocr'});
+            p.parse(varargin{:});
+            pout = p.Results;
+            variables = pout.variables;
+            
+            processing = struct();
+            if ismember('vocr', variables)
+                processing.vocr = misc_wrf_lifetime_analysis.setup_vocr_calc(avg_year);
+            end
+            
+            start_dates = cell(size(avg_year));
+            end_dates = cell(size(avg_year));
+            for i_yr = 1:numel(avg_year)
+                start_dates{i_yr} = datenum(avg_year(i_yr), 4, 1);
+                end_dates{i_yr} = datenum(avg_year(i_yr), 9, 30);
+            end
+            
+            averages = wrf_time_average(start_dates, end_dates, variables, 'processing', processing);
+            xlon = averages.XLONG;
+            xlat = averages.XLAT;
+            for i_var = 1:numel(variables)
+                this_var = variables{i_var};
+                profiles = averages.(this_var);
+                save_name = misc_wrf_lifetime_analysis.wrf_avg_name(avg_year, this_var);
+                save(save_name, 'xlon', 'xlat', 'profiles');
+            end
+        end 
+        
+        function vocr_processing = setup_vocr_calc(avg_year)
+            % SETUP_VOCR_CALC(AVG_YEAR) Set up the processing structure to
+            % calculate VOCR in WRF_TIME_AVERAGE. Requires the year being
+            % averaged to figure out what VOCs are available.
+            
+            % First find all reactions that involve a VOC + OH.
+            % Fortunately, the R2SMH a.k.a. RACM2_Berkeley2 mechanism
+            % produces "OHVOC" as a diagnostic for these reactions. 
+            
+            rxn_net = KPP_OOP.ReactionNetwork('r2smh');
+            rxns = rxn_net.FindReactionsWithProducts('OHVOC');
+            
+            % Now we need to get the list of VOCs that we want to average. 
+            wi = ncinfo(find_wrf_path('us','daily',sprintf('%04d-01-01', avg_year),'fullpath'));
+            wrf_vars = {wi.Variables.Name};
+            rate_const_by_voc = struct();
+            missing_vocs = {};
+            for i_rxn = 1:numel(rxns)
+                % find the reactant other than OH
+                reactants = rxns{i_rxn}.reactant_names;
+                voc = reactants{~strcmpi(reactants, 'HO')};
+                % is the VOC in the wrf variables (case insensitive)?
+                voc_idx = strcmpi(voc, wrf_vars);
+                if ~any(voc_idx)
+                    missing_vocs = veccat(missing_vocs, {voc});
+                else
+                    rate_const_by_voc.(wrf_vars{voc_idx}) = rxns{i_rxn}.rate_handle;
+                end
+            end
+            
+            % let me know if we're missing some variables
+            if ~isempty(missing_vocs)
+                warning('vocr_calc:missing_vocs', '%d of %d VOCs not present in wrfout file: %s', length(missing_vocs), length(rxns), strjoin(missing_vocs, ', '));
+            end
+            
+            % for the rate constants we also need temperature and number
+            % density
+            wrf_vars_needed = veccat(fieldnames(rate_const_by_voc), {'temperature', 'ndens'}, 'column');
+            
+            vocr_processing = struct('variables', {wrf_vars_needed}, 'proc_fxn', @calc_vocr_internal);
+            
+            function calc_vocr_internal(Wrf)
+                fns = fieldnames(rate_const_by_voc);
+                for i_fn = 1:numel(fns)
+                    myvoc = fns{i_fn};
+                    if i_fn == 1
+                        vocr = zeros(size(Wrf.(myvoc)));
+                    end
+                    
+                    rate_expr = rate_const_by_voc.(myvoc);
+                    % assuming the concentration in WRF is ppmv, convert to
+                    % number density, then compute VOCR for that species.
+                    voc_nd = Wrf.(myvoc) .* 1e-6 .* Wrf.ndens;
+                    vocr = vocr + voc_nd .* rate_expr(Wrf.temperature, Wrf.ndens);
+                end
+            end
+        end
+        
+        %%%%%%%%%%%%%%%%%%%
+        % Utility Methods %
+        %%%%%%%%%%%%%%%%%%%
         
         function average_wrf_diag_lifetime(start_dates, end_dates, varargin)
             p = advInputParser;
@@ -295,6 +401,230 @@ classdef misc_wrf_lifetime_analysis
             
         end
         
+        function [profiles, xlon, xlat] = load_wrf_profiles_for_years(years, specie, varargin)
+            p = advInputParser;
+            p.addParameter('avg_levels', []);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_levels = pout.avg_levels;
+            
+            avg = RunningAverage();
+            for i_yr = 1:numel(years)
+                Profs = load(misc_wrf_lifetime_analysis.wrf_avg_name(years(i_yr), specie));
+                if i_yr == 1
+                    xlon = double(Profs.xlon);
+                    xlat = double(Profs.xlat);
+                end
+                
+                if ~isempty(avg_levels)
+                    prof_data = nanmean(Profs.profiles(:,:,avg_levels), 3);
+                else
+                    prof_data = Profs.profiles;
+                end
+                
+                % unlike the BEHR VCDs in the main emissions class, the WRF
+                % data isn't weighted by area (since all grid cells should
+                % have about the same area) so to go from 1 year to
+                % multi-year averages, we can just do a simple
+                % average-of-averages.
+                avg.addData(double(prof_data));
+            end
+            profiles = avg.getWeightedAverage();
+        end
+        
+        function [vcds, lon, lat] = compute_wrf_vcds_for_years(years, specie)
+            E = JLLErrors;
+            [profs, lon, lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, specie);
+            profs = profs * 1e-6; % assume profiles are in ppm
+            [pres, plon, plat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, 'pres');
+            
+            if ~isequal(plon, lon) || ~isequal(plat,lat)
+                E.callError('grid_mismatch', 'Profiles and pressure defined on different grids')
+            end
+            
+            % Put the third dimension first, so that iterating over the
+            % second and third dims goes over all profiles.
+            if ndims(profs) ~= 3 || ndims(pres) ~= 3
+                E.notimplemented('profiles or pressures are not 3D')
+            end
+            
+            profs = shiftdim(profs, 2);
+            pres = shiftdim(pres, 2);
+            
+            sz = size(profs);
+            vcds = nan(sz(2:end));
+            n_vcd = numel(vcds);
+            wb = waitbar(0,'Computing WRF VCDs');
+            for i_prof = 1:n_vcd
+                waitbar(i_prof/n_vcd, wb);
+                vcds(i_prof) = integPr2(profs(:,i_prof), pres(:,i_prof), pres(1,i_prof));
+            end
+            delete(wb);
+        end
+        
+        function [wrf_lon, wrf_lat, wrf_data] = wrf_data_in_box(center_lon, center_lat, box_radius, wrf_lon, wrf_lat, wrf_data)
+            xx_old = [];
+            yy_old = [];
+            
+            [x_center, y_center] = find_closest_ind(center_lon, center_lat);
+            xx = abs(wrf_lon(:, y_center) - center_lon) < box_radius;
+            yy = abs(wrf_lat(x_center,:) - center_lat) < box_radius;
+            
+            while ~isequal(xx, xx_old) || ~isequal(yy, yy_old)
+                % Since the WRF data isn't in an equirectangular grid, the
+                % x-indices that give the right width at the top of the box
+                % might not at the bottom, and likewise for the y-indices.
+                % What this loop does is iterate until it finds indices
+                % that give at least the requested width at all edges of
+                % the box. It has to iterate since the x-indices chosen
+                % will affect the width spanned by the y-indices and
+                % vice-versa.
+                xx_old = xx;
+                yy_old = yy;
+                
+                xx1 = abs(wrf_lon(:, find(yy,1,'first')) - center_lon) < box_radius;
+                xx2 = abs(wrf_lon(:, find(yy,1,'last')) - center_lon) < box_radius;
+                yy1 = abs(wrf_lat(find(xx,1,'first'), :) - center_lat) < box_radius;
+                yy2 = abs(wrf_lat(find(xx,1,'last'), :) - center_lat) < box_radius;
+                
+                xx = xx1 | xx2;
+                yy = yy1 | yy2;
+
+            end
+            
+            wrf_lon = wrf_lon(xx,yy);
+            wrf_lat = wrf_lat(xx,yy);
+            wrf_data = wrf_data(xx,yy,:);
+            
+            function [xc, yc] = find_closest_ind(target_lon, target_lat)
+                r = (wrf_lon(:) - target_lon(:)).^2 + (wrf_lat(:) - target_lat).^2;
+                [~, imin] = min(r);
+                [xc, yc] = ind2sub(size(wrf_lon), imin);
+            end
+        end
+        
+        function locs = convert_locs(locs)
+            E = JLLErrors;
+            if iscellstr(locs)
+                loc_inds = misc_emissions_analysis.convert_input_loc_inds(locs);
+                locs = misc_emissions_analysis.read_locs_file();
+                locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            elseif isnumeric(locs)
+                loc_inds = locs;
+                locs = misc_emissions_analysis.read_locs_file();
+                locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            elseif ~isstruct(locs)
+                E.badinput('LOCS must be a cell array of strings/chars, a numeric array, or a structure')
+            end
+        end
+        
+        %%%%%%%%%%%%%%%%%%%%
+        % Plotting Methods %
+        %%%%%%%%%%%%%%%%%%%%
+        function [oh_conc, oh_std, radii] = sample_wrf_conc_radii_by_year(locs, years, specie)
+            E = JLLErrors;
+            locs = misc_wrf_lifetime_analysis.convert_locs(locs);
+            
+            radii = 0:0.1:2;
+            angles = linspace(0, 2*pi, 72);
+            
+            n_years = numel(years);
+            n_locs = numel(locs);
+            n_radii = numel(radii);
+            
+            oh_conc = nan(n_radii, n_years, n_locs);
+            oh_std = nan(n_radii, n_years, n_locs);
+            
+            for i_yr = 1:n_years
+                y = years(i_yr);
+                window = (y-1):(y+1);
+                [WRF.oh, WRF.lon, WRF.lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(window, specie, 'avg_levels', 1:5);
+                WRF.oh = WRF.oh * 1e-6; % convert ppm to pure mixing ratio
+                for i_loc = 1:n_locs
+                    max_radius = unique(locs(i_loc).BoxSize(3:4));
+                    if numel(max_radius) > 1
+                        E.notimplemented('Did not expect the box width to be different on opposite sides')
+                    end
+                    
+                    % What we want is to compute the average OH at
+                    % different distances from the city center, so we'll
+                    % create an interpolate for a small box around the city
+                    % and sample at a number of points in circles with
+                    % different radii for the average.
+                    this_loc = locs(i_loc);
+                    [loc_lon, loc_lat, loc_oh] = misc_wrf_lifetime_analysis.wrf_data_in_box(this_loc.Longitude, this_loc.Latitude, max_radius*2,...
+                        WRF.lon, WRF.lat, WRF.oh);
+                    loc_interp = scatteredInterpolant(loc_lon(:), loc_lat(:), loc_oh(:));
+                    
+                    for i_r = 1:n_radii
+                        radius = radii(i_r);
+                        if radius > max_radius
+                            continue
+                        end
+                        if radius == 0
+                            oh_conc(i_r, i_yr, i_loc) = loc_interp(this_loc.Longitude, this_loc.Latitude);
+                        else
+                            sample_lons = this_loc.Longitude + radius .* cos(angles);
+                            sample_lats = this_loc.Latitude + radius .* sin(angles);
+                            
+                            sample_oh = loc_interp(sample_lons, sample_lats);
+                            oh_conc(i_r, i_yr, i_loc) = nanmean(sample_oh);
+                            oh_std(i_r, i_yr, i_loc) = nanstd(sample_oh);
+                        end
+                    end
+                end
+            end
+        end
+        
+        function figs = plot_wrf_conc_radii(locs, specie)
+            
+            locs = misc_wrf_lifetime_analysis.convert_locs(locs);
+            years = 2006:2013;
+            [oh_conc, oh_stds, radii] = misc_wrf_lifetime_analysis.sample_wrf_conc_radii_by_year(locs, years, specie);
+            
+            n_locs = numel(locs);
+            n_years = numel(years);
+            line_cols = nan(n_years,3);
+            cmap = 'jet';
+            for i_yr = 1:n_years
+                line_cols(i_yr,:) = map2colmap(i_yr, 1, n_years, cmap);
+            end
+            
+            figs = gobjects(n_locs,1);
+            for i_loc = 1:n_locs
+                this_loc = locs(i_loc);
+                loc_lat = this_loc.Latitude;
+                % convert radii to distance in kilometers
+                distance = nan(size(radii));
+                for i_r = 1:numel(radii)
+                    distance(i_r) = m_idist(0, loc_lat, radii(i_r), loc_lat)/1000;
+                end
+                figs(i_loc) = figure;
+                %l = gobjects(n_years,1);
+                for i_yr = 1:n_years
+                    this_oh_conc = oh_conc(:,i_yr,i_loc)*2e19; % convert mixing ratio to approx number density
+                    this_oh_std = oh_stds(:,i_yr,i_loc)*2e19;
+                    line(distance, this_oh_conc, 'linewidth', 2, 'marker', 'o', 'color', line_cols(i_yr,:),...
+                        'markerfacecolor', line_cols(i_yr,:), 'markeredgecolor', 'k');
+                    scatter_errorbars(distance, this_oh_conc, this_oh_std, 'color', line_cols(i_yr,:));
+                end
+                
+                rr_has_data = any(~isnan(oh_conc(:,:,i_loc)),2);
+                l1 = find(rr_has_data,1,'first');
+                l2 = find(rr_has_data,1,'last')+2;
+                lim_radii = veccat(distance(1) - mean(diff(distance)), distance, distance(2) + mean(diff(distance)));
+                xlim([lim_radii(l1), lim_radii(l2)]);
+                
+                cb = colorbar;
+                caxis([min(years), max(years)]);
+                colormap(cmap);
+                title(this_loc.Location);
+                xlabel('Distance from city center (km)');
+                ylabel(sprintf('[%s] (molec. cm^{-3})', upper(specie)));
+                set(gca,'fontsize',16)
+            end
+        end
     end
 end
 
