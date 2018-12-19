@@ -28,6 +28,94 @@ classdef misc_wrf_lifetime_analysis
             savename = fullfile(misc_wrf_lifetime_analysis.workspace_dir, savename);
         end
         
+        %%%%%%%%%%%%%%%%%%%%%%
+        % Generative Methods %
+        %%%%%%%%%%%%%%%%%%%%%%
+        function make_wrf_averages(avg_year)
+            E = JLLErrors;
+            
+            variables = {'vocr'}; %{'no','no2','ho'};
+            processing = struct();
+            if ismember('vocr', variables)
+                processing.vocr = misc_wrf_lifetime_analysis.setup_vocr_calc(avg_year);
+            end
+            
+            start_dates = cell(size(avg_year));
+            end_dates = cell(size(avg_year));
+            for i_yr = 1:numel(avg_year)
+                start_dates{i_yr} = datenum(avg_year(i_yr), 4, 1);
+                end_dates{i_yr} = datenum(avg_year(i_yr), 9, 30);
+            end
+            
+            averages = wrf_time_average(start_dates, end_dates, variables, 'processing', processing);
+            xlon = averages.XLONG;
+            xlat = averages.XLAT;
+            for i_var = 1:numel(variables)
+                this_var = variables{i_var};
+                profiles = averages.(this_var);
+                save_name = misc_wrf_lifetime_analysis.wrf_avg_name(avg_year, this_var);
+                save(save_name, 'xlon', 'xlat', 'profiles');
+            end
+        end 
+        
+        function vocr_processing = setup_vocr_calc(avg_year)
+            % SETUP_VOCR_CALC(AVG_YEAR) Set up the processing structure to
+            % calculate VOCR in WRF_TIME_AVERAGE. Requires the year being
+            % averaged to figure out what VOCs are available.
+            
+            % First find all reactions that involve a VOC + OH.
+            % Fortunately, the R2SMH a.k.a. RACM2_Berkeley2 mechanism
+            % produces "OHVOC" as a diagnostic for these reactions. 
+            
+            rxn_net = KPP_OOP.ReactionNetwork('r2smh');
+            rxns = rxn_net.FindReactionsWithProducts('OHVOC');
+            
+            % Now we need to get the list of VOCs that we want to average. 
+            wi = ncinfo(find_wrf_path('us','daily',sprintf('%04d-01-01', avg_year),'fullpath'));
+            wrf_vars = {wi.Variables.Name};
+            rate_const_by_voc = struct();
+            missing_vocs = {};
+            for i_rxn = 1:numel(rxns)
+                % find the reactant other than OH
+                reactants = rxns{i_rxn}.reactant_names;
+                voc = reactants{~strcmpi(reactants, 'HO')};
+                % is the VOC in the wrf variables (case insensitive)?
+                voc_idx = strcmpi(voc, wrf_vars);
+                if ~any(voc_idx)
+                    missing_vocs = veccat(missing_vocs, {voc});
+                else
+                    rate_const_by_voc.(wrf_vars{voc_idx}) = rxns{i_rxn}.rate_handle;
+                end
+            end
+            
+            % let me know if we're missing some variables
+            if ~isempty(missing_vocs)
+                warning('vocr_calc:missing_vocs', '%d of %d VOCs not present in wrfout file: %s', length(missing_vocs), length(rxns), strjoin(missing_vocs, ', '));
+            end
+            
+            % for the rate constants we also need temperature and number
+            % density
+            wrf_vars_needed = veccat(fieldnames(rate_const_by_voc), {'temperature', 'ndens'}, 'column');
+            
+            vocr_processing = struct('variables', {wrf_vars_needed}, 'proc_fxn', @calc_vocr_internal);
+            
+            function calc_vocr_internal(Wrf)
+                fns = fieldnames(rate_const_by_voc);
+                for i_fn = 1:numel(fns)
+                    myvoc = fns{i_fn};
+                    if i_fn == 1
+                        vocr = zeros(size(Wrf.(myvoc)));
+                    end
+                    
+                    rate_expr = rate_const_by_voc.(myvoc);
+                    % assuming the concentration in WRF is ppmv, convert to
+                    % number density, then compute VOCR for that species.
+                    voc_nd = Wrf.(myvoc) .* 1e-6 .* Wrf.ndens;
+                    vocr = vocr + voc_nd .* rate_expr(Wrf.temperature, Wrf.ndens);
+                end
+            end
+        end
+        
         %%%%%%%%%%%%%%%%%%%
         % Utility Methods %
         %%%%%%%%%%%%%%%%%%%
