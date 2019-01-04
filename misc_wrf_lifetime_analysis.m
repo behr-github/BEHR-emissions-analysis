@@ -81,8 +81,18 @@ classdef misc_wrf_lifetime_analysis
             rxn_net = KPP_OOP.ReactionNetwork('r2smh');
             rxns = rxn_net.FindReactionsWithProducts('OHVOC');
             
-            % Now we need to get the list of VOCs that we want to average. 
-            wi = ncinfo(find_wrf_path('us','daily',sprintf('%04d-01-01', avg_year),'fullpath'));
+            % Now we need to get the list of VOCs that we want to average.
+            wrf_file = find_wrf_path('us','daily',sprintf('%04d-01-01', avg_year),'fullpath');
+            try 
+                wi = ncinfo(wrf_file);
+            catch err
+                if strcmp(err.identifier, 'MATLAB:imagesci:netcdf:unableToOpenFileforRead')
+                    wrf_file = strrep(wrf_file, 'wrfout', 'wrfout_subset');
+                    wi = ncinfo(wrf_file);
+                else
+                    rethrow(err)
+                end
+            end
             wrf_vars = {wi.Variables.Name};
             rate_const_by_voc = struct();
             missing_vocs = {};
@@ -110,7 +120,7 @@ classdef misc_wrf_lifetime_analysis
             
             vocr_processing = struct('variables', {wrf_vars_needed}, 'proc_fxn', @calc_vocr_internal);
             
-            function calc_vocr_internal(Wrf)
+            function vocr = calc_vocr_internal(Wrf)
                 fns = fieldnames(rate_const_by_voc);
                 for i_fn = 1:numel(fns)
                     myvoc = fns{i_fn};
