@@ -44,6 +44,9 @@ classdef misc_wrf_lifetime_analysis
             if ismember('vocr', variables)
                 processing.vocr = misc_wrf_lifetime_analysis.setup_vocr_calc(avg_year);
             end
+            if ismember('phox', variables)
+                processing.phox = misc_wrf_lifetime_analysis.setup_phox_calc(avg_year);
+            end
             
             start_dates = cell(size(avg_year));
             end_dates = cell(size(avg_year));
@@ -121,9 +124,105 @@ classdef misc_wrf_lifetime_analysis
             end
         end
         
+        function phox_processing = setup_phox_calc(avg_year)
+            % Assuming that most PHOx occurs via O1D + H2O -> 2OH and HCHO
+            % + hv -> 2HO2 + CO, we can calculate it by:
+            %
+            %   1a) Calculate O1D steady-state concentration
+            %       jO1D * [O3] = ko1d*[O1D] + 2.2e-10 * [H2O] * [O1D]
+            %    => [O1D] = (jO1D * [O3])/(ko1d + 2.2e-10*[H2O])
+            %
+            %   1b) PHOx_o3 = 2.2e-10 * [H2O] * [O1D]
+            %
+            %   2) Add in production from HCHO photolysis:
+            %       PHOx_hcho = jCH2Or * [HCHO]
+            %
+            % Water concentration is not given in WRF directly. Water
+            % concentrations are given in kg/kg. Assuming we have the ALT
+            % variable, it gives inverse density (I hope of air!). Given
+            % that, then
+            %
+            % [H2O] = QVAPOR (kg water/kg air) * 1/ALT (m3/kg air) *
+            %   mol H2O / 18.02e-3 kg H2O * 6.022e23 molec/mol * 1 m3 /
+            %   (100 cm)^3 -> molec/cm^3 H2O
+            
+            % get the rate constant for O1D relaxation to O3P;
+            rxn_network = KPP_OOP.ReactionNetwork('r2smh');
+            rxns = rxn_network.FindReactionsWithReactants('O1D');
+            rxns = rxns{cellfun(@(x) isscalar(x.reactants), rxns)};
+            o1d_relax_rate = rxns.rate_handle;
+            h2o_rate = 2.2e-10;
+            
+            % todo: add photolysis const
+            p_o1d = '';
+            p_hcho = '';
+            req_vars = {'ALT', 'QVAPOR', 'o3', 'hcho', p_o1d, p_hcho};
+            wi = misc_wrf_lifetime_analysis.load_test_wrf_tile(avg_year);
+            wrf_vars = {wi.Variables.Name};
+            xx = ~ismember(req_vars, wrf_vars);
+            if any(xx)
+                warning('missing_var:phox_calc', 'Missing the following variables in %d for PHOx calc: %s - will not calculate PHOx', avg_year, strjoin(req_vars(xx), ', '));
+                phox_processing = struct('variables', {'P'}, 'proc_fxn', no_phox);
+            else
+                phox_processing = struct('variables', veccat(req_vars, {'temperature', 'ndens'}), 'proc_fxn', calc_phox);
+            end
+            
+            function phox = no_phox(Wrf)
+                phox = nan(size(Wrf.P));
+            end
+            
+            function phox = calc_phox(Wrf)
+                density = 1 ./ Wrf.ALT;
+                qvapor = Wrf.QVAPOR;
+                h2o = qvapor .* density ./ 18.02e-3 .* 6.022e23 ./ 100.^3;
+                
+                o3 = Wrf.o3;
+                j_o1d = Wrf.(p_o1d);
+                j_hcho = Wrf.(p_hcho);
+                k_o1d = o1d_relax_rate(Wrf.temperature, Wrf.ndens);
+                
+                o1d = (j_o1d .* o3) ./ (h2o_rate .* h2o + k_o1d );
+                
+                hcho = Wrf.hcho;
+                phox = hcho .* j_hcho + o1d .* h2o .* h2o_rate;
+            end
+        end
+        
+        function alpha_processing = setup_alpha_calc(avg_year)
+            % This is going to be the most complicated of the necessary
+            % calculations. I'm following what Paul did in his 2016 paper
+            % (doi: 10.5194/acp-16-7623-2016), sect. 4.2
+            %
+            % He sets P(ANs) = \sum_{R_i} \alpha_i * f_{NO_i} * k_{OH+R_i} * [R_i] * [OH]
+            %
+            % f_{NO_i} is defined as the fraction of RO2 that reacts with
+            % NO, and it is the sum of NO + RO2 -> NO2 + RO and
+            % NO + NO2 -> RONO2 rates divided by the sum of all losses of
+            % RO2. Fortunately, this is fairly straightforward to do with
+            % my KPP parser, just find the overall rate of the RO2 + NO
+            % reaction (since R2SMH handles alpha through the product
+            % coefficients). The tricky part will be that the preprocessing
+            % step will need to iteratively solve all the RO2
+            % concentrations so that they are consistent with each other.
+        end
+        
         %%%%%%%%%%%%%%%%%%%
         % Utility Methods %
         %%%%%%%%%%%%%%%%%%%
+        
+        function wi = load_test_wrf_file(wrf_year)
+            wrf_file = find_wrf_path('us','daily',sprintf('%04d-01-01', wrf_year),'fullpath');
+            try
+                wi = ncinfo(wrf_file);
+            catch err
+                if strcmpi(err.identifier, '?')
+                    wrf_file = strrep(wrf_file, 'wrfout', 'wrfout_subset');
+                    wi = ncinfo(wrf_file);
+                else
+                    rethrow(err)
+                end
+            end
+        end
         
         function average_wrf_diag_lifetime(start_dates, end_dates, varargin)
             p = advInputParser;
