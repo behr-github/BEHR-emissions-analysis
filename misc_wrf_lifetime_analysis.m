@@ -47,6 +47,9 @@ classdef misc_wrf_lifetime_analysis
             if ismember('phox', variables)
                 processing.phox = misc_wrf_lifetime_analysis.setup_phox_calc(avg_year);
             end
+            if ismember('alpha', variables)
+                processing.alpha = misc_wrf_lifetime_analysis.setup_alpha_calc(avg_year);
+            end
             
             start_dates = cell(size(avg_year));
             end_dates = cell(size(avg_year));
@@ -135,7 +138,7 @@ classdef misc_wrf_lifetime_analysis
             %   1b) PHOx_o3 = 2.2e-10 * [H2O] * [O1D]
             %
             %   2) Add in production from HCHO photolysis:
-            %       PHOx_hcho = jCH2Or * [HCHO]
+            %       PHOx_hcho = 2 * jCH2Or * [HCHO]
             %
             % Water concentration is not given in WRF directly. Water
             % concentrations are given in kg/kg. Assuming we have the ALT
@@ -154,17 +157,17 @@ classdef misc_wrf_lifetime_analysis
             h2o_rate = 2.2e-10;
             
             % todo: add photolysis const
-            p_o1d = '';
-            p_hcho = '';
+            p_o1d = 'PHOTR_O31D';
+            p_hcho = 'PHOTR_CH2OR';
             req_vars = {'ALT', 'QVAPOR', 'o3', 'hcho', p_o1d, p_hcho};
             wi = misc_wrf_lifetime_analysis.load_test_wrf_tile(avg_year);
             wrf_vars = {wi.Variables.Name};
             xx = ~ismember(req_vars, wrf_vars);
             if any(xx)
                 warning('missing_var:phox_calc', 'Missing the following variables in %d for PHOx calc: %s - will not calculate PHOx', avg_year, strjoin(req_vars(xx), ', '));
-                phox_processing = struct('variables', {'P'}, 'proc_fxn', no_phox);
+                phox_processing = struct('variables', {'P'}, 'proc_fxn', @no_phox);
             else
-                phox_processing = struct('variables', veccat(req_vars, {'temperature', 'ndens'}), 'proc_fxn', calc_phox);
+                phox_processing = struct('variables', veccat(req_vars, {'temperature', 'ndens'}), 'proc_fxn', @calc_phox);
             end
             
             function phox = no_phox(Wrf)
@@ -184,26 +187,37 @@ classdef misc_wrf_lifetime_analysis
                 o1d = (j_o1d .* o3) ./ (h2o_rate .* h2o + k_o1d );
                 
                 hcho = Wrf.hcho;
-                phox = hcho .* j_hcho + o1d .* h2o .* h2o_rate;
+                phox = 2 .* hcho .* j_hcho + o1d .* h2o .* h2o_rate;
             end
         end
         
         function alpha_processing = setup_alpha_calc(avg_year)
-            % This is going to be the most complicated of the necessary
-            % calculations. I'm following what Paul did in his 2016 paper
-            % (doi: 10.5194/acp-16-7623-2016), sect. 4.2
-            %
-            % He sets P(ANs) = \sum_{R_i} \alpha_i * f_{NO_i} * k_{OH+R_i} * [R_i] * [OH]
-            %
-            % f_{NO_i} is defined as the fraction of RO2 that reacts with
-            % NO, and it is the sum of NO + RO2 -> NO2 + RO and
-            % NO + NO2 -> RONO2 rates divided by the sum of all losses of
-            % RO2. Fortunately, this is fairly straightforward to do with
-            % my KPP parser, just find the overall rate of the RO2 + NO
-            % reaction (since R2SMH handles alpha through the product
-            % coefficients). The tricky part will be that the preprocessing
-            % step will need to iteratively solve all the RO2
-            % concentrations so that they are consistent with each other.
+            % Rather than try to calculate the steady state RO2 values, I'm
+            % going to take the approach used in Perring et al. 2010 (ACP p
+            % 7215) where she identifies that P(O3)/P(ANs) = (2-2a)/a,
+            % assuming that each RO2 + NO would produce 2 O3 if alpha were
+            % 0 (one from RO2 + NO and the second from HO2 + NO).
+            % Fortunately, for most years I have LNOXA (i.e. P(ANs)) and
+            % PO3 saved in the WRF output!
+            
+            req_vars = {'LNOXA', 'PO3'};
+            wi = misc_wrf_lifetime_analysis.load_test_wrf_tile(avg_year);
+            wrf_vars = {wi.Variables.Name};
+            xx = ~ismember(req_vars, wrf_vars);
+            if any(xx)
+                warning('missing_var:alpha_calc', 'Missing the following variables in %d for PHOx calc - will not calculated PHOx', avg_year, strjoin(req_vars(xx), ', '));
+                alpha_processing = struct('variables', {'P'}, 'proc_fxn', @no_alpha);
+            else
+                alpha_processing = struct('variables', req_vars, 'proc_fxn', @calc_alpha);
+            end
+            
+            function alpha = no_alpha(Wrf)
+                alpha = nan(size(Wrf.P));
+            end
+            
+            function alpha = calc_alpha(Wrf)
+                alpha = Wrf.LNOXA ./ Wrf.PO3;
+            end
         end
         
         %%%%%%%%%%%%%%%%%%%
