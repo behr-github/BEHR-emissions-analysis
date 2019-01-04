@@ -69,6 +69,20 @@ classdef misc_wrf_lifetime_analysis
             end
         end 
         
+        function wi = load_test_wrf_tile(avg_year)
+            wrf_file = find_wrf_path('us','daily',sprintf('%04d-01-01', avg_year),'fullpath');
+            try 
+                wi = ncinfo(wrf_file);
+            catch err
+                if strcmp(err.identifier, 'MATLAB:imagesci:netcdf:unableToOpenFileforRead')
+                    wrf_file = strrep(wrf_file, 'wrfout', 'wrfout_subset');
+                    wi = ncinfo(wrf_file);
+                else
+                    rethrow(err)
+                end
+            end
+        end
+        
         function vocr_processing = setup_vocr_calc(avg_year)
             % SETUP_VOCR_CALC(AVG_YEAR) Set up the processing structure to
             % calculate VOCR in WRF_TIME_AVERAGE. Requires the year being
@@ -82,17 +96,7 @@ classdef misc_wrf_lifetime_analysis
             rxns = rxn_net.FindReactionsWithProducts('OHVOC');
             
             % Now we need to get the list of VOCs that we want to average.
-            wrf_file = find_wrf_path('us','daily',sprintf('%04d-01-01', avg_year),'fullpath');
-            try 
-                wi = ncinfo(wrf_file);
-            catch err
-                if strcmp(err.identifier, 'MATLAB:imagesci:netcdf:unableToOpenFileforRead')
-                    wrf_file = strrep(wrf_file, 'wrfout', 'wrfout_subset');
-                    wi = ncinfo(wrf_file);
-                else
-                    rethrow(err)
-                end
-            end
+            wi = misc_wrf_lifetime_analysis.load_test_wrf_file(avg_year);
             wrf_vars = {wi.Variables.Name};
             rate_const_by_voc = struct();
             missing_vocs = {};
