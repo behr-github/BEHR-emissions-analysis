@@ -155,13 +155,22 @@ classdef misc_wrf_lifetime_analysis
             %       PHOx_hcho = 2 * jCH2Or * [HCHO]
             %
             % Water concentration is not given in WRF directly. Water
-            % concentrations are given in kg/kg. Assuming we have the ALT
-            % variable, it gives inverse density (I hope of air!). Given
-            % that, then
+            % concentrations are given in kg/kg. Density of air equals
             %
-            % [H2O] = QVAPOR (kg water/kg air) * 1/ALT (m3/kg air) *
-            %   mol H2O / 18.02e-3 kg H2O * 6.022e23 molec/mol * 1 m3 /
-            %   (100 cm)^3 -> molec/cm^3 H2O
+            %   \rho = p / R_spec * T
+            %
+            % where p is pressure, T is absolute temperature, and R_spec is
+            % the specific gas constant for dry air = 287.058 J kg-1 K-1 =
+            % 2.87058 hPa m3 kg-1 K-1.
+            %
+            % But we already need number density of air, so instead we can
+            % just compute rho as n * M, where M is 28.97 g/mol (avg. molar
+            % mass of dry air), with appropriate unit conversions for g ->
+            % kg and molec. -> mol
+            %
+            % [H2O] = QVAPOR (kg water/kg air) * RHO (kg/cm3 dry air) *
+            %   mol H2O / 18.02e-3 kg H2O * 6.022e23 molec/mol ->
+            %   molec/cm^3 H2O
             
             % get the rate constant for O1D relaxation to O3P;
             rxn_network = KPP_OOP.ReactionNetwork('r2smh');
@@ -189,9 +198,13 @@ classdef misc_wrf_lifetime_analysis
             end
             
             function phox = calc_phox(Wrf)
-                density = 1 ./ Wrf.ALT;
+                % number density (molec./cm^3) .* mol ./ Av molec. .* 28.97
+                % g / mol dry air .* 1 kg ./ 1000 g => kg / cm^3 density
+                density = Wrf.ndens ./ 6.022e23 .* 28.97 ./ 1000;
                 qvapor = Wrf.QVAPOR;
-                h2o = qvapor .* density ./ 18.02e-3 .* 6.022e23 ./ 100.^3;
+                % I could have cancelled out the avogadro's numbers, but it
+                % seems more straightforward to just leave them in.
+                h2o = qvapor .* density ./ 18.02e-3 .* 6.022e23;
                 
                 o3 = Wrf.o3;
                 j_o1d = Wrf.(p_o1d);
