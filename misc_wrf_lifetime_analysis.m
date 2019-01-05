@@ -182,15 +182,15 @@ classdef misc_wrf_lifetime_analysis
             % todo: add photolysis const
             p_o1d = 'PHOTR_O31D';
             p_hcho = 'PHOTR_CH2OR';
-            req_vars = {'ALT', 'QVAPOR', 'o3', 'hcho', p_o1d, p_hcho};
+            req_vars = {'QVAPOR', 'o3', 'hcho', p_o1d, p_hcho};
             wi = misc_wrf_lifetime_analysis.load_test_wrf_tile(avg_year);
             wrf_vars = {wi.Variables.Name};
             xx = ~ismember(req_vars, wrf_vars);
             if any(xx)
                 warning('missing_var:phox_calc', 'Missing the following variables in %d for PHOx calc: %s - will not calculate PHOx', avg_year, strjoin(req_vars(xx), ', '));
-                phox_processing = struct('variables', {'P'}, 'proc_fxn', @no_phox);
+                phox_processing = struct('variables', {{'P'}}, 'proc_fxn', @no_phox);
             else
-                phox_processing = struct('variables', veccat(req_vars, {'temperature', 'ndens'}), 'proc_fxn', @calc_phox);
+                phox_processing = struct('variables', {veccat(req_vars, {'temperature', 'ndens'})}, 'proc_fxn', @calc_phox);
             end
             
             function phox = no_phox(Wrf)
@@ -206,7 +206,7 @@ classdef misc_wrf_lifetime_analysis
                 % seems more straightforward to just leave them in.
                 h2o = qvapor .* density ./ 18.02e-3 .* 6.022e23;
                 
-                o3 = Wrf.o3;
+                o3 = Wrf.o3 .* Wrf.ndens .* 1e-6; % convert o3 from ppm -> molec./cm3
                 j_o1d = Wrf.(p_o1d);
                 j_hcho = Wrf.(p_hcho);
                 k_o1d = o1d_relax_rate(Wrf.temperature, Wrf.ndens);
@@ -215,6 +215,7 @@ classdef misc_wrf_lifetime_analysis
                 
                 hcho = Wrf.hcho;
                 phox = 2 .* hcho .* j_hcho + o1d .* h2o .* h2o_rate;
+                phox = phox ./ Wrf.ndens .* 1e12; % convert phox from molec cm^-3 s^-1 -> ppt s^-1
             end
         end
         
@@ -233,9 +234,9 @@ classdef misc_wrf_lifetime_analysis
             xx = ~ismember(req_vars, wrf_vars);
             if any(xx)
                 warning('missing_var:alpha_calc', 'Missing the following variables in %d for PHOx calc - will not calculated PHOx', avg_year, strjoin(req_vars(xx), ', '));
-                alpha_processing = struct('variables', {'P'}, 'proc_fxn', @no_alpha);
+                alpha_processing = struct('variables', {{'P'}}, 'proc_fxn', @no_alpha);
             else
-                alpha_processing = struct('variables', req_vars, 'proc_fxn', @calc_alpha);
+                alpha_processing = struct('variables', {req_vars}, 'proc_fxn', @calc_alpha);
             end
             
             function alpha = no_alpha(Wrf)
