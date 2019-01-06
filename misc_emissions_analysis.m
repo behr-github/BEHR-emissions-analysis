@@ -2,6 +2,10 @@ classdef misc_emissions_analysis
     %UNTITLED Summary of this class goes here
     %   Detailed explanation goes here
     
+    properties(Constant = true)
+        % the nine cities used for the OH analysis
+        nine_cities = {'Chicago', 'Dallas', 'Denver', 'Detroit', 'Los Angeles', 'Memphis', 'Minneapolis', 'New York', 'Omaha'};
+    end
     
     properties(Constant = true, Access = protected)
         % This is used to help check if all the required Git repos are in
@@ -1507,7 +1511,11 @@ classdef misc_emissions_analysis
             function [lower_oh, upper_oh] = get_upper_lower_oh(delta_a, delta_b)
                 pert_oh = [delta_a.(delta_fn)(i_loc).(fn).oh, delta_b.(delta_fn)(i_loc).(fn).oh];
                 if any(isnan(pert_oh)) && ~isnan(base_oh)
-                    error('not implemented: nan in perturbed OH but not base OH')
+                    warning('nan in perturbed OH but not base OH')
+                    % I really don't know how else to handle this
+                    lower_oh = nan;
+                    upper_oh = nan;
+                    return
                 end
                 is_lt = pert_oh < base_oh;
                 if any(is_lt)
@@ -3851,6 +3859,11 @@ classdef misc_emissions_analysis
                                 if isfield(OH.locs_wkday(i_loc).OH.(fns{i_fn}), 'vocr')
                                     wkday_vocr = OH.locs_wkday(i_loc).OH.(fns{i_fn}).vocr;
                                     wkend_vocr = OH.locs_wkend(i_loc).OH.(fns{i_fn}).vocr;
+                                elseif strcmpi(fns{i_fn}, 'wrf')
+                                    [wrf_vocr, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(year_window, 'vocr', 'avg_levels', 5);
+                                    xx = misc_emissions_analysis.find_indices_in_radius_around_loc(OH.locs_wkday(i_loc), wrf_lon, wrf_lat);
+                                    wkday_vocr = nanmean(wrf_vocr(xx));
+                                    wkend_vocr = nanmean(wrf_vocr(xx));
                                 else
                                     wkday_vocr = NaN;
                                     wkend_vocr = NaN;
@@ -3999,6 +4012,7 @@ classdef misc_emissions_analysis
                     
                     i_inv = find(strcmpi(fns, 'invert'));
                     i_wrf = find(strcmpi(fns, 'wrf'));
+                    i_ratio = find(strcmpi(fns, 'ratio'));
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
                         this_oh = squeeze(oh_conc(:,i_loc,oh_type_inds, dow_ind));
@@ -4010,7 +4024,9 @@ classdef misc_emissions_analysis
                             case 'invert'
                                 this_nox = squeeze(nox_conc(:, i_loc, i_inv, dow_ind));
                             case 'wrf'
-                                this_nox = squeeze(nox_conc(:, i_loc, i_wrf, dow_ind)); %#ok<FNDSB>
+                                this_nox = squeeze(nox_conc(:, i_loc, i_wrf, dow_ind));
+                            case 'ratio'
+                                this_nox = squeeze(nox_conc(:, i_loc, i_ratio, dow_ind));
                             case 'vcds'
                                 this_nox = squeeze(behr_vcds(:, i_loc, 1, dow_ind));
                                 nox_ax_label = 'NO_2 VCD (molec. cm^{-2})';
@@ -4018,10 +4034,11 @@ classdef misc_emissions_analysis
                                 error('No method to compute nox type "%s"', nox_value);
                         end
                         if strcmpi(y2_var,'lhno3')
-                            this_y2 = squeeze(frac_hno3(:, i_loc, i_inv, dow_ind));
+                            this_y2{1} = squeeze(frac_hno3(:, i_loc, i_inv, dow_ind));
                             y2_ax_label = 'Frac. loss to HNO_3';
                         elseif strcmpi(y2_var,'vocr')
-                            this_y2 = squeeze(vocr(:, i_loc, i_inv, dow_ind));
+                            this_y2{1} = squeeze(vocr(:, i_loc, i_inv, dow_ind));
+                            this_y2{2} = squeeze(vocr(:, i_loc, i_wrf, dow_ind));
                             y2_ax_label = 'VOC_R';
                         else
                             E.notimplemented('No action defined for y2_var = %s', y2_var);
@@ -4111,7 +4128,7 @@ classdef misc_emissions_analysis
                 errh = gobjects(0);
             end
             
-            function [oh_handles, err_handles, nox_handles, frac_handles] = oh_nox_yy(oh, oh_err, nox, frac)
+            function [oh_handles, err_handles, nox_handles, frac_handles] = oh_nox_yy(oh, oh_err, nox, y2var)
                 subplot(2,1,1);
                 x = 1:size(oh,1);
                 oh_err = shiftdim(oh_err, ndims(oh_err)-1); % put the +/- error dimension first
@@ -4127,7 +4144,10 @@ classdef misc_emissions_analysis
                 % not tested for the city style plot anymore
                 plotnox = @(x,nox) plot(x, nox, 'o-', 'linewidth', 2, 'color', 'k', 'markerfacecolor',[0.7 0.7 0.7], 'markersize', 10);
                 plotfrac = @(x,frac) plot(x, frac, '*', 'color', 'r',  'markersize', 10, 'linewidth', 2);
-                [~, nox_handles, frac_handles] = plotyy(x, nox, x, frac, plotnox, plotfrac);
+                [yyax, nox_handles, frac_handles] = plotyy(x, nox, x, y2var{1}, plotnox, plotfrac);
+                for i_y2 = 2:numel(y2var)
+                    line(yyax(2), x, y2var{i_y2}, 'marker', 'p', 'linestyle', 'none', 'color', 'r', 'markersize', 10, 'linewidth',2);
+                end
             end
             
             function legstr = get_legend_strings(oh_types)
@@ -6454,7 +6474,7 @@ classdef misc_emissions_analysis
             % in ppm.
             
             nox_inv = this_loc.WRFData.ndens * this_loc.WRFData.behr_nox * 1e-6;
-            [results.oh, results.ho2, results.ro2, results.vocr] = hox_solve_tau_constraint(nox_inv, phox, this_loc.emis_tau.tau, alpha);
+            [results.oh, results.ho2, results.ro2, results.vocr, results.tau] = hox_solve_tau_constraint(nox_inv, phox, this_loc.emis_tau.tau, alpha);
             results.nox = nox_inv;
         end
         
