@@ -590,6 +590,27 @@ classdef misc_wrf_lifetime_analysis
             delete(wb);
         end
         
+        function avg_prof = average_profiles_around_loc(loc, years, specie, varargin)
+            p = advInputParser;
+            p.addParameter('avg_levels', []);
+            p.addParameter('radius', []);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_levels = pout.avg_levels;
+            radius = pout.radius;
+            
+            [wrf_profiles, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, specie, 'avg_levels', avg_levels);
+            xx = misc_emissions_analysis.find_indices_in_radius_around_loc(loc, wrf_lon, wrf_lat, radius);
+            if ismatrix(wrf_profiles)
+                avg_prof = nanmean(wrf_profiles(xx));
+            elseif ndims(wrf_profiles) == 3
+                wrf_profiles = permute(wrf_profiles, [3 1 2]);
+                avg_prof = nanmean(wrf_profiles(:, xx), 2);
+                %hold on; plot(avg_prof, 1:29);
+            end
+        end
+        
         function [wrf_lon, wrf_lat, wrf_data] = wrf_data_in_box(center_lon, center_lat, box_radius, wrf_lon, wrf_lat, wrf_data)
             xx_old = [];
             yy_old = [];

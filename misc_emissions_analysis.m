@@ -1221,11 +1221,15 @@ classdef misc_emissions_analysis
         
         function [wkday_locs, wkend_locs] = compute_oh_concentrations(varargin)
             
-            % We'll compute 3 OH concentrations:
+            % We'll compute 5 OH concentrations:
             %   1. OH from the steady state model
-            %   2. OH assuming lifetime is entirely due to HNO3 formation
-            %   3. OH from WRF-Chem
-            % The last one is already handled by
+            %   2. OH from the steady state model constrained with HCHO
+            %   columns
+            %   3. OH assuming lifetime is entirely due to HNO3 formation
+            %   4. OH from WRF-Chem
+            %   5. OH using the weekend/weekday steady state model
+            %
+            % The fourth one is already handled by
             % make_location_wrf_avgs_file, we'll just be using what that
             % calculates. 
             %
@@ -1318,6 +1322,9 @@ classdef misc_emissions_analysis
                     end
                     % Option 1: invert BEHR VCD -> surface NOx
                     wkday.invert = misc_emissions_analysis.get_invert_oh(this_wkday_loc, phox, alpha);
+                    % Option 1b: invert BEHR VCD -> surface NOx and OMI
+                    % HCHO -> surface HCHO
+                    wkday.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho(this_wkday_loc, alpha);
                     % Option 2: assume all is HNO3
                     wkday.hno3 = misc_emissions_analysis.get_hno3_oh(this_wkday_loc);
                     % Option 3: what does WRF think it is
@@ -1328,6 +1335,7 @@ classdef misc_emissions_analysis
                         fprintf('Not calculating weekday OH for %s - fit not good\n', this_wkday_loc.ShortName);
                     end
                     wkday.invert = misc_emissions_analysis.get_invert_oh();
+                    wkday.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho();
                     wkday.hno3 = misc_emissions_analysis.get_hno3_oh();
                     wkday.wrf = misc_emissions_analysis.get_wrf_oh();
                 end
@@ -1337,6 +1345,7 @@ classdef misc_emissions_analysis
                         fprintf('Calculating weekend OH for %s (%d of %d)\n', this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
                     end
                     wkend.invert = misc_emissions_analysis.get_invert_oh(this_wkend_loc, phox, alpha);
+                    wkend.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho(this_wkend_loc, alpha);
                     wkend.hno3 = misc_emissions_analysis.get_hno3_oh(this_wkend_loc);
                     wkend.wrf = misc_emissions_analysis.get_wrf_oh(this_wkend_loc); % this shouldn't differ from the weekday one
                 else
@@ -1344,6 +1353,7 @@ classdef misc_emissions_analysis
                         fprintf('Not calculating weekend OH for %s (%d of %d)\n', this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
                     end
                     wkend.invert = misc_emissions_analysis.get_invert_oh();
+                    wkend.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho();
                     wkend.hno3 = misc_emissions_analysis.get_hno3_oh();
                     wkend.wrf = misc_emissions_analysis.get_wrf_oh();
                 end
@@ -1541,7 +1551,7 @@ classdef misc_emissions_analysis
         function locs = average_profiles_for_locations(time_period, days_of_week, locs, varargin)
             
             p = inputParser;
-            p.addOptional('species', {'behr_nox','nox','ho','ndens','temperature'});
+            p.addOptional('species', {'behr_nox','nox','omi_hcho','ho','ndens','temperature'});
             p.addParameter('levels', 1:5);
             p.parse(varargin{:});
             pout = p.Results;
@@ -1549,35 +1559,63 @@ classdef misc_emissions_analysis
             levels = pout.levels;
             species = pout.species;
             
-            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
-            wrf_site_file = misc_emissions_analysis.wrf_data_file_name(start_dates, end_dates);
-            wrf = load(wrf_site_file);
-            wrf.locs = misc_emissions_analysis.match_locs_structs(wrf.locs, locs);
             for i_loc = 1:numel(locs)
                 locs(i_loc).WRFData = make_empty_struct_from_cell(species);
                 for i_spec = 1:numel(species)
                     spec = species{i_spec};
-                    levels_i = levels;
                     if strcmpi(spec,'nox')
-                        value = wrf.locs(i_loc).WRFData.Profile.no + wrf.locs(i_loc).WRFData.Profile.no2;
+                        load_fxn = @(l,y) misc_wrf_lifetime_analysis.average_profiles_around_loc(l, y, 'no') + misc_wrf_lifetime_analysis.average_profiles_around_loc(l, y, 'no2');
                     elseif strcmpi(spec, 'behr_nox')
-                        no2_vcds = misc_emissions_analysis.avg_vcds_around_loc(locs(i_loc), time_period, days_of_week);
-                        no2_prof = nanmean(wrf.locs(i_loc).WRFData.Profile.no2,2)*1e-6;
-                        pres = nanmean(wrf.locs(i_loc).WRFData.Profile.pres,2);
-                        [~, scale_factor] = invert_vcd_to_mixing_ratio(no2_vcds, no2_prof, pres);
-                        value = scale_factor*(wrf.locs(i_loc).WRFData.Profile.no2 + wrf.locs(i_loc).WRFData.Profile.no);
+                        load_fxn = @(l,y) scale_profile(l, y, 'no2', {'no'});
+                    elseif strcmpi(spec, 'omi_hcho')
+                        load_fxn = @(l,y) scale_profile(l, y, 'hcho', {});
                     else
-                        if isfield(wrf.locs(i_loc).WRFData.Profile, spec)
-                            value = wrf.locs(i_loc).WRFData.Profile.(spec);
-                        else
-                            value = wrf.locs(i_loc).WRFData.Averaged.(spec);
-                            levels_i = 1;
-                            warning('Using pre-averaged "%s" from WRF data files', spec);
-                        end
+                        load_fxn = @(l,y) misc_wrf_lifetime_analysis.average_profiles_around_loc(l, y, spec);
                     end
                     
-                    locs(i_loc).WRFData.(spec) = nanmean(reshape(value(levels_i, :), [], 1));
+                    value = calc_with_interp(locs(i_loc), time_period, load_fxn);
+                    locs(i_loc).WRFData.(spec) = nanmean(value(levels));
                 end
+            end
+            
+            function prof = scale_profile(loc, years, vcd_specie, extra_prof_species)
+                % computes a scales profile for the given year(s). the VCDs
+                % will be of the vcd_specie, the profile the sum of
+                % vcd_specie and extra_prof_species (cell array). make
+                % extra_prof_species an empty array if no extra species
+                % needed.
+                vcds = misc_emissions_analysis.avg_vcds_around_loc(loc, years, days_of_week, 'species', vcd_specie);
+                pres_local = misc_wrf_lifetime_analysis.average_profiles_around_loc(loc, years, 'pres');
+                vcd_prof = misc_wrf_lifetime_analysis.average_profiles_around_loc(loc, years, vcd_specie);
+                total_prof = vcd_prof;
+                for i_es = 1:numel(extra_prof_species)
+                    total_prof = total_prof + misc_wrf_lifetime_analysis.average_profiles_around_loc(loc, years, extra_prof_species{i_es});
+                end
+                
+                [~, scale_fac] = invert_vcd_to_mixing_ratio(vcds, vcd_prof * 1e-6, pres_local);
+                prof = total_prof * scale_fac;
+            end
+            
+            function prof = calc_with_interp(loc, years, load_prof_fxn)
+                all_years = 2005:2014;
+                prof_by_year = nan(29, numel(all_years));
+                for iyr = 1:numel(all_years)
+                    try
+                        prof_by_year(:,iyr) = load_prof_fxn(loc, all_years(iyr));
+                    catch err
+                        if strcmpi(err.identifier, 'MATLAB:load:couldNotReadFile')
+                            fprintf('Could not load %s for %d, will interpolate\n', spec, all_years(iyr));
+                        else
+                            rethrow(err)
+                        end
+                    end
+                end
+                
+                for z = 1:size(prof_by_year,1)
+                    [~,prof_by_year(z,:)] = fill_nans(all_years, prof_by_year(z,:), 'noclip');
+                end
+                
+                prof = nanmean(prof_by_year(:, ismember(all_years, years)),2);
             end
         end
         
@@ -3860,10 +3898,9 @@ classdef misc_emissions_analysis
                                     wkday_vocr = OH.locs_wkday(i_loc).OH.(fns{i_fn}).vocr;
                                     wkend_vocr = OH.locs_wkend(i_loc).OH.(fns{i_fn}).vocr;
                                 elseif strcmpi(fns{i_fn}, 'wrf')
-                                    [wrf_vocr, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(year_window, 'vocr', 'avg_levels', 5);
-                                    xx = misc_emissions_analysis.find_indices_in_radius_around_loc(OH.locs_wkday(i_loc), wrf_lon, wrf_lat);
-                                    wkday_vocr = nanmean(wrf_vocr(xx));
-                                    wkend_vocr = nanmean(wrf_vocr(xx));
+                                    wrf_vocr = misc_wrf_lifetime_analysis.average_profiles_around_loc(OH.locs_wkday(i_loc), year_window, 'vocr', 'avg_levels', 1:5);
+                                    wkday_vocr = wrf_vocr(xx);
+                                    wkend_vocr = wrf_vocr(xx);
                                 else
                                     wkday_vocr = NaN;
                                     wkend_vocr = NaN;
@@ -6462,7 +6499,7 @@ classdef misc_emissions_analysis
             if nargin < 1
                 % used to return consistent struct if the fit isn't
                 % good. be sure to update if new fields added.
-                results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'nox'}, nan);
+                results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'nox', 'tau'}, nan);
                 return
             end
             
@@ -6474,8 +6511,29 @@ classdef misc_emissions_analysis
             % in ppm.
             
             nox_inv = this_loc.WRFData.ndens * this_loc.WRFData.behr_nox * 1e-6;
-            [results.oh, results.ho2, results.ro2, results.vocr, results.tau] = hox_solve_tau_constraint(nox_inv, phox, this_loc.emis_tau.tau, alpha);
+            [results.oh, results.ho2, results.ro2, soln] = hox_solve_tau_constraint(nox_inv, phox, this_loc.emis_tau.tau, alpha);
+            results = copy_structure_fields(soln, results, 'missing');
             results.nox = nox_inv;
+        end
+        
+        function results = get_invert_oh_with_hcho(this_loc, alpha)
+            if nargin < 1
+                % used to return consistent struct if the fit isn't
+                % good. be sure to update if new fields added.
+                results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'nox', 'tau', 'last_tau', 'last_hcho'}, nan);
+                return
+            end
+            
+            % Option 1b: solve steady state but use HCHO as an additional
+            % constraint so that we can allow P(HOx) to vary in the steady
+            % state model.
+            
+            nox_inv = this_loc.WRFData.ndens * this_loc.WRFData.behr_nox * 1e-6;
+            hcho_inv = this_loc.WRFData.ndens * this_loc.WRFData.omi_hcho * 1e-6;
+            [results.oh, results.ho2, results.ro2, soln] = hox_solve_tau_hcho_constraint(nox_inv, this_loc.emis_tau.tau, hcho_inv, alpha);
+            results = copy_structure_fields(soln, results, 'missing');
+            results.nox = nox_inv;
+            results.hcho = hcho_inv;
         end
         
         function results = get_hno3_oh(this_loc)
