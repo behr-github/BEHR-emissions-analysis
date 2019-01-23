@@ -2782,34 +2782,55 @@ classdef misc_emissions_analysis
         end
         
         function make_oh_data_file(varargin)
+            default_time_periods = {2005:2007, 2006:2008, 2007:2009, 2008:2010, 2009:2011, 2010:2012, 2011:2013, 2012:2014};
+            
             p = advInputParser;
+            p.addParameter('time_periods', default_time_periods);
             p.addFlag('no_uncertainty');
             p.parse(varargin{:});
             pout = p.Results;
+            
+            time_periods = pout.time_periods;
             include_uncertainty = ~pout.no_uncertainty;
             
-            time_periods = {2005:2007, 2006:2008, 2007:2009, 2008:2010, 2009:2011, 2010:2012, 2011:2013, 2012:2014};
             phox = 6.25e6;
             phox_del = [5.25e6, 7.25e6];
+            phox_vals = [phox, phox, phox_del(1), phox_del(2), phox, phox];
             alpha = 0.04;
             alpha_del = [0.03, 0.05];
+            alpha_vals = [alpha, alpha, alpha, alpha, alpha_del(1), alpha_del(2)];
+            tau_vals = {'-', '+', '0', '0', '0', '0'};
             
             deltas = make_empty_struct_from_cell({'wkday', 'wkend', 'phox', 'alpha', 'tau'}, cell(6,1));
-            locs_to_calc = misc_emissions_analysis.nine_cities;            
-
+            locs_to_calc = misc_emissions_analysis.nine_cities;  
+            if include_uncertainty
+                n_workers = 7;
+            else
+                n_workers = 1;
+            end
+            
             for i_time = 1:numel(time_periods)
                 this_tp = time_periods{i_time};
                 fprintf('Calculating OH for %d-%d\n', this_tp(1), this_tp(end));
-                [locs_wkday, locs_wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', this_tp,...
-                    'phox', phox, 'alpha', alpha, 'tau_uncert', '0', 'loc_indicies', locs_to_calc);
+                spmd(n_workers)
+                    if labindex == 1
+                        [locs_wkday_worker, locs_wkend_worker] = misc_emissions_analysis.compute_oh_concentrations('time_period', this_tp,...
+                            'phox', phox, 'alpha', alpha, 'tau_uncert', '0', 'loc_indicies', locs_to_calc);
+                    else
+                        if include_uncertainty
+                            deltas_worker = misc_emissions_analysis.do_uncertainty(this_tp, phox_vals(labindex-1),...
+                                alpha_vals(labindex-1), tau_vals{labindex-1}, locs_to_calc);
+                        end
+                    end
+                end
+                
+                locs_wkday = locs_wkday_worker{1};
+                locs_wkend = locs_wkend_worker{1};
                 
                 if include_uncertainty
-                    deltas(1) = do_uncertainty(this_tp, phox, alpha, '-');
-                    deltas(2) = do_uncertainty(this_tp, phox, alpha, '+');
-                    deltas(3) = do_uncertainty(this_tp, phox_del(1), alpha, '0');
-                    deltas(4) = do_uncertainty(this_tp, phox_del(2), alpha, '0');
-                    deltas(5) = do_uncertainty(this_tp, phox, alpha_del(1), '0');
-                    deltas(6) = do_uncertainty(this_tp, phox, alpha_del(2), '0');
+                    for idx = 1:6
+                        deltas(idx) = deltas_worker{idx+1};
+                    end
                 end
                 
                 [sdate, edate] = misc_emissions_analysis.select_start_end_dates(this_tp);
@@ -2817,17 +2838,18 @@ classdef misc_emissions_analysis
                 save(save_file, 'locs_wkday', 'locs_wkend', 'deltas','-v7.3');
             end
             
-            function delta = do_uncertainty(time_per, phox_in, alpha_in, tau)
-                [wkday, wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', time_per,...
-                    'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau, 'loc_indicies', locs_to_calc);
-                wkday_oh = make_empty_struct_from_cell(fieldnames(wkday(1).OH), cell(size(wkday)));
-                wkend_oh = make_empty_struct_from_cell(fieldnames(wkend(1).OH), cell(size(wkend)));
-                for i_loc = 1:numel(wkday)
-                    wkday_oh(i_loc) = wkday(i_loc).OH;
-                    wkend_oh(i_loc) = wkend(i_loc).OH;
-                end
-                delta = struct('wkday', wkday_oh, 'wkend', wkend_oh, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
+        end
+        
+        function delta = do_uncertainty(time_per, phox_in, alpha_in, tau, locs_to_calc)
+            [wkday, wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', time_per,...
+                'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau, 'loc_indicies', locs_to_calc);
+            wkday_oh = make_empty_struct_from_cell(fieldnames(wkday(1).OH), cell(size(wkday)));
+            wkend_oh = make_empty_struct_from_cell(fieldnames(wkend(1).OH), cell(size(wkend)));
+            for i_loc = 1:numel(wkday)
+                wkday_oh(i_loc) = wkday(i_loc).OH;
+                wkend_oh(i_loc) = wkend(i_loc).OH;
             end
+            delta = struct('wkday', wkday_oh, 'wkend', wkend_oh, 'phox', phox_in, 'alpha', alpha_in, 'tau', tau);
         end
         
         function make_average_wrf_profiles(varargin)
@@ -6542,7 +6564,11 @@ classdef misc_emissions_analysis
             
             nox_inv = this_loc.WRFData.ndens * this_loc.WRFData.behr_nox * 1e-6;
             hcho_inv = this_loc.WRFData.ndens * this_loc.WRFData.omi_hcho * 1e-6;
+            
+            t_hcho = tic;
             [results.oh, results.ho2, results.ro2, soln] = hox_solve_tau_hcho_constraint(nox_inv, this_loc.emis_tau.tau, hcho_inv, alpha);
+            fprintf('Time to solve with HCHO = %.1f s (flag = %d)\n', toc(t_hcho), soln.fmincon_flag);
+            
             results = copy_structure_fields(soln, results, 'missing');
             results.nox = nox_inv;
             results.hcho = hcho_inv;
