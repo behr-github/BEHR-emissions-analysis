@@ -1258,7 +1258,9 @@ classdef misc_emissions_analysis
             t1=tic;
             
             [start_dates, end_dates, time_period] = misc_emissions_analysis.select_start_end_dates(pout.time_period);
+            time_per_str = sprintf_ranges(time_period);
             loc_indicies = misc_emissions_analysis.ask_for_loc_inds(pout.loc_indicies);
+            loc_indicies = misc_emissions_analysis.convert_input_loc_inds(loc_indicies);
             locs_in = pout.locs;
             
             phox = pout.phox;
@@ -1318,21 +1320,25 @@ classdef misc_emissions_analysis
                 
                 if is_wkday_fit_good
                     if DEBUG_LEVEL > 0
-                        fprintf('Calculating weekday OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
+                        fprintf('%s: Calculating weekday OH for %s (%d of %d)\n', time_per_str, this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
                     end
                     % Option 1: invert BEHR VCD -> surface NOx
+                    fprintf('  INVERT OH started at %s\n', datestr(clock));
                     wkday.invert = misc_emissions_analysis.get_invert_oh(this_wkday_loc, phox, alpha);
                     % Option 1b: invert BEHR VCD -> surface NOx and OMI
                     % HCHO -> surface HCHO
+                    fprintf('  INVERT_HCHO OH started at %s\n', datestr(clock));
                     wkday.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho(this_wkday_loc, alpha);
                     % Option 2: assume all is HNO3
+                    fprintf('  HNO3 OH started at %s\n', datestr(clock));
                     wkday.hno3 = misc_emissions_analysis.get_hno3_oh(this_wkday_loc);
                     % Option 3: what does WRF think it is
+                    fprintf('  WRF OH started at %s\n', datestr(clock));
                     wkday.wrf = misc_emissions_analysis.get_wrf_oh(this_wkday_loc);
                     
                 else
                     if DEBUG_LEVEL > 0
-                        fprintf('Not calculating weekday OH for %s - fit not good\n', this_wkday_loc.ShortName);
+                        fprintf('%s: Not calculating weekday OH for %s - fit not good\n', time_per_str, this_wkday_loc.ShortName);
                     end
                     wkday.invert = misc_emissions_analysis.get_invert_oh();
                     wkday.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho();
@@ -1342,15 +1348,19 @@ classdef misc_emissions_analysis
                 
                 if is_wkend_fit_good
                     if DEBUG_LEVEL > 0
-                        fprintf('Calculating weekend OH for %s (%d of %d)\n', this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
+                        fprintf('%s: Calculating weekend OH for %s (%d of %d)\n', time_per_str, this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
                     end
+                    fprintf('  INVERT OH started at %s\n', datestr(clock));
                     wkend.invert = misc_emissions_analysis.get_invert_oh(this_wkend_loc, phox, alpha);
+                    fprintf('  INVERT_HCHO OH started at %s\n', datestr(clock));
                     wkend.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho(this_wkend_loc, alpha);
+                    fprintf('  HNO3 OH started at %s\n', datestr(clock));
                     wkend.hno3 = misc_emissions_analysis.get_hno3_oh(this_wkend_loc);
+                    fprintf('  WRF OH started at %s\n', datestr(clock));
                     wkend.wrf = misc_emissions_analysis.get_wrf_oh(this_wkend_loc); % this shouldn't differ from the weekday one
                 else
                     if DEBUG_LEVEL > 0
-                        fprintf('Not calculating weekend OH for %s (%d of %d)\n', this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
+                        fprintf('%s: Not calculating weekend OH for %s (%d of %d)\n', time_per_str, this_wkend_loc.ShortName, i_loc, numel(wkend_locs));
                     end
                     wkend.invert = misc_emissions_analysis.get_invert_oh();
                     wkend.invert_hcho = misc_emissions_analysis.get_invert_oh_with_hcho();
@@ -1360,12 +1370,13 @@ classdef misc_emissions_analysis
                 
                 if is_wkday_fit_good && is_wkend_fit_good
                     if DEBUG_LEVEL > 0
-                        fprintf('Calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
+                        fprintf('%s: Calculating ratio OH for %s (%d of %d)\n', time_per_str, this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
                     end
                     
                     % Option 4: solve using the weekend/weekday NO2 VCD
                     % ratio and weekend/weekday lifetimes
                     vcd_ratio = wkend_vcds(i_loc) ./ wkday_vcds(i_loc);
+                    fprintf('  RATIO OH started at %s\n', datestr(clock));
                     try
                         [wkday.ratio, wkend.ratio] = hox_solve_wkday_wkend_constraint(vcd_ratio, this_wkday_loc.emis_tau.tau,...
                             this_wkend_loc.emis_tau.tau, phox, alpha, 'nox_initial', wkday.wrf.nox ./ wkday.wrf.ndens * 1e9);
@@ -2784,12 +2795,13 @@ classdef misc_emissions_analysis
             alpha_del = [0.03, 0.05];
             
             deltas = make_empty_struct_from_cell({'wkday', 'wkend', 'phox', 'alpha', 'tau'}, cell(6,1));
-            
+            locs_to_calc = misc_emissions_analysis.nine_cities;            
+
             for i_time = 1:numel(time_periods)
                 this_tp = time_periods{i_time};
                 fprintf('Calculating OH for %d-%d\n', this_tp(1), this_tp(end));
                 [locs_wkday, locs_wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', this_tp,...
-                    'phox', phox, 'alpha', alpha, 'tau_uncert', '0');
+                    'phox', phox, 'alpha', alpha, 'tau_uncert', '0', 'loc_indicies', locs_to_calc);
                 
                 if include_uncertainty
                     deltas(1) = do_uncertainty(this_tp, phox, alpha, '-');
@@ -2807,7 +2819,7 @@ classdef misc_emissions_analysis
             
             function delta = do_uncertainty(time_per, phox_in, alpha_in, tau)
                 [wkday, wkend] = misc_emissions_analysis.compute_oh_concentrations('time_period', time_per,...
-                    'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau);
+                    'phox', phox_in, 'alpha', alpha_in, 'tau_uncert', tau, 'loc_indicies', locs_to_calc);
                 wkday_oh = make_empty_struct_from_cell(fieldnames(wkday(1).OH), cell(size(wkday)));
                 wkend_oh = make_empty_struct_from_cell(fieldnames(wkend(1).OH), cell(size(wkend)));
                 for i_loc = 1:numel(wkday)
