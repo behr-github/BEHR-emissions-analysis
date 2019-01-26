@@ -1259,8 +1259,10 @@ classdef misc_emissions_analysis
             
             [start_dates, end_dates, time_period] = misc_emissions_analysis.select_start_end_dates(pout.time_period);
             time_per_str = sprintf_ranges(time_period);
-            loc_indicies = misc_emissions_analysis.ask_for_loc_inds(pout.loc_indicies);
-            loc_indicies = misc_emissions_analysis.convert_input_loc_inds(loc_indicies);
+            
+            loc_indicies = misc_emissions_analysis.convert_input_loc_inds(pout.loc_indicies);
+            loc_indicies = misc_emissions_analysis.ask_for_loc_inds(loc_indicies);
+            
             locs_in = pout.locs;
             
             phox = pout.phox;
@@ -1391,6 +1393,11 @@ classdef misc_emissions_analysis
                             rethrow(err)
                         end
                     end
+                    
+                    % Option 5: constrain weekend and weekday
+                    % simultaneously to have the same VOCR and match the
+                    % HCHO columns. 
+                    [wkday.invert_hcho_wkday_wkend, wkend.invert_hcho_wkday_wkend] = misc_emissions_analysis.get_invert_oh_with_hcho_wkend_wkday(this_wkday_loc, this_wkend_loc, alpha);
                 else
                     if DEBUG_LEVEL > 0
                         fprintf('Not calculating ratio OH for %s (%d of %d)\n', this_wkday_loc.ShortName, i_loc, numel(wkday_locs));
@@ -1399,6 +1406,8 @@ classdef misc_emissions_analysis
                     % from the solver change
                     wkday.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
                     wkend.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
+                    
+                    [wkday.invert_hcho_wkday_wkend, wkend.invert_hcho_wkday_wkend] = get_invert_oh_with_hcho_wkend_wkday();
                 end
                 
                 oh_results{i_loc} = struct('weekday', wkday, 'weekend', wkend);
@@ -1871,7 +1880,7 @@ classdef misc_emissions_analysis
                     monthly = [];
                     [daily.no2, daily.lon, daily.lat, daily.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
                 case 'hcho'
-                    [monthly.hcho, monthly.lon, monthly.lat, monthly.weights] = omhcho_time_average(start_date, end_date);
+                    [monthly.hcho, monthly.lon, monthly.lat, monthly.weights, monthly.stddev] = omhcho_time_average(start_date, end_date, common_opts{:});
                     daily = monthly;
             end
             
@@ -3933,8 +3942,8 @@ classdef misc_emissions_analysis
                                     wkend_vocr = OH.locs_wkend(i_loc).OH.(fns{i_fn}).vocr;
                                 elseif strcmpi(fns{i_fn}, 'wrf')
                                     wrf_vocr = misc_wrf_lifetime_analysis.average_profiles_around_loc(OH.locs_wkday(i_loc), year_window, 'vocr', 'avg_levels', 1:5);
-                                    wkday_vocr = wrf_vocr(xx);
-                                    wkend_vocr = wrf_vocr(xx);
+                                    wkday_vocr = wrf_vocr;
+                                    wkend_vocr = wrf_vocr;
                                 else
                                     wkday_vocr = NaN;
                                     wkend_vocr = NaN;
@@ -4071,7 +4080,8 @@ classdef misc_emissions_analysis
 %             oh_conc = seq_mat(n_yrs, 2, 3);
 %             locs = struct('Location', {'Alpha', 'Beta'});
 
-            legend_names = struct('invert', 'Lifetime + SS', 'hno3', 'NO_2 + OH \rightarrow HNO_3',... 
+            legend_names = struct('invert', 'Lifetime + SS', 'invert_hcho', 'Lifetime + HCHO SS',...
+                'hno3', 'NO_2 + OH \rightarrow HNO_3',... 
                 'wrf', 'WRF-Chem', 'ratio', 'Wkend/wkday NO_2 ratio',...
                 'frac_weighted', 'HNO_3/ANs weighted',...
                 'city_center_wrf', 'WRF (city center)');
@@ -4082,6 +4092,7 @@ classdef misc_emissions_analysis
                     oh_type_inds = ismember(fns, oh_types);
                     
                     i_inv = find(strcmpi(fns, 'invert'));
+                    i_hcho = find(strcmpi(fns, 'invert_hcho'));
                     i_wrf = find(strcmpi(fns, 'wrf'));
                     i_ratio = find(strcmpi(fns, 'ratio'));
                     for i_loc = 1:n_locs
@@ -4105,20 +4116,27 @@ classdef misc_emissions_analysis
                                 error('No method to compute nox type "%s"', nox_value);
                         end
                         if strcmpi(y2_var,'lhno3')
-                            this_y2{1} = squeeze(frac_hno3(:, i_loc, i_inv, dow_ind));
+                            this_y2{1} = squeeze(frac_hno3(:, i_loc, i_hcho, dow_ind));
                             y2_ax_label = 'Frac. loss to HNO_3';
+                            y2_legend_strs = {}; 
                         elseif strcmpi(y2_var,'vocr')
-                            this_y2{1} = squeeze(vocr(:, i_loc, i_inv, dow_ind));
+                            this_y2{1} = squeeze(vocr(:, i_loc, i_hcho, dow_ind));
                             this_y2{2} = squeeze(vocr(:, i_loc, i_wrf, dow_ind));
                             y2_ax_label = 'VOC_R';
+                            y2_legend_strs = {'SS VOC_R', 'WRF VOC_R'};
                         else
                             E.notimplemented('No action defined for y2_var = %s', y2_var);
                         end
-                        [h, herr] = plot_fxn(this_oh, this_oh_err, this_nox, this_y2);
+                        [plot_ax, h, herr] = plot_fxn(this_oh, this_oh_err, this_nox, this_y2);
                         post_formatting(h);
                         post_formatting(herr);
-                        legend(h, get_legend_strings(fns(oh_type_inds)));
+                        legend(plot_ax(1), h, get_legend_strings(fns(oh_type_inds)));
+                        if ~isempty(y2_legend_strs)
+                            legend(plot_ax(3), flipud(plot_ax(3).Children), y2_legend_strs);
+                        end
                         set_axis_properties(sprintf('%s (%s)', oh_values(1, i_loc).Location, dow_str));
+                        figs(i_loc).Position(3) = 2*figs(i_loc).Position(3);
+                        figs(i_loc).Position(4) = 3*figs(i_loc).Position(4);
                     end
                 case 'city'
                     warning('city plot type not tested with error')
@@ -4199,8 +4217,8 @@ classdef misc_emissions_analysis
                 errh = gobjects(0);
             end
             
-            function [oh_handles, err_handles, nox_handles, frac_handles] = oh_nox_yy(oh, oh_err, nox, y2var)
-                subplot(2,1,1);
+            function [ax, oh_handles, err_handles, nox_handles, frac_handles] = oh_nox_yy(oh, oh_err, nox, y2var)
+                ax(1) = subplot(2,1,1);
                 x = 1:size(oh,1);
                 oh_err = shiftdim(oh_err, ndims(oh_err)-1); % put the +/- error dimension first
                 oh_neg_err = reshape(oh_err(1,:), size(oh));
@@ -4219,6 +4237,8 @@ classdef misc_emissions_analysis
                 for i_y2 = 2:numel(y2var)
                     line(yyax(2), x, y2var{i_y2}, 'marker', 'p', 'linestyle', 'none', 'color', 'r', 'markersize', 10, 'linewidth',2);
                 end
+                expand_ylimits(yyax(2));
+                ax = veccat(ax, yyax);
             end
             
             function legstr = get_legend_strings(oh_types)
@@ -4226,6 +4246,19 @@ classdef misc_emissions_analysis
                 for i=1:numel(oh_types)
                     legstr{i} = legend_names.(oh_types{i});
                 end
+            end
+            
+            function expand_ylimits(ax)
+                ylimits = ax.YLim;
+                for i_ch = 1:numel(ax.Children)
+                    new_min = floor(min(ax.Children(i_ch).YData));
+                    new_max = ceil(max(ax.Children(i_ch).YData));
+                    ylimits = [min(new_min, ylimits(1)), max(new_max, ylimits(2))];
+                end
+                new_ticks = linspace(ylimits(1), ylimits(2), 3);
+                
+                ax.YLim = ylimits;
+                ax.YTick = new_ticks;
             end
         end
         
@@ -6572,6 +6605,33 @@ classdef misc_emissions_analysis
             results = copy_structure_fields(soln, results, 'missing');
             results.nox = nox_inv;
             results.hcho = hcho_inv;
+        end
+        
+        function [wkday_results, wkend_results] = get_invert_oh_with_hcho_wkend_wkday(wkday_loc, wkend_loc, alpha)
+            if nargin < 1
+                % Used to return consistent struct if the fit isn't good.
+                % update if new fields added.
+                wkday_results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'phox', 'alpha', 'tau', 'last_hcho', 'last_tau', 'fmincon_flag', 'nox', 'hcho'}, nan);
+                wkend_results = wkday_results;
+                return
+            end
+            
+            wkday_nox_inv = wkday_loc.WRFData.ndens * wkday_loc.WRFData.behr_nox * 1e-6;
+            wkend_nox_inv = wkend_loc.WRFData.ndens * wkend_loc.WRFData.behr_nox * 1e-6;
+            hcho_inv = wkday_loc.WRFData.ndens * wkday_loc.WRFData.omi_hcho * 1e-6;
+            
+            wkday_tau = wkday_loc.emis_tau.tau;
+            wkend_tau = wkend_loc.emis_tau.tau;
+            
+            t = tic;
+            [wkday_results, wkend_results] = hox_solve_tau_hcho_wkend_wkday_constraint(wkday_nox_inv, wkday_tau, wkend_nox_inv, wkend_tau, hcho_inv, alpha);
+            fprintf('Time to solve with HCHO wkday/wkend = %.1f s (flag = %d)\n', toc(t), wkday_results.fmincon_flag);
+            
+            wkday_results.nox = wkday_nox_inv;
+            wkday_results.hcho = hcho_inv;
+            
+            wkend_results.nox = wkend_nox_inv;
+            wkend_results.hcho = hcho_inv;
         end
         
         function results = get_hno3_oh(this_loc)
