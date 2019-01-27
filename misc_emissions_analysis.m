@@ -6610,20 +6610,22 @@ classdef misc_emissions_analysis
             
             wkday_nox_inv = wkday_loc.WRFData.ndens * wkday_loc.WRFData.behr_nox * 1e-6;
             wkend_nox_inv = wkend_loc.WRFData.ndens * wkend_loc.WRFData.behr_nox * 1e-6;
-            hcho_inv = wkday_loc.WRFData.ndens * wkday_loc.WRFData.omi_hcho * 1e-6;
+            
+            wkday_hcho_inv = wkday_loc.WRFData.ndens * wkday_loc.WRFData.omi_hcho * 1e-6;
+            wkend_hcho_inv = wkend_loc.WRFData.ndens * wkend_loc.WRFData.omi_hcho * 1e-6;
             
             wkday_tau = wkday_loc.emis_tau.tau;
             wkend_tau = wkend_loc.emis_tau.tau;
             
             t = tic;
-            [wkday_results, wkend_results] = hox_solve_tau_hcho_wkend_wkday_constraint(wkday_nox_inv, wkday_tau, wkend_nox_inv, wkend_tau, hcho_inv, alpha);
+            [wkday_results, wkend_results] = hox_solve_tau_hcho_wkend_wkday_constraint(wkday_nox_inv, wkday_tau, wkday_hcho_inv, wkend_nox_inv, wkend_tau, wkend_hcho_inv, alpha);
             fprintf('Time to solve with HCHO wkday/wkend = %.1f s (flag = %d)\n', toc(t), wkday_results.fmincon_flag);
             
             wkday_results.nox = wkday_nox_inv;
-            wkday_results.hcho = hcho_inv;
+            wkday_results.hcho = wkday_hcho_inv;
             
             wkend_results.nox = wkend_nox_inv;
-            wkend_results.hcho = hcho_inv;
+            wkend_results.hcho = wkend_hcho_inv;
         end
         
         function results = get_hno3_oh(this_loc)
