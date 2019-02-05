@@ -176,12 +176,17 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.emg_fit_dir, filename);
         end
         
-        function filename = oh_file_name(start_date, end_date, varargin)
+        function filename = oh_file_name(start_date, varargin)
             p = advInputParser;
+            p.addOptional('end_date', []);
             p.addParameter('loc_inds', 1:71);
             p.addParameter('fit_type', 'lu');
             p.parse(varargin{:});
             pout = p.Results;
+            end_date = pout.end_date;
+            if isempty(end_date)
+                [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(start_date);
+            end
             loc_inds = pout.loc_inds;
             fit_type = pout.fit_type;
             
@@ -4001,6 +4006,7 @@ classdef misc_emissions_analysis
             p.addParameter('include_wrf_center', true);
             p.addParameter('days_of_week','TWRF');
             p.addParameter('nox_value', 'vcds');
+            p.addParameter('vocr_value', 'invert_hcho_wkday_wkend'); % any of the field names in the OH structure, normally this, 'invert_hcho', 'invert', or 'wrf'
             p.parse(varargin{:});
             pout = p.Results;
             
@@ -4010,6 +4016,7 @@ classdef misc_emissions_analysis
             include_wrf_center = pout.include_wrf_center;
             series_mode = pout.series;
             nox_value = pout.nox_value;
+            vocr_value = pout.vocr_value;
             
             extra_vars = {'frac_hno3', 'behr_vcds', 'vocr'};
             if include_wrf_center
@@ -4085,6 +4092,7 @@ classdef misc_emissions_analysis
             legend_names = struct('invert', 'Lifetime + SS', 'invert_hcho', 'Lifetime + HCHO SS',...
                 'hno3', 'NO_2 + OH \rightarrow HNO_3',... 
                 'wrf', 'WRF-Chem', 'ratio', 'Wkend/wkday NO_2 ratio',...
+                'invert_hcho_wkday_wkend', 'Lifetime + HCHO SS wkend/wkday',...
                 'frac_weighted', 'HNO_3/ANs weighted',...
                 'city_center_wrf', 'WRF (city center)');
             
@@ -4097,6 +4105,8 @@ classdef misc_emissions_analysis
                     i_hcho = find(strcmpi(fns, 'invert_hcho'));
                     i_wrf = find(strcmpi(fns, 'wrf'));
                     i_ratio = find(strcmpi(fns, 'ratio'));
+                    
+                    vocr_indx = find(strcmpi(fns, vocr_value));
                     for i_loc = 1:n_locs
                         figs(i_loc) = figure;
                         this_oh = squeeze(oh_conc(:,i_loc,oh_type_inds, dow_ind));
@@ -4122,9 +4132,9 @@ classdef misc_emissions_analysis
                             y2_ax_label = 'Frac. loss to HNO_3';
                             y2_legend_strs = {}; 
                         elseif strcmpi(y2_var,'vocr')
-                            this_y2{1} = squeeze(vocr(:, i_loc, i_hcho, dow_ind));
+                            this_y2{1} = squeeze(vocr(:, i_loc, vocr_indx, dow_ind));
                             this_y2{2} = squeeze(vocr(:, i_loc, i_wrf, dow_ind));
-                            y2_ax_label = 'VOC_R';
+                            y2_ax_label = sprintf('VOC_R (%s)', legend_names.(vocr_value));
                             y2_legend_strs = {'SS VOC_R', 'WRF VOC_R'};
                         else
                             E.notimplemented('No action defined for y2_var = %s', y2_var);
