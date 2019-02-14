@@ -50,8 +50,11 @@ classdef misc_wrf_lifetime_analysis
             if ismember('alpha', variables)
                 processing.alpha = misc_wrf_lifetime_analysis.setup_alpha_calc(avg_year);
             end
-            if ismember('nox_tau', variables)
-                processing.nox_tau = misc_wrf_lifetime_analysis.setup_nox_lifetime_calc(avg_year);
+            if ismember('nox_tau_simple', variables)
+                processing.nox_tau_simple = misc_wrf_lifetime_analysis.setup_nox_lifetime_calc(avg_year, 'simple');
+            end
+            if ismember('nox_tau_complex', variables)
+                processing.nox_tau_complex = misc_wrf_lifetime_analysis.setup_nox_lifetime_calc(avg_year, 'complex');
             end
             
             start_dates = cell(size(avg_year));
@@ -72,7 +75,7 @@ classdef misc_wrf_lifetime_analysis
             end
         end 
         
-        function tau_processing = setup_nox_lifetime_calc(avg_year)
+        function tau_processing = setup_nox_lifetime_calc(avg_year, lifetime_mode)
             % SETUP_NOX_LIFETIME_CALC(AVG_YEAR) Set up the processing
             % structure to calculate instantaneous NOx lifetime in
             % WRF_TIME_AVERAGE.
@@ -81,7 +84,18 @@ classdef misc_wrf_lifetime_analysis
             % divide by the LNOX diagnostic to get lifetime in seconds,
             % then convert to hours.
             
-            req_vars = {'no', 'no2', 'LNOX'};
+            chem_vars = {'no', 'no2'};
+            switch lower(lifetime_mode)
+                case 'simple'
+                    loss_vars = {'LNOXHNO3','LNOXA'};
+                    prod_vars = {};
+                case 'complex'
+                    loss_vars = {'LNOXHNO3', 'LNOXA', 'LNOX', 'LNOXPAN', 'LNOXB'};
+                    prod_vars = {'PNOX', 'PNOXHNO3', 'PNOXON', 'PNOXPAN', 'PNOXD'}; % PNOXY not in the saved files
+                otherwise
+                    error('lifetime_mode %s not recognized', lifetime_mode)
+            end
+            req_vars = veccat(chem_vars, loss_vars, prod_vars);
             wi = misc_wrf_lifetime_analysis.load_test_wrf_file(avg_year);
             wrf_vars = {wi.Variables.Name};
             xx = ~ismember(req_vars, wrf_vars);
@@ -96,7 +110,15 @@ classdef misc_wrf_lifetime_analysis
                 nox = Wrf.no + Wrf.no2;
                 % assuming NOx in ppm, LNOX in ppm/s, then this calculates
                 % lifetime in hours.
-                tau = nox ./ WRF.LNOX ./ 3600;
+                loss = zeros(size(nox));
+                for i = 1:numel(loss_vars)
+                    loss = loss + Wrf.(loss_vars{i});
+                end
+                production = zeros(size(nox));
+                for i = 1:numel(prod_vars)
+                    production = production + Wrf.(prod_vars{i});
+                end
+                tau = nox ./ (loss-production) ./ 3600;
             end
             
             function tau = no_tau(Wrf)
@@ -277,7 +299,8 @@ classdef misc_wrf_lifetime_analysis
             try
                 wi = ncinfo(wrf_file);
             catch err
-                if strcmpi(err.identifier, '?')
+                if strcmpi(err.identifier, 'MATLAB:imagesci:netcdf:unableToOpenFileforRead')
+                    fprintf('Looking for subset wrfout file...\n')
                     wrf_file = strrep(wrf_file, 'wrfout', 'wrfout_subset');
                     wi = ncinfo(wrf_file);
                 else
