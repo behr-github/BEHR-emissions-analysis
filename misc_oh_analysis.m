@@ -31,6 +31,12 @@ classdef misc_oh_analysis
             db_file = fullfile(misc_oh_analysis.epa_data_dir, 'voc_rates.sqlite');
             db = sqlite(db_file);
         end
+        
+        function [annual_files, years] = list_epa_files()
+            annual_files = dirff(fullfile(misc_oh_analysis.epa_data_dir, 'annual*.csv'));
+            years = regexp({annual_files.name}, '\d{4}(?=\.csv)', 'match', 'once');
+            years = cellfun(@str2double, years);
+        end
     
         %%%%%%%%%%%%%%%%%%%%
         % Plotting methods %
@@ -180,6 +186,48 @@ classdef misc_oh_analysis
             end
         end
         
+        function plot_epa_nox(cities)
+            
+            [annual_files, years] = misc_oh_analysis.list_epa_files();
+            nox = cell(numel(years), numel(cities));
+            for i_yr = 1:numel(annual_files)
+                tab = readtable(annual_files(i_yr).name);
+                for i_city = 1:numel(cities)
+                    xx = misc_oh_analysis.find_epa_sites_for_city(cities{i_city}, tab);
+                    pp = strcmpi(tab.ParameterName, 'Oxides of nitrogen (NOx)');
+                    
+                    nox{i_yr, i_city} = misc_oh_analysis.to_double(tab{xx&pp, {'ArithmeticMean'}});
+                end
+            end
+            
+            
+            for i_city = 1:numel(cities)
+                proto_mat1 = nan(numel(years)-2, 1);
+                proto_mat2 = nan(numel(years)-2, 2);
+                
+                nox_means = proto_mat1;
+                nox_medians = proto_mat1;
+                nox_quants = proto_mat2;
+                for i_yr = 1:size(nox_means,1)
+                    yy = i_yr:(i_yr+2);
+                    this_nox = veccat(nox{yy, i_city});
+                    nox_means(i_yr) = nanmean(this_nox);
+                    nox_medians(i_yr) = nanmedian(this_nox);
+                    nox_quants(i_yr, :) = quantile(this_nox, [0.05, 0.95]);
+                end
+                
+                l = gobjects(3,1);
+                figure;
+                [~,l(3)] = plot_error_envelope_y(years(2:end-1), nox_quants(:,1), nox_quants(:,2), [1 0.5 0]);
+                l(2) = line(years(2:end-1), nox_medians, 'color', 'r', 'linestyle', '--', 'linewidth', 2);
+                l(1) = line(years(2:end-1), nox_means, 'color', 'k', 'linestyle', 'none', 'marker', 'p');
+                legend(l, {'Mean', 'Median', '5th/95th percentile'});
+                ylabel('[NO_x] (ppb)');
+                title(cities{i_city});
+            end
+            
+        end
+        
         function plot_epa_voc(cities, varargin)
             p = advInputParser;
             p.addParameter('plot_speciated', true);
@@ -187,9 +235,7 @@ classdef misc_oh_analysis
             pout = p.Results;
             plot_speciated = pout.plot_speciated;
             
-            annual_files = dirff(fullfile(misc_oh_analysis.epa_data_dir, 'annual*.csv'));
-            years = regexp({annual_files.name}, '\d{4}(?=\.csv)', 'match', 'once');
-            years = cellfun(@str2double, years);
+            [annual_files, years] = misc_oh_analysis.list_epa_files();
             
             proto_mat = nan(numel(years), numel(cities));
             proto_cell = cell(numel(years), numel(cities));
@@ -202,7 +248,7 @@ classdef misc_oh_analysis
                 tab = readtable(annual_files(i_yr).name);
                 for i_city = 1:numel(cities)
                     city_name = cities{i_city};
-                    xx = strcmp(tab.CityName, city_name);
+                    xx = misc_oh_analysis.find_epa_sites_for_city(city_name, tab);
                     pp = strcmp(tab.ParameterName, 'Total NMOC (non-methane organic compound)');
                     this_nmoc = tab{xx&pp, {'ArithmeticMean'}};
                     if iscell(this_nmoc)
@@ -331,6 +377,138 @@ classdef misc_oh_analysis
                 end
                 spc_total_err = sqrt(spc_total_err);
             end
+            
+            
+        end
+        
+        function plot_hcho_refsec_diff(year, dow)
+            old_file = misc_emissions_analysis.avg_file_name(year, dow, 'hcho');
+            [dirname, basename, ext] = fileparts(old_file);
+            new_file = fullfile(dirname, 'NewHCHO', [basename, ext]);
+            old_vcds = load(old_file);
+            old_vcds = old_vcds.daily;
+            new_vcds = load(new_file);
+            new_vcds = new_vcds.daily;
+            
+            tmp = veccat(old_vcds.hcho(:), new_vcds.hcho(:));
+            cbrange = calc_plot_limits(tmp(~isoutlier(tmp)));
+            tmp = veccat(old_vcds.stddev(:), new_vcds.stddev(:));
+            cbrange_sd = calc_plot_limits(tmp(~isoutlier(tmp)));
+            
+            figure;
+            subplot_stretch(2,3);
+            
+            subplot(2,3,1);
+            plot_helper(old_vcds.hcho, cbrange, sprintf('Old HCHO Columns (%d)', year));
+            
+            subplot(2,3,4);
+            plot_helper(old_vcds.stddev, cbrange_sd, 'Std. Dev.');
+            
+            subplot(2,3,2);
+            plot_helper(new_vcds.hcho, cbrange, sprintf('New HCHO Columns (%d)', year));
+
+            subplot(2,3,5);
+            plot_helper(new_vcds.hcho, cbrange_sd, 'Std. Dev.');
+            
+            subplot(2,3,3)
+            coldel = new_vcds.hcho - old_vcds.hcho;
+            plot_helper(coldel, calc_plot_limits(coldel(:), 'diff'), 'Absolute difference', blue_red_cmap);
+            
+            subplot(2,3,6);
+            colrdel = reldiff(new_vcds.hcho, old_vcds.hcho)*100;
+            plot_helper(colrdel, calc_plot_limits(colrdel(~isoutlier(colrdel)), 'diff'), 'Percent difference', blue_red_cmap);
+            
+            function plot_helper(vcds, cblimits, titlestr, cmap)
+                if nargin < 4
+                    cmap = parula;
+                end
+                pcolor(old_vcds.lon, old_vcds.lat, vcds); 
+                shading flat
+                colorbar;
+                colormap(gca, cmap);
+                caxis(cblimits);
+                title(titlestr);
+                state_outlines('k');
+            end
+        end
+        
+        function fig = plot_covariance_with_oh(varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('var1', 'oh');
+            p.addParameter('var2', 'vocr'); % any field in the OH type structures
+            p.addParameter('corr', true); % true = correlation; false = covariance
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = pout.loc_inds;
+            main_var = pout.var1;
+            co_var = pout.var2;
+            do_correlation = pout.corr;
+            if do_correlation
+                cov_fxn = @corrcoef;
+                y_var = 'correlation';
+            else
+                cov_fxn = @cov;
+                y_var = 'covariance';
+            end
+            
+            years = 2006:2013;
+            
+            oh_types = {'invert', 'invert_hcho', 'invert_hcho_wkday_wkend'};
+            type_styles = {'ko', 'b^', 'r*'};
+            type_legends = {'Lifetime+SS', 'Lifetime+HCHO SS', 'HCHO SS (VOCR same wkday/wkend)'};
+            data = misc_oh_analysis.load_oh_data_for_years(years, 'loc_ids', loc_inds, 'oh_types', oh_types, 'variables', {main_var, co_var});
+            var1 = data.(main_var);
+            var2 = data.(co_var);
+            
+            cov_values = nan(numel(loc_inds), numel(oh_types), 2);
+            
+            for i_loc = 1:numel(loc_inds)
+                for i_type = 1:numel(oh_types)
+                    for i_dow = 1:2
+                        this_oh = var1(:,i_loc,i_type,i_dow);
+                        this_var2 = var2(:,i_loc,i_type,i_dow);
+                        xx = ~isnan(this_oh) & ~isnan(this_var2);
+                        if sum(xx)/numel(this_oh) > 0.5
+                            % Only calculate a correlation if we have at
+                            % least half of the years
+                            tmp_cov = cov_fxn(this_oh(xx), this_var2(xx));
+                            cov_values(i_loc, i_type, i_dow) = tmp_cov(1,2); % want the off diagonal term
+                        end
+                    end 
+                end
+            end
+            
+            fig = figure;
+            ax1 = subplot(2,1,1);
+            hold on
+            ax2 = subplot(2,1,2);
+            hold on
+            
+            x = 1:numel(loc_inds);
+            for i_type = 1:numel(oh_types)
+                plot(ax1, x, cov_values(:, i_type, 1), type_styles{i_type});
+                plot(ax2, x, cov_values(:, i_type, 2), type_styles{i_type});
+            end
+            
+            locs = misc_emissions_analysis.read_locs_file();
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(loc_inds);
+            locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            
+            legend(ax1, type_legends);
+            title(ax1, 'Weekdays');
+            legend(ax2, type_legends);
+            title(ax2, 'Weekends');
+            ax_opts = {'XTickLabel', {locs.ShortName}, 'XTickLabelRotation', 90, 'XLim', [0 x(end)+1], 'YLim', [-1.2, 1.2], 'XTick', x, 'YTick', -1:0.5:1, 'YGrid', 'on'};
+            set(ax1, ax_opts{:});
+            set(ax2, ax_opts{:});
+            
+            ylabel_str = sprintf('%s-%s %s', upper(main_var), upper(co_var), y_var);
+            ylabel(ax1, ylabel_str);
+            ylabel(ax2, ylabel_str);
+            subplot_stretch(2,1);
         end
         
         %%%%%%%%%%%%%%%%%%%%%%%%%
@@ -380,6 +558,8 @@ classdef misc_oh_analysis
             speciated_vocr = cell(0,3);
             missing_species = {};
             
+            ll = misc_oh_analysis.find_epa_sites_for_city(city, epa_table);
+            
             for i_sp = 1:numel(species)
                 if length(rates{i_sp}) <= 1
                     % NULL values for mising rates show up as empty
@@ -392,7 +572,7 @@ classdef misc_oh_analysis
                 
                 % Now get the concentrations and units for the current 
                 % parameter
-                xx = strcmp(epa_table.ParameterName, species{i_sp}) & strcmp(epa_table.CityName, city);
+                xx = strcmp(epa_table.ParameterName, species{i_sp}) & ll;
                 if sum(xx) == 0
                     missing_species{end+1} = species{i_sp};
                     continue
@@ -499,6 +679,55 @@ classdef misc_oh_analysis
             end
         end
         
+        function data = load_oh_data_for_years(years, varargin)
+            p = advInputParser;
+            p.addParameter('loc_ids', 1:71);
+            p.addParameter('oh_types', {}); % leave empty for all
+            p.addParameter('variables', {'oh'}); % cell array of fieldnames in each OH struct. If missing, then will be skipped
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_ids);
+            oh_types = pout.oh_types;
+            variables = pout.variables;
+            
+            for i_yr = 1:numel(years)
+                yr = years(i_yr);
+                yr_window = (yr-1):(yr+1);
+                fprintf('Loading %s\n', sprintf_ranges(yr_window));
+                OH = load(misc_emissions_analysis.oh_file_name(yr_window));
+                OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
+                OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
+                
+                if i_yr == 1
+                    if isempty(oh_types)
+                        oh_types = fieldnames(OH.locs_wkday(1).OH);
+                    end
+                    % each array will be years x locs x oh type x days of
+                    % week
+                    data = make_empty_struct_from_cell(variables, nan(numel(years), numel(loc_inds), numel(oh_types), 2));
+                end
+                
+                for i_loc = 1:numel(loc_inds)
+                    for i_type = 1:numel(oh_types)
+                        this_type = oh_types{i_type};
+                        weekday_oh = OH.locs_wkday(i_loc).OH.(this_type);
+                        weekend_oh = OH.locs_wkend(i_loc).OH.(this_type);
+                        for i_var = 1:numel(variables)
+                            this_var = variables{i_var};
+                            if isfield(weekday_oh, this_var)
+                                data.(this_var)(i_yr, i_loc, i_type, 1) = weekday_oh.(this_var);
+                            end
+                            if isfield(weekend_oh, this_var)
+                                data.(this_var)(i_yr, i_loc, i_type, 2) = weekend_oh.(this_var);
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        
         %%%%%%%%%%%%%%%%
         % Misc Methods %
         %%%%%%%%%%%%%%%%
@@ -558,10 +787,38 @@ classdef misc_oh_analysis
             result = struct2table(values);
         end
         
+        function xx = find_epa_sites_for_city(city, epa_table)
+            loc = misc_oh_analysis.match_loc_to_city(city);
+            xx = misc_oh_analysis.find_epa_sites_for_loc(loc, epa_table);
+        end
+        
+        function xx = find_epa_sites_for_loc(loc, epa_table)
+            lon = loc.Longitude;
+            lat = loc.Latitude;
+            radius = mean(loc.BoxSize(3:4));
+            
+            site_lons = misc_oh_analysis.to_double(epa_table.Longitude);
+            site_lats = misc_oh_analysis.to_double(epa_table.Latitude);
+            
+            xx = (site_lons - lon).^2 + (site_lats - lat).^2 < radius .^2;
+        end
+        
         function val = to_double(val)
             if iscell(val)
                 val = cellfun(@str2double, val);
             end
+        end
+        
+        function loc = match_loc_to_city(city)
+            all_locs = misc_emissions_analysis.read_locs_file();
+            for i = 1:numel(all_locs)
+                if strcmpi(all_locs(i).Location, city) || strcmpi(all_locs(i).ShortName, city)
+                    loc = all_locs(i);
+                    return
+                end
+            end
+            
+            error('Could not find a location matching "%s"', city);
         end
     end
 end

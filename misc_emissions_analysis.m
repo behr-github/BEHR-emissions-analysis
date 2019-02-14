@@ -3357,243 +3357,6 @@ classdef misc_emissions_analysis
             end
         end
         
-        function figs = plot_plume_differences(plot_type, varargin)
-            E = JLLErrors;
-            
-            p = advInputParser;
-            p.addParameter('time_period_1', '');
-            p.addParameter('time_period_2', '');
-            p.addParameter('days_of_week_1', '');
-            p.addParameter('days_of_week_2', '');
-            p.addParameter('use_wrf_1', nan);
-            p.addParameter('use_wrf_2', nan);
-            p.addParameter('loc_indicies', nan);
-            p.addParameter('separate_figs', false);
-            
-            p.parse(varargin{:});
-            pout = p.Results;
-            
-            separate_figs = pout.separate_figs;
-            
-            loc_inds = misc_emissions_analysis.ask_for_loc_inds(pout.loc_indicies);
-            
-            [start_1, end_1, ~, tp_1_legend] = misc_emissions_analysis.select_start_end_dates(pout.time_period_1, 'Select the time period for the first plume.');
-            [days_of_week_1, dow_1_legend] = misc_emissions_analysis.select_days_of_week(pout.days_of_week_1, 'Select the days of week for the first plume.');
-            use_wrf_1 = opt_ask_yn('Use WRF for the first plume? (BEHR if not)', pout.use_wrf_1);
-            tp_1_legend = sprintf('%s %s', tp_1_legend, dow_1_legend);
-            
-            [start_2, end_2, ~, tp_2_legend] = misc_emissions_analysis.select_start_end_dates(pout.time_period_2, 'Select the time period for the second plume.');
-            [days_of_week_2, dow_2_legend] = misc_emissions_analysis.select_days_of_week(pout.days_of_week_2, 'Select the days of week for the second plume.');
-            use_wrf_2 = opt_ask_yn('Use WRF for the second plume? (BEHR if not)', pout.use_wrf_2);
-            tp_2_legend = sprintf('%s %s', tp_2_legend, dow_2_legend);
-            
-            % I made symlinks to the 2-year periods that use locs1-71 in
-            % the name to make this easier.
-            file1 = misc_emissions_analysis.fits_file_name(start_1, end_1, use_wrf_1, 1:71, days_of_week_1, 'lu');
-            file2 = misc_emissions_analysis.fits_file_name(start_2, end_2, use_wrf_2, 1:71, days_of_week_2, 'lu');
-            
-            base = load(file1);
-            new = load(file2);
-            
-            base.locs = misc_emissions_analysis.cutdown_locs_by_index(base.locs, loc_inds);
-            new.locs = misc_emissions_analysis.cutdown_locs_by_index(new.locs, loc_inds);
-            
-            switch lower(plot_type)
-                case '2d'
-                    figs = misc_emissions_analysis.plot_plume_difference_2d(base, new, separate_figs);
-                case '1d'
-                    figs = misc_emissions_analysis.plot_plume_difference_1d(base, tp_1_legend, new, tp_2_legend, separate_figs);
-                otherwise
-                    E.notimplemented('No plotting action implemented for "%s"', plot_type)
-            end
-            
-        end
-        
-        function figs = plot_plume_difference_1d(base, base_legstr, new, new_legstr, separate_figs)
-            E = JLLErrors;
-            n_locs = numel(base.locs);
-            if n_locs ~= numel(new.locs)
-                E.badinput('BASE and NEW must have the same number of locations')
-            end
-            
-            if separate_figs
-                figs = gobjects(1, n_locs);
-            else
-                figs = figure;
-            end
-            
-            marker = 'o';
-            marker_size = 6;
-            marker_line_width = 1.5;
-            fit_line_width = 2;
-            
-            for i_loc = 1:n_locs
-                next_plot();
-                
-                base_x = base.locs(i_loc).no2_sectors.x;
-                base_ld = range_squeeze(base.locs(i_loc).no2_sectors.linedens, [0 1]);
-                base_fit = range_squeeze(base.locs(i_loc).fit_info.emgfit, [0 1]);
-                new_x = base.locs(i_loc).no2_sectors.x;
-                new_ld = range_squeeze(new.locs(i_loc).no2_sectors.linedens, [0 1]);
-                new_fit = range_squeeze(new.locs(i_loc).fit_info.emgfit, [0 1]);
-                
-                line(base_x, base_ld, 'color', [0 0.5 0], 'marker', marker, 'linewidth', marker_line_width, 'markersize', marker_size, 'linestyle', 'none');
-                line(base_x, base_fit, 'color', 'b', 'marker', 'none', 'linewidth', fit_line_width);
-                line(new_x, new_ld, 'color', [1 0.5 0], 'marker', marker, 'linewidth', marker_line_width, 'markersize', marker_size, 'linestyle', 'none');
-                line(new_x, new_fit, 'color', 'r', 'marker', 'none', 'linewidth', fit_line_width);
-                
-                legend(cprintf({'Line density (%s)', 'Fit (%s)', 'Line density (%s)', 'Fit (%s)'}, {base_legstr, base_legstr, new_legstr, new_legstr}));
-                set(gca,'fontsize', 12);
-                ylabel('Normalized NO_2');
-                xlabel('Distance from city (km)');
-            end
-            
-            
-            function ax = next_plot()
-                if separate_figs
-                    figs(i_loc) = figure;
-                    ax = gca;
-                else
-                    ax = subplot(1, n_locs, i_loc);
-                end
-            end
-        end
-        
-        function figs = plot_plume_difference_2d(base, new, separate_figs)
-            % Not intended to be called directly, but you can if you want.
-            % Plots the differences in the 2D plumes between the base and
-            % new times for each location in them. BASE and NEW are the
-            % structure resulting from loading one of the fits files,
-            % SEPARATE_FIGS is a boolean if you want each plot as a
-            % separate figure or all on one plot.
-            
-            E = JLLErrors;
-            n_locs = numel(base.locs);
-            if n_locs ~= numel(new.locs)
-                E.badinput('BASE and NEW must have the same number of locations')
-            end
-            
-            if separate_figs
-                figs = gobjects(3, n_locs);
-            else
-                figs = figure;
-            end
-            
-            abs_colormap = jet;
-            diff_colormap = blue_red_cmap;
-            
-            for i_loc = 1:n_locs
-                % Calculate the best limits for the absolute value plots
-                abs_clims = calc_plot_limits(veccat(base.locs(i_loc).no2_sectors.no2_mean(:), new.locs(i_loc).no2_sectors.no2_mean(:)), 1e15, 'zero');
-                
-                curr_ax = next_plot(1);
-                plot_plume(curr_ax, base.locs(i_loc));
-                
-                curr_ax = next_plot(2);
-                plot_plume(curr_ax, new.locs(i_loc));
-                
-            end
-            
-            if ~separate_figs
-                label_subfigs(figs, 'xshift', 0.2);
-            end
-            
-            function ax = next_plot(y)
-                if separate_figs
-                    figs(y,i_loc) = figure;
-                    ax = gca;
-                else
-                    idx = (y-1)*n_locs + i_loc;
-                    ax = subplot(2, n_locs, idx);
-                end
-            end
-            
-            function plot_plume(ax, loc, second_loc)
-                if nargin > 2
-                    if ~isequal(second_loc.no2_sectors.lon, loc.no2_sectors.lon) || ~isequal(second_loc.no2_sectors.lat, loc.no2_sectors.lat)
-                        E.badinput('loc and second_loc must have the same lat/lon')
-                    end
-                    
-                    plot_quantity = second_loc.no2_sectors.no2_mean - loc.no2_sectors.no2_mean;
-                    clims = calc_plot_limits(plot_quantity, 1e15, 'diff');
-                    cmap = diff_colormap;
-                    cb_label = '\Delta VCD (molec cm^{-2})';
-                else
-                    plot_quantity = loc.no2_sectors.no2_mean;
-                    clims = abs_clims;
-                    cmap = abs_colormap;
-                    cb_label = 'VCD (molec cm^{-2})';
-                end
-                pcolor(ax, loc.no2_sectors.lon, loc.no2_sectors.lat, plot_quantity);
-                line(loc.Longitude, loc.Latitude, 'linestyle', 'none', 'marker', 'p', 'color', 'k', 'markerfacecolor','k','markersize',16);
-                shading flat;
-                colormap(ax, cmap);
-                caxis(clims);
-                cb = colorbar;
-                cb.Label.String = cb_label;
-                
-                % Also find, from the line densities where it drops to 1/e
-                % of the max value. Only do this where plotting a single
-                % plume, not a difference.
-                
-                x = loc.no2_sectors.x;
-                linedens = loc.no2_sectors.linedens;
-                linedens_boxcar_mean = movmean(linedens, 5);
-                
-                [max_ld, i_max] = max(linedens);
-                background_ld = loc.fit_info.ffit.B;
-                % Find the distance where the boxcar average first brackets
-                % the 1/e value. We'll interpolate then to get the exact
-                % distance.
-                i_x = 1:numel(linedens);
-                % We want the line density where the enhancement has
-                % dropped to 1/e of its original value, so we caculate 1/e
-                % of that and add it back into the background.
-                e_folding_ld = exp(-1) * (max_ld - background_ld) + background_ld;
-                e_idx = find(linedens_boxcar_mean < e_folding_ld & i_x > i_max, 1, 'first');
-                x_e_fold = interp1(linedens_boxcar_mean(e_idx-1:e_idx), x(e_idx-1:e_idx), e_folding_ld);
-                
-                % Now we need to draw a vertical line on the plot at the
-                % e-folding distance downwind (maybe should draw a line
-                % between the maximum and the e-folding distance?)
-                % First step is to convert the distances back to
-                % longitudes. 
-                
-                % m_fdist expects distances in meters, hence multiply x by
-                % 1000. m_fdist also returns longitude in degrees east (so
-                % [0, 360] instead of [-180, 180], so we need to convert
-                % that back.
-                lon_max = m_fdist(loc.Longitude, loc.Latitude, 90, x(i_max)*1000) - 360;
-                lon_efold = m_fdist(loc.Longitude, loc.Latitude, 90, x_e_fold*1000) - 360;
-                
-                % We'll put the line halfway towards the bottom of the plot
-                bottom_lat = min(ax.YLim);
-                line_lat = mean([bottom_lat, loc.Latitude]);
-                
-                line_grp = hggroup(ax);
-                line_args = {'color', 'w', 'linewidth', 4, 'parent', line_grp};
-                inner_line_args = {'color', 'k', 'linewidth', 2, 'parent', line_grp};
-                axis_line_args = {'color', 'w', 'linewidth', 2, 'linestyle', '--', 'parent', line_grp};
-                
-                % Also draw dashed lines down to the x-axis so people can
-                % compare the e-folding absolute distances more easily.
-                % Draw these first so they end up on the bottom
-                line([lon_max, lon_max], [line_lat, bottom_lat], axis_line_args{:});
-                line([lon_efold, lon_efold], [line_lat, bottom_lat], axis_line_args{:});
-                
-                line([lon_max, lon_efold], [line_lat, line_lat], line_args{:});
-                line([lon_max, lon_efold], [line_lat, line_lat], inner_line_args{:});
-                % Make tips on the end
-                tip_radius = diff(ax.YLim)/40;
-                line([lon_max, lon_max], [line_lat - tip_radius, line_lat + tip_radius], line_args{:});
-                line([lon_max, lon_max], [line_lat - tip_radius, line_lat + tip_radius], inner_line_args{:});
-                line([lon_efold, lon_efold], [line_lat - tip_radius, line_lat + tip_radius], line_args{:});
-                line([lon_efold, lon_efold], [line_lat - tip_radius, line_lat + tip_radius], inner_line_args{:});
-                
-                set(ax, 'fontsize', 14);
-            end
-        end
-        
         function plot_emis_tau_changes(varargin)
             
             [first_time_period, second_time_period, first_weekdays, second_weekdays, loc_types, series_labels] = misc_emissions_analysis.get_change_file_selection_input(varargin{:});
@@ -4388,6 +4151,89 @@ classdef misc_emissions_analysis
                     else
                         title(fns{i_fn});
                     end
+                end
+            end
+        end
+        
+        function figs = plot_ss_tau_vs_fit_tau(varargin)
+            p = advInputParser;
+            p.addParameter('locs', 1:71);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.locs);
+            locs = misc_emissions_analysis.read_locs_file();
+            locs = locs(loc_inds);
+            
+            
+            
+            % Collect the taus
+            years = 2006:2013;
+            oh_fields = {'invert', 'invert_hcho', 'invert_hcho_wkday_wkend'};
+            taus = nan(numel(years), numel(locs), numel(oh_fields)+1, 2);
+            tau_errs = nan(numel(years), numel(locs), 2);
+            for i_yr = 1:numel(years)
+                yr = years(i_yr);
+                year_window = (yr-1):(yr+1);
+                fprintf('Loading %d\n', yr);
+                OH = load(misc_emissions_analysis.oh_file_name(year_window));
+                OH.locs_wkday = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkday, loc_inds);
+                OH.locs_wkend = misc_emissions_analysis.cutdown_locs_by_index(OH.locs_wkend, loc_inds);
+                
+                for i_loc = 1:numel(locs)
+                    this_wkday = OH.locs_wkday(i_loc).OH;
+                    this_wkend = OH.locs_wkend(i_loc).OH;
+                    taus(i_yr, i_loc, 1, 1) = OH.locs_wkday(i_loc).emis_tau.tau;
+                    taus(i_yr, i_loc, 1, 2) = OH.locs_wkend(i_loc).emis_tau.tau;
+                    tau_errs(i_yr, i_loc, 1) = OH.locs_wkday(i_loc).emis_tau.tau_uncert;
+                    tau_errs(i_yr, i_loc, 2) = OH.locs_wkend(i_loc).emis_tau.tau_uncert;
+                    for i_fn = 1:numel(oh_fields)
+                        fn = oh_fields{i_fn};
+                        taus(i_yr, i_loc, i_fn+1, 1) = this_wkday.(fn).tau;
+                        taus(i_yr, i_loc, i_fn+1, 2) = this_wkend.(fn).tau;
+                    end
+                end
+            end
+            
+            % do the plotting
+            figs = gobjects(numel(loc_inds),1);
+            legend_names = cellfun(@(x) strrep(x, '_', ' '), veccat({'Fit'}, oh_fields), 'uniform', false);
+            for i_loc = 1:numel(loc_inds)
+                figs(i_loc) = figure;
+                ax = gobjects(2,1);
+                ax(1) = subplot(2,1,1);
+                wkday_tau = squeeze(taus(:,i_loc,:,1));
+                h=plot(ax(1), years, wkday_tau);
+                format_lines(h);
+                scatter_errorbars(years, wkday_tau(:,1), squeeze(tau_errs(:,i_loc,1)), 'color', 'k', 'linewidth', 2);
+                legend(h, legend_names, 'location', 'best');
+                title(ax(1), sprintf('%s weekdays', locs(i_loc).ShortName));
+                ylabel(ax(1), '\tau (h)');
+                
+                ax(2) = subplot(2,1,2);
+                wkend_tau = squeeze(taus(:,i_loc,:,2));
+                h=plot(ax(2), years, wkend_tau);
+                format_lines(h);
+                scatter_errorbars(years, wkend_tau(:,1), squeeze(tau_errs(:,i_loc,2)), 'color', 'k', 'linewidth', 2);
+                legend(h, legend_names, 'location', 'best');
+                title(ax(2), 'weekends');
+                ylabel(ax(2), '\tau (h)');
+                
+                subplot_stretch(2,1);
+            end
+            
+            function format_lines(lineh)
+                cols = cell(numel(lineh),1);
+                cols{1} = 'k';
+                for i=2:numel(lineh)
+                    cols{i} = map2colmap(i,1,numel(lineh)+1,jet);
+                end
+                markers = {'o','^','*','p'};
+                
+                for i=1:numel(lineh)
+                    lineh(i).Color = cols{i};
+                    lineh(i).LineWidth = 2;
+                    lineh(i).Marker = markers{i};
                 end
             end
         end
@@ -6008,6 +5854,283 @@ classdef misc_emissions_analysis
                         caxis(calc_plot_limits(vcds(:), 'zero', 'pow10'))
                 end
                 state_outlines('k');
+            end
+        end
+        
+        function plot_line_dens_fits_by_year(varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('ynorm', 'none'); % 'min', 'max', 'squeeze', 'bckgnd-max', or 'none'
+            p.addParameter('xnorm', 'none'); % 'ldmax', 'fitmax', 'mu', or 'none'
+            p.addParameter('plot_ld', true);
+            p.addParameter('plot_fit', true);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            locs = misc_emissions_analysis.read_locs_file();
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            locs = misc_emissions_analysis.cutdown_locs_by_index(locs, loc_inds);
+            n_locs = numel(locs);
+            
+            ynorm_type = pout.ynorm;
+            xnorm_type = pout.xnorm;
+            plot_line_dens = pout.plot_ld;
+            plot_fit = pout.plot_fit;
+            
+            years = 2006:2013;
+            n_yrs = numel(years);
+            xcoords = cell(n_locs, n_yrs, 2);
+            line_densities = cell(n_locs, n_yrs, 2);
+            fits = cell(n_locs, n_yrs, 2);
+            
+            for i_yr = 1:n_yrs
+                yr = years(i_yr);
+                fprintf('Loading %d\n', yr);
+                sdate = sprintf('%04d-04-01', yr-1);
+                edate = sprintf('%04d-09-30', yr+1);
+                FitsTWRF = load(misc_emissions_analysis.fits_file_name(sdate, edate, false, 1:71, 'TWRF', 'lu'));
+                FitsUS = load(misc_emissions_analysis.fits_file_name(sdate, edate, false, 1:71, 'US', 'lu'));
+                
+                for i_loc = 1:n_locs
+                    xx = loc_inds(i_loc);
+                    
+                    ld_twrf = normalize_y(FitsTWRF.locs(xx).no2_sectors.linedens, FitsTWRF.locs(xx));
+                    ld_us = normalize_y(FitsUS.locs(xx).no2_sectors.linedens, FitsUS.locs(xx));
+                    fit_twrf = normalize_y(FitsTWRF.locs(xx).fit_info.emgfit, FitsTWRF.locs(xx));
+                    fit_us = normalize_y(FitsUS.locs(xx).fit_info.emgfit, FitsUS.locs(xx));
+                    
+                    x_twrf = normalize_x(FitsTWRF.locs(xx).no2_sectors.x, ld_twrf, fit_twrf, FitsTWRF.locs(xx));
+                    x_us = normalize_x(FitsUS.locs(xx).no2_sectors.x, ld_us, fit_us, FitsUS.locs(xx));
+                    
+                    xcoords{i_loc, i_yr, 1} = x_twrf;
+                    xcoords{i_loc, i_yr, 2} = x_us;
+                    line_densities{i_loc, i_yr, 1} = ld_twrf;
+                    line_densities{i_loc, i_yr, 2} = ld_us;
+                    fits{i_loc, i_yr, 1} = fit_twrf;
+                    fits{i_loc, i_yr, 2} = fit_us;
+                end
+            end
+            
+            
+            figs = gobjects(n_locs, 1);
+            for i_loc = 1:n_locs
+                figs(i_loc) = figure;
+                subplot_stretch(2,1);
+                ax1 = subplot(2,1,1);
+                plot_ld_fits(ax1, xcoords(i_loc, :, 1), line_densities(i_loc, :, 1), fits(i_loc, :, 1));
+                set_axis_labels(ax1);
+                title(ax1, sprintf('%s, weekdays', locs(i_loc).ShortName));
+                
+                ax2 = subplot(2,1,2);
+                plot_ld_fits(ax2, xcoords(i_loc, :, 2), line_densities(i_loc, :, 2), fits(i_loc, :, 2));
+                set_axis_labels(ax2);
+                title(ax2, 'weekends');
+            end
+            
+            function x = normalize_x(x, ld, fit, loc)
+                switch lower(xnorm_type)
+                    case 'none'
+                        % do nothing
+                    case 'ldmax'
+                        [~,idx] = max(ld);
+                        x = x - x(idx);
+                    case 'fitmax'
+                        [~,idx] = max(fit);
+                        x = x - x(idx);
+                    case 'mu'
+                        x = x - loc.fit_info.ffit.mu_x;
+                    otherwise
+                        error('No method defined for "xnorm" = "%s"', xnorm_type)
+                end
+            end
+            
+            function y = normalize_y(y, loc)
+                switch lower(ynorm_type)
+                    case 'none'
+                        % do nothing
+                    case 'min'
+                        y = y - min(y(:));
+                    case 'max'
+                        y = y - max(y(:));
+                    case 'squeeze'
+                        y = scale_to_range(y, [0, 1]);
+                    case 'bckgnd-max'
+                        y = y - loc.fit_info.ffit.B;
+                        y = y / max(y(:));
+                    otherwise
+                        error('No method implemented for "ynorm" = "%s"', ynorm_type);
+                end
+            end
+            
+            function set_axis_labels(ax)
+                yvars = {};
+                if plot_line_dens
+                    yvars{end+1} = 'Line density';
+                end
+                if plot_fit
+                    yvars{end+1} = 'Fit';
+                end
+                
+                switch lower(ynorm_type)
+                    case 'none'
+                        y_normstr = '';
+                    case 'min'
+                        y_normstr = ', normalized to minimum';
+                    case 'max'
+                        y_normstr = ', normalized to maximum';
+                    case 'squeeze'
+                        y_normstr = ', normalized';
+                    case 'bckgnd-max'
+                        y_normstr = ', norm. background to max';
+                    otherwise
+                        y_normstr = ' ?';
+                end
+                
+                ylabel(ax, sprintf('%s (mol/km%s)', strjoin(yvars, ' and '), y_normstr));
+                
+                switch lower(xnorm_type)
+                    case 'none'
+                        x_normstr = 'Distance from city center';
+                    case 'ldmax'
+                        x_normstr = 'Distance from line dens. max';
+                    case 'fitmax'
+                        x_normstr = 'Distance from fit max';
+                    case 'mu'
+                        x_normstr = 'Distance from \mu_x';
+                    otherwise
+                        x_normstr = '?';
+                end
+                xlabel(ax, sprintf('%s (km)', x_normstr));
+            end
+            
+            function plot_ld_fits(ax, x, lds, fits)
+                h_ld = gobjects(n_yrs,1);
+                h_fit = gobjects(n_yrs,1);
+                for i=1:numel(x)
+                    if plot_line_dens
+                        h_ld(i) = line(ax, x{i}, lds{i}, 'marker', 'o', 'linestyle', 'none');
+                    end
+                    if plot_fit
+                        h_fit(i) = line(ax, x{i}, fits{i}, 'linewidth', 2);
+                    end
+                end
+                
+                % If only plotting fit or only plotting line densities, just plot
+                % them and use those series in the legend. If plotting both, use
+                % the fits in the legend for colors and add dummy entries to
+                % differentiate fit and line density
+                h = [];
+                leg_strs = arrayfun(@(x) sprintf_ranges((x-1):(x+1)), years', 'uniform', false);
+                if plot_fit
+                    h = h_fit;
+                    misc_emissions_analysis.set_year_series_plot_colors(h_fit, 'k');
+                    if plot_line_dens
+                        h(end+1) = line(ax, nan,nan,'linewidth',2,'color','k');
+                        leg_strs{end+1} = 'Fits';
+                    end
+                end
+                if plot_line_dens
+                    if ~plot_fit
+                        h = h_ld;
+                    else
+                        h(end+1) = line(ax, nan,nan,'marker','o','color','k','markerfacecolor','k','linestyle','none');
+                        leg_strs{end+1} = 'Line densities';
+                    end
+                    misc_emissions_analysis.set_year_series_plot_colors(h_ld, 'k');
+                end
+                
+                legend(ax, h, leg_strs);
+            end
+            
+        end
+        
+        function plot_plume_diff(loc_ind_1, year1, loc_ind_2, year2, varargin)
+            p = advInputParser;
+            p.addParameter('norm', 'none'); % 'none', 'squeeze', 'min', 'max'
+            p.addParameter('dow', 'TWRF');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            norm_type = pout.norm;
+            days_of_week = pout.dow;
+            
+            loc_ind_1 = convert_loc_ind(loc_ind_1);
+            loc_ind_2 = convert_loc_ind(loc_ind_2);
+            
+            locs1 = load_loc_for_year(year1);
+            if year2 ~= year1
+                locs2 = load_loc_for_year(year2);
+            else
+                locs2 = locs1;
+            end
+            
+            loc1 = misc_emissions_analysis.cutdown_locs_by_index(locs1.locs, loc_ind_1);
+            loc2 = misc_emissions_analysis.cutdown_locs_by_index(locs2.locs, loc_ind_2);
+            clear locs1 locs2
+            
+            [no2_1, lon_1, lat_1] = get_data(loc1);
+            [no2_2, lon_2, lat_2] = get_data(loc2);
+            
+            if ~isequal(size(no2_1), size(no2_2))
+                error('NO2 arrays not the same size')
+            elseif isequal(lon_1, lon_2) && isequal(lat_1, lat_2)
+                x = lon_1;
+                y = lat_1;
+            else
+                [x,y] = meshgrid(1:size(no2_1, 2), 1:size(no2_1, 1));
+            end
+            
+            figure;
+            no2_diff = no2_2 - no2_1;
+            pcolor(x, y, no2_diff);
+            caxis(calc_plot_limits(no2_diff(:), 'diff'));
+            cb=colorbar;
+            cb.Label.String = '\Delta NO_2 VCD (molec. cm^{-2})';
+            colormap(blue_red_cmap);
+            
+            function loc_ind = convert_loc_ind(loc_ind)
+                if ischar(loc_ind)
+                    loc_ind = {loc_ind};
+                end
+                loc_ind = misc_emissions_analysis.convert_input_loc_inds(loc_ind);
+            end
+            
+            function locs = load_loc_for_year(yr)
+                sdate = sprintf('%04d-04-01', yr-1);
+                edate = sprintf('%04d-09-30', yr+1);
+                locs = load(misc_emissions_analysis.fits_file_name(sdate, edate, false, 1:71, days_of_week,'lu'));
+            end
+            
+            function [no2, lon, lat] = get_data(loc)
+                lon = loc.no2_sectors.lon;
+                lat = loc.no2_sectors.lat;
+                no2 = loc.no2_sectors.no2_mean;
+                
+                switch lower(norm_type)
+                    case 'none'
+                        % do nothing
+                    case 'squeeze'
+                        no2 = scale_to_range(no2, [0, 1]);
+                end
+            end
+        end
+        %%%%%%%%%%%%%%%%
+        % Plot helpers %
+        %%%%%%%%%%%%%%%%
+        
+        function set_year_series_plot_colors(lineh, edge_color)
+            if nargin < 2
+                edge_color = '';
+            end
+            n_lines = numel(lineh);
+            for i=1:n_lines
+                this_color = map2colmap(i, n_lines, 'jet');
+                lineh(i).Color = this_color;
+                lineh(i).MarkerFaceColor = this_color;
+                if ~isempty(edge_color)
+                    lineh(i).MarkerEdgeColor = edge_color;
+                end
             end
         end
     end

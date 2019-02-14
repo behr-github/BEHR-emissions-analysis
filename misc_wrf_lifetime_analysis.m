@@ -50,6 +50,9 @@ classdef misc_wrf_lifetime_analysis
             if ismember('alpha', variables)
                 processing.alpha = misc_wrf_lifetime_analysis.setup_alpha_calc(avg_year);
             end
+            if ismember('nox_tau', variables)
+                processing.nox_tau = misc_wrf_lifetime_analysis.setup_nox_lifetime_calc(avg_year);
+            end
             
             start_dates = cell(size(avg_year));
             end_dates = cell(size(avg_year));
@@ -68,6 +71,38 @@ classdef misc_wrf_lifetime_analysis
                 save(save_name, 'xlon', 'xlat', 'profiles');
             end
         end 
+        
+        function tau_processing = setup_nox_lifetime_calc(avg_year)
+            % SETUP_NOX_LIFETIME_CALC(AVG_YEAR) Set up the processing
+            % structure to calculate instantaneous NOx lifetime in
+            % WRF_TIME_AVERAGE.
+            
+            % This is fairly simple. We calculate NOx = NO + NO2 then
+            % divide by the LNOX diagnostic to get lifetime in seconds,
+            % then convert to hours.
+            
+            req_vars = {'no', 'no2', 'LNOX'};
+            wi = misc_wrf_lifetime_analysis.load_test_wrf_file(avg_year);
+            wrf_vars = {wi.Variables.Name};
+            xx = ~ismember(req_vars, wrf_vars);
+            if any(xx)
+                warning('missing_var:nox_lifetime_calc', 'Missing the following variables in %d for NOx lifetime calc - will not calculate NOx lifetime: %s', avg_year, strjoin(req_vars(xx), ', '));
+                tau_processing = struct('variables', {{'no2'}}, 'proc_fxn', @no_tau);
+            else
+                tau_processing = struct('variables', {req_vars}, 'proc_fxn', @tau_calc);
+            end
+            
+            function tau = tau_calc(Wrf)
+                nox = Wrf.no + Wrf.no2;
+                % assuming NOx in ppm, LNOX in ppm/s, then this calculates
+                % lifetime in hours.
+                tau = nox ./ WRF.LNOX ./ 3600;
+            end
+            
+            function tau = no_tau(Wrf)
+                tau = nan(size(Wrf.no2));
+            end
+        end
         
         function vocr_processing = setup_vocr_calc(avg_year)
             % SETUP_VOCR_CALC(AVG_YEAR) Set up the processing structure to
@@ -165,7 +200,6 @@ classdef misc_wrf_lifetime_analysis
             o1d_relax_rate = rxns.rate_handle;
             h2o_rate = 2.2e-10;
             
-            % todo: add photolysis const
             p_o1d = 'PHOTR_O31D';
             p_hcho = 'PHOTR_CH2OR';
             req_vars = {'QVAPOR', 'o3', 'hcho', p_o1d, p_hcho};

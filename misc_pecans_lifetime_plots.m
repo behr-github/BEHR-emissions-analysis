@@ -177,7 +177,10 @@ classdef misc_pecans_lifetime_plots
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('do_plots', true);
-            p.addParameter('n_downwind_points', 60);
+            % want 60-70 total points, the cutting down algorithm adds 1/2
+            % this number to upwind, so this will give us 61 total
+            % (counting the center point)
+            p.addParameter('n_downwind_points', 40);
             p.addParameter('allow_any_n_pts', false);
             p.parse(varargin{:});
             pout = p.Results;
@@ -260,7 +263,7 @@ classdef misc_pecans_lifetime_plots
                         field = 'incorrectly_rejected';
                     elseif ~this_fit_good && ~this_fit_correct
                         field = 'correctly_rejected';
-                    elseif this_fit_good && ~this_fit_correct'
+                    elseif this_fit_good && ~this_fit_correct
                         field = 'incorrectly_kept';
                     else
                         E.notimplemented('Should not have reached here')
