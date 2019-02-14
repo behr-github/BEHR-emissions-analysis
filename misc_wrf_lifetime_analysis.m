@@ -56,6 +56,12 @@ classdef misc_wrf_lifetime_analysis
             if ismember('nox_tau_complex', variables)
                 processing.nox_tau_complex = misc_wrf_lifetime_analysis.setup_nox_lifetime_calc(avg_year, 'complex');
             end
+            if ismember('total_loss', variables)
+                processing.total_loss = misc_wrf_lifetime_analysis.setup_prod_loss_diag(avg_year, 'loss');
+            end
+            if ismember('total_prod', variables)
+                processing.total_prod = misc_wrf_lifetime_analysis.setup_prod_loss_diag(avg_year, 'production');
+            end
             
             start_dates = cell(size(avg_year));
             end_dates = cell(size(avg_year));
@@ -74,6 +80,36 @@ classdef misc_wrf_lifetime_analysis
                 save(save_name, 'xlon', 'xlat', 'profiles');
             end
         end 
+        
+        function prodloss_processing = setup_prod_loss_diag(avg_year, prod_or_loss)
+            switch lower(prod_or_loss)
+                case 'production'
+                    req_vars = {'PNOX', 'PNOXHNO3', 'PNOXON', 'PNOXPAN', 'PNOXD'}; % PNOXY not in the saved files;
+                case 'loss'
+                    req_vars = {'LNOXHNO3', 'LNOXA', 'LNOX', 'LNOXPAN', 'LNOXB'};
+                otherwise
+                    error('prod_or_loss %s not recognized', prod_or_loss);
+            end
+            
+            xx = ~ismember(req_vars, wrf_vars);
+            if any(xx)
+                warning('missing_var:prod_loss_calc', 'Missing the following variables in %1$d for %2$s calc - will not calculate %2$s: %3$s', avg_year, prod_or_loss, strjoin(req_vars(xx), ', '));
+                prodloss_processing = struct('variables', {{'no2'}}, 'proc_fxn', @no_calc);
+            else
+                prodloss_processing = struct('variables', {req_vars}, 'proc_fxn', @diagnostic_calc);
+            end
+            
+            function diagnostic = diagnostic_calc(Wrf)
+                diagnostic = zeros(size(Wrf.(req_vars{1})));
+                for i=1:numel(req_vars)
+                    diagnostic = diagnostic + Wrf.(req_vars{1});
+                end
+            end
+            
+            function diagnostic = no_calc(Wrf)
+                diagnostic = nan(size(Wrf.no2));
+            end
+        end
         
         function tau_processing = setup_nox_lifetime_calc(avg_year, lifetime_mode)
             % SETUP_NOX_LIFETIME_CALC(AVG_YEAR) Set up the processing
@@ -397,6 +433,7 @@ classdef misc_wrf_lifetime_analysis
             
             save(savename, 'tau_direct', 'tau_inverse', 'nox', 'loss', 'lon', 'lat', 'wrf_hours', 'dvec', '-v7.3');
         end
+        
         
         function [tau, lon, lat, nox, total_loss_rate] = calculate_wrf_diag_lifetime(wrf_file, varargin)
             E = JLLErrors;
