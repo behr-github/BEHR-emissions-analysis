@@ -633,6 +633,7 @@ classdef misc_wrf_lifetime_analysis
             avg = RunningAverage();
             for i_yr = 1:numel(years)
                 Profs = load(misc_wrf_lifetime_analysis.wrf_avg_name(years(i_yr), specie));
+      
                 if i_yr == 1
                     xlon = double(Profs.xlon);
                     xlat = double(Profs.xlat);
@@ -685,23 +686,31 @@ classdef misc_wrf_lifetime_analysis
         end
         
         function avg_prof = average_profiles_around_loc(loc, years, specie, varargin)
+            [wrf_profiles, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, specie, 'avg_levels', []);
+            avg_prof = average_wrf_data_around_loc(loc, wrf_profiles, wrf_lon, wrf_lat, varargin{:});
+        end
+        
+        function avg_prof = average_wrf_data_around_loc(loc, wrf_profiles, wrf_lon, wrf_lat, varargin)
             p = advInputParser;
-            p.addParameter('avg_levels', []);
             p.addParameter('radius', []);
+            p.addParameter('avg_levels', []);
+            p.KeepUnmatched = true;
             p.parse(varargin{:});
             pout = p.Results;
             
-            avg_levels = pout.avg_levels;
             radius = pout.radius;
+            avg_levels = pout.avg_levels;
             
-            [wrf_profiles, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, specie, 'avg_levels', avg_levels);
             xx = misc_emissions_analysis.find_indices_in_radius_around_loc(loc, wrf_lon, wrf_lat, radius);
+            if ~isempty(avg_levels)
+                wrf_profiles = nanmean(wrf_profiles(:,:,avg_levels), 3);
+            end
+            
             if ismatrix(wrf_profiles)
                 avg_prof = nanmean(wrf_profiles(xx));
             elseif ndims(wrf_profiles) == 3
                 wrf_profiles = permute(wrf_profiles, [3 1 2]);
                 avg_prof = nanmean(wrf_profiles(:, xx), 2);
-                %hold on; plot(avg_prof, 1:29);
             end
         end
         

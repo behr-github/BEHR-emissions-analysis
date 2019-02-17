@@ -511,6 +511,360 @@ classdef misc_oh_analysis
             subplot_stretch(2,1);
         end
         
+        function figs = test_hox_solver_with_wrf(varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('lifetime_mode', 'simple');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            % We can test the NO2 + OH -> HNO3 OH calculation and the
+            % normal HCHO calculation, but not the weekend/weekday solver
+            % because WRF doesn't have a weekend/weekday NOx cycle. 
+            %
+            % To do so, we need to average OH, NOx, and HCHO concentrations
+            % and NOx lifetime from WRF around each location and use the
+            % latter three to compute what the steady state model thinks
+            % the OH should be. We then compare this against the OH from
+            % WRF. 
+            %
+            % NOx lifetime may be loaded directly or calculated from the
+            % loss diagnostics.
+            
+            years = 2006:2013;
+            n_yrs = numel(years);
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            locs = misc_emissions_analysis.cutdown_locs_by_index(misc_emissions_analysis.read_locs_file(), loc_inds);
+            n_locs = numel(locs);
+            
+            lifetime_mode = pout.lifetime_mode;
+            
+            % Load data for each location we're testing
+            switch lower(lifetime_mode)
+                case 'simple'
+                    lifetime_vars = {'LNOXA','LNOXHNO3'};
+                case 'complex'
+                    lifetime_vars = {'total_loss','total_prod'};
+                case 'simple-pre'
+                    lifetime_vars = {'nox_tau_simple'};
+                case 'complex-pre'
+                    lifetime_vars = {'nox_tau_complex'};
+                otherwise
+                    error('No lifetime variables defined for lifetime_mode = "%s"', lifetime_mode);
+            end
+            common_vars = {'nox', 'ho', 'vocr', 'hcho', 'temperature', 'ndens'};
+            calc_vars = {'tau'};
+            wrf_vars = veccat(common_vars, lifetime_vars);
+            all_vars = veccat(wrf_vars, calc_vars);
+            proto_array = repmat({nan(n_yrs,1)}, n_locs, 1);
+            % the structure index will be the location, the arrays in each
+            % location field will be by year
+            wrf_data = make_empty_struct_from_cell(all_vars, proto_array);
+            for i_yr=1:n_yrs
+                fprintf('Loading data for %d\n', years(i_yr));
+                year_window = misc_oh_analysis.year_window(years(i_yr));
+                wrf_locs = misc_emissions_analysis.average_profiles_for_locations(year_window, 'TWRF', locs, 'species', wrf_vars);
+                for i_loc = 1:n_locs
+                    for i_var = 1:numel(wrf_vars)
+                        this_var = wrf_vars{i_var};
+                        wrf_data(i_loc).(this_var)(i_yr) = wrf_locs(i_loc).WRFData.(this_var);
+                    end
+                end
+            end
+            
+            for i_loc = 1:n_locs
+                wrf_data(i_loc).tau = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), lifetime_mode);
+            end
+            
+            % Calculate the OH solution
+            figs = gobjects(n_locs,1);
+            for i_loc = 1:n_locs
+                figs(i_loc) = figure;
+                oh_solutions = make_empty_struct_from_cell({'hno3','invert_hcho'}, proto_array{1});
+                vocr_solutions = make_empty_struct_from_cell({'invert_hcho'}, proto_array{1});
+                
+                % Can do the HNO3 solution easily
+                k_hno3 = KOHNO2a(wrf_data(i_loc).temperature, wrf_data(i_loc).ndens);
+                oh_solutions.hno3 = 1 ./ (k_hno3 .* wrf_data(i_loc).tau .* 3600);
+                this_nox = wrf_data(i_loc).nox .* wrf_data(i_loc).ndens .* 1e-6;
+                this_hcho = wrf_data(i_loc).hcho .* wrf_data(i_loc).ndens .* 1e-6;
+                for i_yr = 1:n_yrs
+                    
+                    [oh, ~, ~, soln] = hox_solve_tau_hcho_constraint(this_nox(i_yr), wrf_data(i_loc).tau(i_yr), this_hcho(i_yr), 0.04);
+                    oh_solutions.invert_hcho(i_yr) = oh;
+                    vocr_solutions.invert_hcho(i_yr) = soln.vocr;
+                end
+                
+                yyaxis left;
+                l = gobjects(5,1);
+                l(1) = line(years, wrf_data(i_loc).ho .* wrf_data(i_loc).ndens .* 1e-6, 'color', 'k', 'marker', '^', 'linewidth', 2);
+                l(2) = line(years, oh_solutions.hno3, 'color', 'k', 'marker', 'o', 'linewidth', 2);
+                l(3) = line(years, oh_solutions.invert_hcho, 'color', 'k', 'marker', '*', 'linewidth', 2);
+                ylabel('[OH] (molec. cm^{-3}');
+                
+                
+                yyaxis right;
+                l(4)=line(years, wrf_data(i_loc).vocr, 'color', 'r', 'marker', '^', 'linewidth', 2);
+                l(5)=line(years, vocr_solutions.invert_hcho, 'color', 'r', 'marker', '*', 'linewidth', 2);
+                ylabel('VOC_R (s^{-1})')
+                
+                legend(l, {'WRF OH', 'HNO_3 OH', 'HCHO SS OH', 'WRF VOC_R', 'HCHO SS VOC_R'});
+                title(locs(i_loc).ShortName);
+            end
+            
+            
+        end
+        
+        function tau = compute_wrf_tau(Wrf, lifetime_mode)
+            switch lower(lifetime_mode)
+                case 'simple'
+                    loss = Wrf.LNOXHNO3 + Wrf.LNOXA;
+                    nox = get_nox();
+                    tau = nox ./ loss ./ 3600;
+                case 'complex'
+                    loss = Wrf.total_loss;% - Wrf.total_prod;
+                    nox = get_nox();
+                    tau = nox ./ loss ./ 3600;
+                case 'simple-pre'
+                    tau = Wrf.nox_tau_simple;
+                case 'complex-pre'
+                    tau = Wrf.nox_tau_complex;
+                otherwise
+                    error('No tau computation for lifetime_mode = "%s"', lifetime_mode);
+            end
+            
+            function nox = get_nox()
+                if isfield(Wrf, 'nox')
+                    nox = Wrf.nox;
+                else
+                    nox = Wrf.no + Wrf.no2;
+                end
+            end
+        end
+        
+        function [wrf_locs, figs] = test_hox_ss_with_wrf(varargin)
+            % What we want to do is get the NOx, VOCR, P(HOx) and alpha
+            % from WRF, plug these into HOX_SS_SOLVER and see how the OH it
+            % produces compares with the OH from WRF itself.
+            %
+            % We want the option to use either time-average or
+            % instantaneous WRF files, and to do the averaging within
+            % different radii around the locations specified.
+            
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('avg_radius', []); % radius around cities to include. An empty array uses box width, a number is in degrees
+            p.addParameter('time_mode', 'avg'); % 'avg' or 'inst'
+            p.addParameter('local_hour', 13); % local hour to use for 'inst' mode
+            p.addParameter('years', [2005, 2007:2009, 2011:2014]); % what years to use. if 'inst', see next option. Skip 2006 and 2010 by default b/c they lack full WRF output
+            p.addParameter('inst_dates', {'04-01','09-30'}); % what days of year (in mm-dd format) to use for 'inst'
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            avg_radius = pout.avg_radius;
+            time_mode = pout.time_mode;
+            local_hour = pout.local_hour;
+            years = pout.years;
+            inst_dates = pout.inst_dates;
+            
+            % First need to get the locations
+            locs = misc_emissions_analysis.cutdown_locs_by_index(misc_emissions_analysis.read_locs_file(), loc_inds);
+            
+            % Next load the data, averaging around each location
+            wrf_vars = {'no', 'no2', 'ho', 'vocr', 'alpha', 'phox', 'ndens', 'LNOXA', 'LNOXHNO3'};
+            switch lower(time_mode)
+                case 'avg'
+                    wrf_locs = load_wrf_avg(locs);
+                case 'inst'
+                    wrf_locs = load_wrf_inst(locs);
+                otherwise
+                    error('time_mode "%s" not recognized', time_mode);
+            end
+            
+            % Compute what the steady state solver thinks the OH should be.
+            % Plot how this compares to the WRF OH
+            figs = gobjects(numel(locs),1);
+            if isempty(avg_radius)
+                radius_str = 'by location';
+            else
+                radius_str = sprintf('%.2f deg', avg_radius);
+            end
+            for j_loc = 1:numel(locs)
+                switch lower(time_mode)
+                    case 'avg'
+                        col_var = years;
+                        col_label = 'Year';
+                    case 'inst'
+                        col_var = wrf_locs(j_loc).PHOTR_NO2 ./ 60;
+                        col_label = 'j(NO_2) (s^{-1})';
+                    otherwise
+                        error('No color variable defined for time mode = "%s"', time_mode)
+                end
+                wrf_locs(j_loc).ss_oh = solve_oh(wrf_locs(j_loc));
+                wrf_locs(j_loc).wrf_tau = misc_oh_analysis.compute_wrf_tau(wrf_locs(j_loc), 'simple');
+                wrf_locs(j_loc).ss_tau = solve_tau(wrf_locs(j_loc));
+                
+                figs(j_loc) = figure;
+                subplot(2,1,1);
+                scatter(wrf_locs(j_loc).ho * 1e6, wrf_locs(j_loc).ss_oh * 1e6, [], col_var);
+                plot_fit_line(wrf_locs(j_loc).ho * 1e6, wrf_locs(j_loc).ss_oh * 1e6, 'one2one', false, 'regression', 'rma');
+                cb = colorbar;
+                colormap jet
+                cb.Label.String = col_label;
+                xlabel('WRF [OH] (ppt)');
+                ylabel('Steady state [OH] (ppt)');
+                title(sprintf('%s (radius %s)', locs(j_loc).ShortName, radius_str));
+                
+                subplot(2,1,2);
+                scatter(wrf_locs(j_loc).wrf_tau, wrf_locs(j_loc).ss_tau, [], col_var);
+                plot_fit_line(wrf_locs(j_loc).wrf_tau, wrf_locs(j_loc).ss_tau, 'one2one', false, 'regression', 'rma');
+                cb = colorbar;
+                colormap jet
+                cb.Label.String = col_label;
+                xlabel('WRF NO_x lifetime (h)');
+                ylabel('Steady state NOx lifetime (h)');
+            end
+            
+            wrf_locs = copy_structure_fields(locs, wrf_locs, 'missing');
+            
+            function wrf_data = load_wrf_avg(locs)
+                proto_array = repmat({nan(numel(years),1)},size(locs));
+                wrf_data = make_empty_struct_from_cell(wrf_vars, proto_array);
+                for i_loc = 1:numel(locs)
+                    fprintf('Loading: %.1f%%\n', (i_loc - 1)/numel(locs)*100);
+                    for i_var = 1:numel(wrf_vars)
+                        this_var = wrf_vars{i_var};
+                        for i_yr = 1:numel(years)
+                            wrf_data(i_loc).(this_var)(i_yr) = misc_wrf_lifetime_analysis.average_profiles_around_loc(locs(i_loc),...
+                                years(i_yr), this_var, 'radius', avg_radius, 'avg_levels', 1:5);
+                        end
+                    end
+                end
+            end
+            
+            function wrf_data = load_wrf_inst(locs)
+                % 1) Figure out what hours need loaded
+                % 2) Create date vector and loop over days
+                % 3) Load the variables from the required hours and average
+                %    the right hour for the right city. PHOx, VOCR, and
+                %    alpha will all need calculated.
+                
+                % 1) figure out hours
+                loc_long = [locs.Longitude];
+                local_hrs = round(loc_long / 15) + local_hour;
+                local_hrs_to_load = unique(local_hrs);
+                
+                % 2) start looping over days
+                sdates = arrayfun(@(y) sprintf('%04d-%s', y, inst_dates{1}), years, 'uniform', false);
+                edates = arrayfun(@(y) sprintf('%04d-%s', y, inst_dates{2}), years, 'uniform', false);
+                dvec = make_datevec(sdates, edates);
+                
+                proto_array = repmat({nan(numel(dvec),1)},size(locs));
+                wrf_data = make_empty_struct_from_cell(veccat({'PHOTR_NO2'}, wrf_vars, proto_array);
+                
+                alpha_proc = misc_wrf_lifetime_analysis.setup_alpha_calc(2005);
+                phox_proc = misc_wrf_lifetime_analysis.setup_phox_calc(2005);
+                vocr_proc = misc_wrf_lifetime_analysis.setup_vocr_calc(2005);
+                
+                last_year = nan;
+                for i_day = 1:numel(dvec)
+                    fprintf('Loading %.2f%%\n', (i_day-1)./numel(dvec)*100);
+                    this_year = year(dvec(i_day));
+                    if last_year ~= this_year
+                        % get the right processing function for each year;
+                        % since some years can't calculate these quantities
+                        last_year = this_year;
+                        alpha_proc = misc_wrf_lifetime_analysis.setup_alpha_calc(this_year);
+                        phox_proc = misc_wrf_lifetime_analysis.setup_phox_calc(this_year);
+                        vocr_proc = misc_wrf_lifetime_analysis.setup_vocr_calc(this_year);
+                        % to avoid double-loading certain variables (e.g. ndens)
+                        % make a list of all unique variables to load from each
+                        % file
+                        vars_to_load = unique(veccat({'PHOTR_NO2'}, wrf_vars, alpha_proc.variables, phox_proc.variables, vocr_proc.variables));
+                    end
+                    
+                    wrf_files = cell(size(local_hrs_to_load));
+                    for i_hr = 1:numel(wrf_files)
+                        wrf_datetime = dvec(i_day) + local_hrs_to_load(i_hr)/24;
+                        wrf_files{i_hr} = find_wrf_path('us','daily',wrf_datetime,'fullpath');
+                    end
+                    
+                    if i_day == 1
+                        % the coordinates are the same across all files
+                        xlon = ncread(wrf_files{1}, 'XLONG');
+                        xlat = ncread(wrf_files{1}, 'XLAT');
+                    end
+                    
+                    wrf_profiles = read_wrf_vars('', wrf_files, vars_to_load, 'squeeze', 1, 'as_struct');
+                    
+                    for i_var = 1:numel(wrf_vars)
+                        this_var = wrf_vars{i_var};
+                        switch lower(this_var)
+                            case 'alpha'
+                                data = alpha_proc.proc_fxn(wrf_profiles);
+                            case 'phox'
+                                data = phox_proc.proc_fxn(wrf_profiles);
+                            case 'vocr'
+                                data = vocr_proc.proc_fxn(wrf_profiles);
+                            otherwise
+                                % Most of the variables can be read
+                                % by read_wrf_vars
+                                data = wrf_profiles.(this_var);
+                        end
+                        
+                        % Now we need to average the data for each location
+                        for i_loc = 1:numel(locs)
+                            % data will be nlon x nlat x nlevels x nhours
+                            % so get which slice in the last dimension we
+                            % should use
+                            i_hr = local_hrs(i_loc) == local_hrs_to_load;
+                            wrf_data(i_loc).(this_var)(i_day) = misc_wrf_lifetime_analysis.average_wrf_data_around_loc(locs(i_loc),...
+                                data(:,:,:,i_hr), xlon, xlat, 'avg_levels', 1:5, 'radius', avg_radius);
+                        end
+                    end
+                end
+                
+                fprintf('Loading 100%%\n');
+            end
+            
+            
+            function oh = solve_oh(wrf_data)
+                nox = (wrf_data.no + wrf_data.no2) .* 1e-6 .* wrf_data.ndens;
+                vocr = wrf_data.vocr;
+                % phox in ppt/s -> molec/cm3/s
+                phox = wrf_data.phox .* wrf_data.ndens .* 1e-12;
+                alpha = wrf_data.alpha;
+                oh = nan(size(nox));
+                for i = 1:numel(oh)
+                    try
+                        oh(i) = hox_ss_solver(nox(i), phox(i), vocr(i), alpha(i));
+                    catch err
+                        if strcmp(err.identifier, 'hox_ss_solver:invalid_input')
+                            continue  % input invalid (probably a NaN). Can't compute OH
+                        else
+                            rethrow(err)
+                        end
+                    end
+                end
+                oh = oh ./ wrf_data.ndens .* 1e6; % return in ppm just like WRF
+            end
+            
+            function tau = solve_tau(wrf_data)
+                nox = (wrf_data.no + wrf_data.no2) .* 1e-6 .* wrf_data.ndens;
+                no2_no = wrf_data.no2 ./ wrf_data.no;
+                vocr = wrf_data.vocr;
+                % phox in ppt/s -> molec/cm3/s
+                phox = wrf_data.phox .* wrf_data.ndens .* 1e-12;
+                alpha = wrf_data.alpha;
+                tau = nan(size(nox));
+                for i = 1:numel(tau)
+                    tau(i) = nox_lifetime(nox(i), 'phox', phox(i), 'alpha', alpha(i), 'vocr', vocr(i), 'no2_no', no2_no(i));
+                end
+            end
+        end
         %%%%%%%%%%%%%%%%%%%%%%%%%
         % Plot helper functions %
         %%%%%%%%%%%%%%%%%%%%%%%%%
@@ -731,6 +1085,10 @@ classdef misc_oh_analysis
         %%%%%%%%%%%%%%%%
         % Misc Methods %
         %%%%%%%%%%%%%%%%
+        
+        function win = year_window(yr)
+            win = (yr-1):(yr+1);
+        end
         
         function rows = get_rates()
             fid = fopen(fullfile(misc_oh_analysis.epa_data_dir, 'rate4.csv'));

@@ -1598,7 +1598,7 @@ classdef misc_emissions_analysis
             end
             
             function prof = scale_profile(loc, years, vcd_specie, extra_prof_species)
-                % computes a scales profile for the given year(s). the VCDs
+                % computes a scaled profile for the given year(s). the VCDs
                 % will be of the vcd_specie, the profile the sum of
                 % vcd_specie and extra_prof_species (cell array). make
                 % extra_prof_species an empty array if no extra species
@@ -1629,7 +1629,9 @@ classdef misc_emissions_analysis
                         prof_by_year(:,iyr) = load_prof_fxn(loc, all_years(iyr));
                     catch err
                         if strcmpi(err.identifier, 'MATLAB:load:couldNotReadFile')
-                            fprintf('Could not load %s for %d, will interpolate\n', spec, all_years(iyr));
+                            if i_loc == 1
+                                fprintf('Could not load %s for %d, will interpolate\n', spec, all_years(iyr));
+                            end
                         else
                             rethrow(err)
                         end
