@@ -754,7 +754,7 @@ classdef misc_oh_analysis
                 
                 % 1) figure out hours
                 loc_long = [locs.Longitude];
-                local_hrs = round(loc_long / 15) + local_hour;
+                local_hrs = local_hour - round(loc_long / 15);
                 local_hrs_to_load = unique(local_hrs);
                 
                 % 2) start looping over days
@@ -763,11 +763,7 @@ classdef misc_oh_analysis
                 dvec = make_datevec(sdates, edates);
                 
                 proto_array = repmat({nan(numel(dvec),1)},size(locs));
-                wrf_data = make_empty_struct_from_cell(veccat({'PHOTR_NO2'}, wrf_vars, proto_array);
-                
-                alpha_proc = misc_wrf_lifetime_analysis.setup_alpha_calc(2005);
-                phox_proc = misc_wrf_lifetime_analysis.setup_phox_calc(2005);
-                vocr_proc = misc_wrf_lifetime_analysis.setup_vocr_calc(2005);
+                wrf_data = make_empty_struct_from_cell(veccat({'PHOTR_NO2'}, wrf_vars), proto_array);
                 
                 last_year = nan;
                 for i_day = 1:numel(dvec)
@@ -783,7 +779,9 @@ classdef misc_oh_analysis
                         % to avoid double-loading certain variables (e.g. ndens)
                         % make a list of all unique variables to load from each
                         % file
-                        vars_to_load = unique(veccat({'PHOTR_NO2'}, wrf_vars, alpha_proc.variables, phox_proc.variables, vocr_proc.variables));
+                        vars_to_load = unique(veccat({'PHOTR_NO2'}, wrf_vars, alpha_proc.variables, phox_proc.variables, vocr_proc.variables, 'column'));
+                        xx = ~ismember(vars_to_load, {'alpha','phox','vocr'});
+                        vars_to_load = vars_to_load(xx);
                     end
                     
                     wrf_files = cell(size(local_hrs_to_load));
@@ -799,7 +797,8 @@ classdef misc_oh_analysis
                     end
                     
                     wrf_profiles = read_wrf_vars('', wrf_files, vars_to_load, 'squeeze', 1, 'as_struct');
-                    
+                   
+                    wrf_vars = veccat({'PHOTR_NO2'}, wrf_vars, 'column');
                     for i_var = 1:numel(wrf_vars)
                         this_var = wrf_vars{i_var};
                         switch lower(this_var)

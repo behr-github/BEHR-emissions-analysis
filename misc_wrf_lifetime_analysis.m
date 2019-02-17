@@ -91,6 +91,8 @@ classdef misc_wrf_lifetime_analysis
                     error('prod_or_loss %s not recognized', prod_or_loss);
             end
             
+            wi = misc_wrf_lifetime_analysis.load_test_wrf_file(avg_year);
+            wrf_vars = {wi.Variables.Name};
             xx = ~ismember(req_vars, wrf_vars);
             if any(xx)
                 warning('missing_var:prod_loss_calc', 'Missing the following variables in %1$d for %2$s calc - will not calculate %2$s: %3$s', avg_year, prod_or_loss, strjoin(req_vars(xx), ', '));
