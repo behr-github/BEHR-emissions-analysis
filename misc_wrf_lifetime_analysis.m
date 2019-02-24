@@ -325,6 +325,9 @@ classdef misc_wrf_lifetime_analysis
             
             function alpha = calc_alpha(Wrf)
                 alpha = Wrf.LNOXA ./ Wrf.PO3;
+                % should be
+                % r = Wrf.PO3 ./ Wrf.LNOXA;
+                % alpha = 2 ./ (2 + r);
             end
         end
         
@@ -689,7 +692,7 @@ classdef misc_wrf_lifetime_analysis
         
         function avg_prof = average_profiles_around_loc(loc, years, specie, varargin)
             [wrf_profiles, wrf_lon, wrf_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, specie, 'avg_levels', []);
-            avg_prof = average_wrf_data_around_loc(loc, wrf_profiles, wrf_lon, wrf_lat, varargin{:});
+            avg_prof = misc_wrf_lifetime_analysis.average_wrf_data_around_loc(loc, wrf_profiles, wrf_lon, wrf_lat, varargin{:});
         end
         
         function avg_prof = average_wrf_data_around_loc(loc, wrf_profiles, wrf_lon, wrf_lat, varargin)
@@ -877,6 +880,118 @@ classdef misc_wrf_lifetime_analysis
                 ylabel(sprintf('[%s] (molec. cm^{-3})', upper(specie)));
                 set(gca,'fontsize',16)
             end
+        end
+        
+        function figs = plot_wrf_trends(varargin)
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('variables', {'nox','hcho','ho','alpha','phox','tau','LNOXHNO3','lnox-hno3-calc','tau-ans','tau-hno3'});
+            p.addParameter('years', [2005,2007:2009,2011:2014]);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            locs = misc_emissions_analysis.cutdown_locs_by_index(misc_emissions_analysis.read_locs_file(), loc_inds);
+            variables = pout.variables;
+            years = pout.years;
+            
+            % Figure out which variables we actually need to load
+            
+            vars_to_load = {};
+            for i_var = 1:numel(variables)
+                if isempty(variables{i_var})
+                    continue
+                end
+                
+                switch lower(variables{i_var})
+                    case 'nox'
+                        append = {'no2','no'};
+                    case 'tau'
+                        append = {'no2','no','LNOXA','LNOXHNO3'};
+                    case 'tau-ans'
+                        append = {'no2', 'no', 'LNOXA'};
+                    case 'tau-hno3'
+                        append = {'no2', 'no', 'LNOXHNO3'};
+                    case 'lnox-hno3-calc'
+                        append = {'no2','ho','ndens','temperature'};
+                    case 'tau-hno3-calc'
+                        append = {'no2', 'ho', 'ndens', 'temperature', 'no2', 'no'};
+                    otherwise
+                        append = variables(i_var);
+                end
+                vars_to_load = veccat(vars_to_load, append, 'column');
+            end
+            vars_to_load = unique(vars_to_load);
+            
+            % Load the data. wrf_data will be 1-by-nlocs with fields for
+            % each variable loaded, which are 1-by-nyears arrays.
+            wrf_data_raw = make_empty_struct_from_cell(vars_to_load, repmat({nan(1,numel(years))}, size(locs)));
+            for i_yr = 1:numel(years)
+                fprintf('Loading %d\n', years(i_yr));
+                for i_var = 1:numel(vars_to_load)
+                    this_var = vars_to_load{i_var};
+                    [this_data, this_lon, this_lat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years(i_yr), this_var);
+                    for i_loc = 1:numel(locs)
+                        wrf_data_raw(i_loc).(this_var)(i_yr) = misc_wrf_lifetime_analysis.average_wrf_data_around_loc(locs(i_loc), this_data, this_lon, this_lat, 'avg_levels', 1:5);
+                    end
+                end
+            end
+            
+            % Now go back through and compute whatever needs computed and
+            % plot the trend at the same time
+            
+            figs = gobjects(size(locs));
+            if ~isvector(variables)
+                [m,n] = size(variables);
+            else
+                [m,n] = square_subplot_dims(numel(variables),'tall');
+            end
+            for i_loc = 1:numel(locs)
+                figs(i_loc) = figure;
+                for i_var = 1:numel(variables)
+                    this_var = variables{i_var};
+                    if isempty(this_var)
+                        continue
+                    end
+                    subplot(m, n, i_var);
+                    
+                    switch lower(this_var)
+                        case 'nox'
+                            value = wrf_data_raw(i_loc).no + wrf_data_raw(i_loc).no2;
+                        case 'tau'
+                            value = misc_oh_analysis.compute_wrf_tau(wrf_data_raw(i_loc), 'simple');
+                        case 'tau-ans'
+                            value = misc_oh_analysis.compute_wrf_tau(wrf_data_raw(i_loc), 'ANs');
+                        case 'tau-hno3'
+                            value = misc_oh_analysis.compute_wrf_tau(wrf_data_raw(i_loc), 'HNO3');
+                        case 'lnox-hno3-calc'
+                            value = misc_oh_analysis.get_loss_via_oh_no2(wrf_data_raw(i_loc));
+                        case 'tau-hno3-calc'
+                            value = misc_oh_analysis.compute_wrf_tau(wrf_data_raw(i_loc), 'no2+oh');
+                        otherwise
+                            value = wrf_data_raw(i_loc).(this_var);
+                    end
+                    plot(years, value, 'ko-');
+                    ylabel(upper(this_var));
+                    if i_var == 1
+                        title(locs(i_loc).ShortName);
+                    end
+                end
+                subplot_stretch(m/2,n);
+            end
+        end
+        
+        function fig = plot_no3_frac(years)
+            levels = 1:5;
+            [no3, xlon, xlat] = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, 'no3', 'avg_levels', levels);
+            no2 = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(years, 'no2', 'avg_levels', levels);
+            fig=figure;
+            pcolor(xlon,xlat, no3./no2);
+            shading flat
+            cb = colorbar;
+            cb.Label.String = 'NO_3/NO_3';
+            state_outlines('k');
+            title(sprintf_ranges(years));
         end
     end
 end

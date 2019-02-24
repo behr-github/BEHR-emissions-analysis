@@ -511,10 +511,40 @@ classdef misc_oh_analysis
             subplot_stretch(2,1);
         end
         
+        function fig = plot_wrf_hcho_vs_ss_hcho(year, varargin)
+            p = advInputParser;
+            p.addParameter('phox_mult', 1);
+            p.addParameter('alpha_eff', 0.3);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            alpha_eff = pout.alpha_eff;
+            phox_mult = pout.phox_mult;
+            
+            levels = 1:5;
+            ndens = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(year, 'ndens', 'avg_levels', levels);
+            hcho = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(year, 'hcho', 'avg_levels', levels);
+            phox = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(year, 'phox', 'avg_levels', levels);
+            vocr = misc_wrf_lifetime_analysis.load_wrf_profiles_for_years(year, 'vocr', 'avg_levels', levels);
+            
+            hcho = 1e-6 .* hcho .* ndens;
+            phox = 1e-12 .* phox .* ndens;
+            
+            hcho_ss = hcho_steady_state(vocr, phox * phox_mult, alpha_eff);
+            fig = figure;
+            scatter(hcho_ss(:), hcho(:), '.');
+            plot_fit_line(hcho_ss(:), hcho(:), 'regression', 'rma');
+            xlabel('Steady-state HCHO (molec. cm^{-3})')
+            ylabel('WRF HCHO (molec. cm^{-3})');
+            title(sprintf('\\alpha_{eff} = %.2f, P(HO_x) * %.2f', alpha_eff, phox_mult));
+        end
+        
         function figs = test_hox_solver_with_wrf(varargin)
             p = advInputParser;
             p.addParameter('loc_inds', 1:71);
-            p.addParameter('lifetime_mode', 'simple');
+            p.addParameter('lifetime_mode', 'no2+oh+ans'); % 'simple', 'complex', 'simple-pre', or 'complex-pre'
+            p.addParameter('plot_mode', '1:1'); % 1:1 or time_series
+            p.addFlag('three_year_win');
             p.parse(varargin{:});
             pout = p.Results;
             
@@ -531,16 +561,23 @@ classdef misc_oh_analysis
             % NOx lifetime may be loaded directly or calculated from the
             % loss diagnostics.
             
-            years = 2006:2013;
+            three_yr_windows = pout.three_year_win;
+            lifetime_mode = pout.lifetime_mode;
+            plot_mode = pout.plot_mode;
+            
+            if three_yr_windows
+                years = 2006:2013;
+            else
+                years = [2005, 2007:2009, 2011:2014];
+            end
             n_yrs = numel(years);
             
             loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
             locs = misc_emissions_analysis.cutdown_locs_by_index(misc_emissions_analysis.read_locs_file(), loc_inds);
             n_locs = numel(locs);
             
-            lifetime_mode = pout.lifetime_mode;
-            
             % Load data for each location we're testing
+            hno3_tau_mode = 'hno3';
             switch lower(lifetime_mode)
                 case 'simple'
                     lifetime_vars = {'LNOXA','LNOXHNO3'};
@@ -550,12 +587,18 @@ classdef misc_oh_analysis
                     lifetime_vars = {'nox_tau_simple'};
                 case 'complex-pre'
                     lifetime_vars = {'nox_tau_complex'};
+                case 'no2+oh'
+                    lifetime_vars = {'no2', 'ho', 'ndens', 'temperature'};
+                    hno3_tau_mode = 'no2+oh';
+                case 'no2+oh+ans'
+                    lifetime_vars = {'LNOXA', 'no2', 'ho', 'ndens', 'temperature'};
+                    hno3_tau_mode = 'no2+oh';
                 otherwise
                     error('No lifetime variables defined for lifetime_mode = "%s"', lifetime_mode);
             end
-            common_vars = {'nox', 'ho', 'vocr', 'hcho', 'temperature', 'ndens'};
+            common_vars = {'nox', 'ho', 'LNOXA', 'vocr', 'hcho', 'temperature', 'ndens'};
             calc_vars = {'tau'};
-            wrf_vars = veccat(common_vars, lifetime_vars);
+            wrf_vars = unique(veccat(common_vars, lifetime_vars));
             all_vars = veccat(wrf_vars, calc_vars);
             proto_array = repmat({nan(n_yrs,1)}, n_locs, 1);
             % the structure index will be the location, the arrays in each
@@ -563,18 +606,29 @@ classdef misc_oh_analysis
             wrf_data = make_empty_struct_from_cell(all_vars, proto_array);
             for i_yr=1:n_yrs
                 fprintf('Loading data for %d\n', years(i_yr));
-                year_window = misc_oh_analysis.year_window(years(i_yr));
-                wrf_locs = misc_emissions_analysis.average_profiles_for_locations(year_window, 'TWRF', locs, 'species', wrf_vars);
+                if three_yr_windows
+                    year_window = misc_oh_analysis.year_window(years(i_yr));
+                    wrf_locs = misc_emissions_analysis.average_profiles_for_locations(year_window, 'TWRF', locs, 'species', wrf_vars);
+                    wrf_locs = [wrf_locs.WRFData];
+                else
+                    year_window = years(i_yr);
+                    wrf_locs = misc_oh_analysis.load_wrf_avg(locs, wrf_vars, year_window, []);
+                end
+                
                 for i_loc = 1:n_locs
                     for i_var = 1:numel(wrf_vars)
                         this_var = wrf_vars{i_var};
-                        wrf_data(i_loc).(this_var)(i_yr) = wrf_locs(i_loc).WRFData.(this_var);
+                        wrf_data(i_loc).(this_var)(i_yr) = wrf_locs(i_loc).(this_var);
                     end
                 end
             end
             
             for i_loc = 1:n_locs
                 wrf_data(i_loc).tau = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), lifetime_mode);
+                wrf_data(i_loc).tau_hno3 = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), hno3_tau_mode);
+                wrf_data(i_loc).tau_ans = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), 'ans');
+                %wrf_data(i_loc).tau_oh_no2 = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), 'no2+oh');
+                %(i_loc).tau_oh_no2_ans = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), 'no2+oh+ans');
             end
             
             % Calculate the OH solution
@@ -584,33 +638,107 @@ classdef misc_oh_analysis
                 oh_solutions = make_empty_struct_from_cell({'hno3','invert_hcho'}, proto_array{1});
                 vocr_solutions = make_empty_struct_from_cell({'invert_hcho'}, proto_array{1});
                 
+                
                 % Can do the HNO3 solution easily
                 k_hno3 = KOHNO2a(wrf_data(i_loc).temperature, wrf_data(i_loc).ndens);
                 oh_solutions.hno3 = 1 ./ (k_hno3 .* wrf_data(i_loc).tau .* 3600);
                 this_nox = wrf_data(i_loc).nox .* wrf_data(i_loc).ndens .* 1e-6;
                 this_hcho = wrf_data(i_loc).hcho .* wrf_data(i_loc).ndens .* 1e-6;
-                for i_yr = 1:n_yrs
-                    
+                
+                oh_hcho = oh_solutions.invert_hcho;
+                vocr_hcho = vocr_solutions.invert_hcho;
+                phox_ss = proto_array{1};
+                tau_ss = proto_array{1};
+                tau_hno3_ss = proto_array{1};
+                tau_ans_ss = proto_array{1};
+                parfor i_yr = 1:n_yrs
+                    fprintf('Solving OH and VOCR for %d\n', years(i_yr));
                     [oh, ~, ~, soln] = hox_solve_tau_hcho_constraint(this_nox(i_yr), wrf_data(i_loc).tau(i_yr), this_hcho(i_yr), 0.04);
-                    oh_solutions.invert_hcho(i_yr) = oh;
-                    vocr_solutions.invert_hcho(i_yr) = soln.vocr;
+                    oh_hcho(i_yr) = oh;
+                    vocr_hcho(i_yr) = soln.vocr;
+                    phox_ss(i_yr) = soln.phox ./ (2e19*1e-12); %convert ~ to ppt/s to put on ~ same scale as vocr
+                    tau_ss(i_yr) = soln.tau;
+                    tau_hno3_ss(i_yr) = soln.tau_hno3;
+                    tau_ans_ss(i_yr) = soln.tau_ans;
                 end
+                oh_solutions.invert_hcho = oh_hcho;
+                vocr_solutions.invert_hcho = vocr_hcho;
                 
-                yyaxis left;
-                l = gobjects(5,1);
-                l(1) = line(years, wrf_data(i_loc).ho .* wrf_data(i_loc).ndens .* 1e-6, 'color', 'k', 'marker', '^', 'linewidth', 2);
-                l(2) = line(years, oh_solutions.hno3, 'color', 'k', 'marker', 'o', 'linewidth', 2);
-                l(3) = line(years, oh_solutions.invert_hcho, 'color', 'k', 'marker', '*', 'linewidth', 2);
-                ylabel('[OH] (molec. cm^{-3}');
+                % there's a bit of extra back-and-forth into the
+                % structure/out of the structure because of old refactoring
+                oh_ss = oh_solutions.invert_hcho;
+                oh_hno3 = oh_solutions.hno3;
+                oh_wrf = wrf_data(i_loc).ho .* wrf_data(i_loc).ndens .* 1e-6;
+                vocr_ss = vocr_solutions.invert_hcho;
+                vocr_wrf = wrf_data(i_loc).vocr;
+                tau_wrf = wrf_data(i_loc).tau;
+                tau_hno3_wrf = wrf_data(i_loc).tau_hno3;
+                tau_ans_wrf = wrf_data(i_loc).tau_ans;
                 
-                
-                yyaxis right;
-                l(4)=line(years, wrf_data(i_loc).vocr, 'color', 'r', 'marker', '^', 'linewidth', 2);
-                l(5)=line(years, vocr_solutions.invert_hcho, 'color', 'r', 'marker', '*', 'linewidth', 2);
-                ylabel('VOC_R (s^{-1})')
-                
-                legend(l, {'WRF OH', 'HNO_3 OH', 'HCHO SS OH', 'WRF VOC_R', 'HCHO SS VOC_R'});
-                title(locs(i_loc).ShortName);
+                if strcmpi(plot_mode, 'time_series')
+                    common_opts = {'markersize', 12, 'linewidth', 2};
+                    subplot(2,1,1);
+                    yyaxis left;
+                    l = gobjects(6,1);
+                    l(1) = line(years, oh_wrf, 'color', 'k', 'marker', '^', common_opts{:});
+                    l(2) = line(years, oh_hno3, 'color', 'k', 'marker', 'o', common_opts{:});
+                    l(3) = line(years, oh_hcho, 'color', 'k', 'marker', '*', common_opts{:});
+                    ylabel('[OH] (molec. cm^{-3}');
+                    
+                    
+                    yyaxis right;
+                    l(4)=line(years, vocr_wrf, 'color', 'r', 'marker', '^', 'linestyle', 'none', common_opts{:});
+                    l(5)=line(years, vocr_ss, 'color', 'r', 'marker', '*', 'linestyle', 'none', common_opts{:});
+                    l(6)=line(years, phox_ss, 'color', 'b', 'marker', '*', 'linestyle', 'none', common_opts{:});
+                    ylabel('VOC_R (s^{-1}) and P(HO_x) (ppt s^{-1})')
+                    
+                    legend(l, {'WRF OH', 'HNO_3 OH', 'HCHO SS OH', 'WRF VOC_R', 'HCHO SS VOC_R', 'HCHO SS P(HO_x)'}, 'location', 'eastoutside');
+                    title(locs(i_loc).ShortName);
+                    
+                    subplot(2,1,2);
+                    l2 = gobjects(6,1);
+                    l2(1) = line(years, tau_wrf, 'color', 'k', 'marker', 'o', common_opts{:});
+                    l2(2) = line(years, tau_hno3_wrf, 'color', 'k', 'marker', '^', common_opts{:});
+                    l2(3) = line(years, tau_ans_wrf, 'color', 'k', 'marker', '*', common_opts{:});
+                    l2(4) = line(years, tau_ss, 'color', 'r', 'marker', 'o', common_opts{:});
+                    l2(5) = line(years, tau_hno3_ss, 'color', 'r', 'marker', '^', common_opts{:});
+                    l2(6) = line(years, tau_ans_ss, 'color', 'r', 'marker', '*', common_opts{:});
+                    legend(l2, {'WRF total', 'WRF HNO_3', 'WRF ANs', 'SS total', 'SS HNO_3', 'SS ANs'}, 'location', 'eastoutside');
+                    ylabel('\tau (h)');
+                    
+                    subplot_stretch(2,1.5)
+                elseif strcmpi(plot_mode, '1:1')
+                    subplot(2,1,1);
+                    hold on
+                    l1 = gobjects(4,1);
+                    l1(1) = scatter(oh_wrf, oh_hno3, [], years, '^');
+                    l1(3) = scatter(oh_wrf, oh_ss, [], years, 'o', 'filled');
+                    [x,y,lstr_hno3] = calc_fit_line(oh_wrf, oh_hno3, 'regression', 'rma');
+                    l1(2) = line(x,y,'color', 'k', 'linestyle', '--', 'linewidth', 2);
+                    [x,y,lstr_hcho] = calc_fit_line(oh_wrf, oh_ss, 'regression', 'rma');
+                    l1(4) = line(x,y,'color', 'b', 'linestyle', '-.', 'linewidth', 2);
+                    legend(l1, {'HNO3', lstr_hno3, 'HCHO SS', lstr_hcho});
+                    cb = colorbar;
+                    cb.Label.String = 'Year';
+                    colormap copper
+                    xlabel('WRF OH (molec. cm^{-3})');
+                    ylabel('Solved OH (molec. cm^{-3})');
+                    title(locs(i_loc).ShortName);
+                    
+                    subplot(2,1,2);
+                    hold on
+                    l2 = gobjects(2,1);
+                    l2(1) = scatter(vocr_wrf, vocr_ss, [], years, 'filled');
+                    [x,y,lstr_vocr] = calc_fit_line(vocr_wrf, vocr_ss, 'regression', 'rma');
+                    l2(2) = line(x, y, 'color', 'r', 'linestyle', '--', 'linewidth', 2);
+                    legend(l2(2), {lstr_vocr});
+                    cb = colorbar;
+                    cb.Label.String = 'Year';
+                    colormap copper
+                    xlabel('WRF VOC_R (s^{-1})');
+                    ylabel('Solved VOC_R (s^{-1})');
+                    subplot_stretch(2,1);
+                end
             end
             
             
@@ -620,10 +748,26 @@ classdef misc_oh_analysis
             switch lower(lifetime_mode)
                 case 'simple'
                     loss = Wrf.LNOXHNO3 + Wrf.LNOXA;
-                    nox = get_nox();
+                    nox = get_nox(Wrf);
+                    tau = nox ./ loss ./ 3600;
+                case 'ans'
+                    loss = Wrf.LNOXA;
+                    nox = get_nox(Wrf);
+                    tau = nox ./ loss ./ 3600;
+                case 'hno3'
+                    loss = Wrf.LNOXHNO3;
+                    nox = get_nox(Wrf);
+                    tau = nox ./ loss ./ 3600;
+                case 'no2+oh'
+                    loss = misc_oh_analysis.get_loss_via_oh_no2(Wrf);
+                    nox = get_nox(Wrf);
+                    tau = nox ./ loss ./ 3600;
+                case 'no2+oh+ans'
+                    loss = misc_oh_analysis.get_loss_via_oh_no2(Wrf) + Wrf.LNOXA;
+                    nox = get_nox(Wrf);
                     tau = nox ./ loss ./ 3600;
                 case 'complex'
-                    loss = Wrf.total_loss;% - Wrf.total_prod;
+                    loss = Wrf.total_loss - Wrf.total_prod;
                     nox = get_nox();
                     tau = nox ./ loss ./ 3600;
                 case 'simple-pre'
@@ -634,13 +778,75 @@ classdef misc_oh_analysis
                     error('No tau computation for lifetime_mode = "%s"', lifetime_mode);
             end
             
-            function nox = get_nox()
+            function nox = get_nox(Wrf)
                 if isfield(Wrf, 'nox')
                     nox = Wrf.nox;
                 else
                     nox = Wrf.no + Wrf.no2;
                 end
             end
+            
+            
+        end
+        
+        function value = get_loss_via_oh_no2(Wrf)
+            T = Wrf.temperature;
+            ndens = Wrf.ndens;
+            k = wrf_rate_expr('TROE', 1.49e-30 , 1.8 , 2.58e-11 , 0.0, T, ndens);
+            oh_nd = Wrf.ho .* 1e-6 .* ndens;
+            no2_nd = Wrf.no2 .* 1e-6 .* ndens;
+            loss_nd = k .* oh_nd .* no2_nd;
+            value = loss_nd ./ ndens .* 1e6; % return in ppm/s
+        end
+        
+        function compare_hox_ss_models(varargin)
+            p = advInputParser;
+            p.addParameter('var1','nox'); % this and var2 can be nox, phox, vocr, or alpha
+            p.addParameter('var2','phox');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            var1 = pout.var1;
+            var2 = pout.var2;
+            
+            ppbMolec = 2.45e10;
+            defaults.nox = logspace(-1,1,20)*2; % in ppb
+            defaults.vocr = 1:20;
+            defaults.phox = 5e6:1e6:5e7;
+            defaults.alpha = 0.01:0.01:0.1;
+            
+            fns = fieldnames(defaults);
+            xx = ~ismember(fns, {var1, var2});
+            var34 = fns(xx);
+            
+            [x,y] = meshgrid(defaults.(var1), defaults.(var2));
+            z1 = repmat(mean(defaults.(var34{1})), size(x));
+            z2 = repmat(mean(defaults.(var34{2})), size(x));
+            vars = veccat({var1, var2}, var34, 'column');
+            values = {x, y, z1, z2};
+            
+            nox = values{strcmp(vars,'nox')};
+            vocr = values{strcmp(vars,'vocr')};
+            phox = values{strcmp(vars, 'phox')};
+            alpha = values{strcmp(vars, 'alpha')};
+            
+            oh_a = nan(size(x));
+            oh_b = nan(size(x));
+            parfor i=1:numel(x)
+                fprintf('OH %d of %d\n', i, numel(x));
+                oh_a(i) = hox_ss_solver(nox(i) * ppbMolec, phox(i), vocr(i), alpha(i));
+                [~, ~, oh_b(i)] = Analytic_P_O3_wNOx(nox(i), phox(i), vocr(i), alpha(i), 4);
+            end
+            
+            figure;
+            oh_diff = oh_a - oh_b;
+            contourf(x,y,oh_diff);
+            cb = colorbar;
+            caxis(calc_plot_limits(oh_diff(:),'diff'));
+            colormap(blue_red_cmap);
+            cb.Label.String = '\Delta [OH] (molec. cm^{-3}, solver - Murphy)';
+            xlabel(upper(var1));
+            ylabel(upper(var2));
         end
         
         function [wrf_locs, figs] = test_hox_ss_with_wrf(varargin)
@@ -659,6 +865,8 @@ classdef misc_oh_analysis
             p.addParameter('local_hour', 13); % local hour to use for 'inst' mode
             p.addParameter('years', [2005, 2007:2009, 2011:2014]); % what years to use. if 'inst', see next option. Skip 2006 and 2010 by default b/c they lack full WRF output
             p.addParameter('inst_dates', {'04-01','09-30'}); % what days of year (in mm-dd format) to use for 'inst'
+            p.addParameter('oh_model','solver'); % 'solver' or 'murphy'
+            p.addParameter('vocr_mult', 1);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -669,6 +877,8 @@ classdef misc_oh_analysis
             local_hour = pout.local_hour;
             years = pout.years;
             inst_dates = pout.inst_dates;
+            oh_model = pout.oh_model;
+            vocr_mult = pout.vocr_mult;
             
             % First need to get the locations
             locs = misc_emissions_analysis.cutdown_locs_by_index(misc_emissions_analysis.read_locs_file(), loc_inds);
@@ -677,7 +887,7 @@ classdef misc_oh_analysis
             wrf_vars = {'no', 'no2', 'ho', 'vocr', 'alpha', 'phox', 'ndens', 'LNOXA', 'LNOXHNO3'};
             switch lower(time_mode)
                 case 'avg'
-                    wrf_locs = load_wrf_avg(locs);
+                    wrf_locs = misc_oh_analysis.load_wrf_avg(locs, wrf_vars, years, avg_radius);
                 case 'inst'
                     wrf_locs = load_wrf_inst(locs);
                 otherwise
@@ -709,41 +919,28 @@ classdef misc_oh_analysis
                 
                 figs(j_loc) = figure;
                 subplot(2,1,1);
-                scatter(wrf_locs(j_loc).ho * 1e6, wrf_locs(j_loc).ss_oh * 1e6, [], col_var);
-                plot_fit_line(wrf_locs(j_loc).ho * 1e6, wrf_locs(j_loc).ss_oh * 1e6, 'one2one', false, 'regression', 'rma');
+                oh_wrf = wrf_locs(j_loc).ho .* wrf_locs(j_loc).ndens * 1e-6;
+                oh_ss = wrf_locs(j_loc).ss_oh .* wrf_locs(j_loc).ndens * 1e-6;
+                scatter(oh_wrf, oh_ss, [], col_var);
+                plot_fit_line(oh_wrf, oh_ss, 'one2one', false, 'regression', 'rma', 'legend_loc', 'best');
                 cb = colorbar;
-                colormap jet
+                colormap copper
                 cb.Label.String = col_label;
-                xlabel('WRF [OH] (ppt)');
-                ylabel('Steady state [OH] (ppt)');
+                xlabel('WRF [OH] (molec cm^{-3})');
+                ylabel('Steady state [OH] (molec cm^{-3})');
                 title(sprintf('%s (radius %s)', locs(j_loc).ShortName, radius_str));
                 
                 subplot(2,1,2);
                 scatter(wrf_locs(j_loc).wrf_tau, wrf_locs(j_loc).ss_tau, [], col_var);
-                plot_fit_line(wrf_locs(j_loc).wrf_tau, wrf_locs(j_loc).ss_tau, 'one2one', false, 'regression', 'rma');
+                plot_fit_line(wrf_locs(j_loc).wrf_tau, wrf_locs(j_loc).ss_tau, 'one2one', false, 'regression', 'rma', 'legend_loc', 'best');
                 cb = colorbar;
-                colormap jet
+                colormap copper
                 cb.Label.String = col_label;
                 xlabel('WRF NO_x lifetime (h)');
                 ylabel('Steady state NOx lifetime (h)');
             end
             
             wrf_locs = copy_structure_fields(locs, wrf_locs, 'missing');
-            
-            function wrf_data = load_wrf_avg(locs)
-                proto_array = repmat({nan(numel(years),1)},size(locs));
-                wrf_data = make_empty_struct_from_cell(wrf_vars, proto_array);
-                for i_loc = 1:numel(locs)
-                    fprintf('Loading: %.1f%%\n', (i_loc - 1)/numel(locs)*100);
-                    for i_var = 1:numel(wrf_vars)
-                        this_var = wrf_vars{i_var};
-                        for i_yr = 1:numel(years)
-                            wrf_data(i_loc).(this_var)(i_yr) = misc_wrf_lifetime_analysis.average_profiles_around_loc(locs(i_loc),...
-                                years(i_yr), this_var, 'radius', avg_radius, 'avg_levels', 1:5);
-                        end
-                    end
-                end
-            end
             
             function wrf_data = load_wrf_inst(locs)
                 % 1) Figure out what hours need loaded
@@ -831,15 +1028,25 @@ classdef misc_oh_analysis
             
             
             function oh = solve_oh(wrf_data)
-                nox = (wrf_data.no + wrf_data.no2) .* 1e-6 .* wrf_data.ndens;
-                vocr = wrf_data.vocr;
+                switch lower(oh_model)
+                    case 'solver'
+                        nox = (wrf_data.no + wrf_data.no2) .* 1e-6 .* wrf_data.ndens;
+                        oh_calc_fxn = @hox_ss_solver;
+                    case 'murphy'
+                        nox = (wrf_data.no + wrf_data.no2) .* 1e3;
+                        oh_calc_fxn = @Analytic_P_O3_wNOx;
+                    otherwise
+                        error('oh_model "%s" not recognized');
+                end
+                ratio = wrf_data.no2 ./ wrf_data.no;
+                vocr = wrf_data.vocr * vocr_mult;
                 % phox in ppt/s -> molec/cm3/s
                 phox = wrf_data.phox .* wrf_data.ndens .* 1e-12;
-                alpha = wrf_data.alpha;
+                alpha = 2 ./ (1./wrf_data.alpha+2); % calculated alpha as LNOXA./PO3, which is slightly wrong
                 oh = nan(size(nox));
                 for i = 1:numel(oh)
                     try
-                        oh(i) = hox_ss_solver(nox(i), phox(i), vocr(i), alpha(i));
+                        oh(i) = oh_calc_fxn(nox(i), phox(i), vocr(i), alpha(i), ratio(i));
                     catch err
                         if strcmp(err.identifier, 'hox_ss_solver:invalid_input')
                             continue  % input invalid (probably a NaN). Can't compute OH
@@ -854,10 +1061,10 @@ classdef misc_oh_analysis
             function tau = solve_tau(wrf_data)
                 nox = (wrf_data.no + wrf_data.no2) .* 1e-6 .* wrf_data.ndens;
                 no2_no = wrf_data.no2 ./ wrf_data.no;
-                vocr = wrf_data.vocr;
+                vocr = wrf_data.vocr * vocr_mult;
                 % phox in ppt/s -> molec/cm3/s
                 phox = wrf_data.phox .* wrf_data.ndens .* 1e-12;
-                alpha = wrf_data.alpha;
+                alpha = 2 ./ (1./wrf_data.alpha+2); % calculated alpha as LNOXA./PO3, which is slightly wrong
                 tau = nan(size(nox));
                 for i = 1:numel(tau)
                     tau(i) = nox_lifetime(nox(i), 'phox', phox(i), 'alpha', alpha(i), 'vocr', vocr(i), 'no2_no', no2_no(i));
@@ -1075,6 +1282,30 @@ classdef misc_oh_analysis
                             if isfield(weekend_oh, this_var)
                                 data.(this_var)(i_yr, i_loc, i_type, 2) = weekend_oh.(this_var);
                             end
+                        end
+                    end
+                end
+            end
+        end
+        
+        function wrf_data = load_wrf_avg(locs, wrf_vars, years, avg_radius)
+            avg_levels = 1:5;
+            proto_array = repmat({nan(numel(years),1)},size(locs));
+            wrf_data = make_empty_struct_from_cell(wrf_vars, proto_array);
+            for i_loc = 1:numel(locs)
+                fprintf('Loading: %.1f%%\n', (i_loc - 1)/numel(locs)*100);
+                for i_yr = 1:numel(years)
+                    for i_var = 1:numel(wrf_vars)
+                        this_var = wrf_vars{i_var};
+                        if strcmpi(this_var, 'nox')
+                            no = misc_wrf_lifetime_analysis.average_profiles_around_loc(locs(i_loc),...
+                                years(i_yr), 'no', 'radius', avg_radius, 'avg_levels', avg_levels);
+                            no2 = misc_wrf_lifetime_analysis.average_profiles_around_loc(locs(i_loc),...
+                                years(i_yr), 'no2', 'radius', avg_radius, 'avg_levels', avg_levels);
+                            wrf_data(i_loc).(this_var)(i_yr) = no + no2;
+                        else
+                            wrf_data(i_loc).(this_var)(i_yr) = misc_wrf_lifetime_analysis.average_profiles_around_loc(locs(i_loc),...
+                                years(i_yr), this_var, 'radius', avg_radius, 'avg_levels', avg_levels);
                         end
                     end
                 end
