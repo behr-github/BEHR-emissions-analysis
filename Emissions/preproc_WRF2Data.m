@@ -24,20 +24,22 @@ function [  ] = preproc_WRF2Data( start_dates, end_dates, save_path, varargin )
 E = JLLErrors;
 
 p = advInputParser;
-p.addParameter('variables', {'no2_vcd'});
+p.addParameter('variables', {'no2_vcds'});
 p.addParameter('avg_levels', 'all');
+p.parse(varargin{:});
+pout = p.Results;
 
 variables = pout.variables;
 avg_levels = pout.avg_levels;
 
-avg_proc.no2_vcd = struct('variables', {'no2', 'pres'}, 'proc_fxn', @wrf_no2_vcd);
+avg_proc.no2_vcds = struct('variables', {{'no2_ndens', 'z', 'z_center'}}, 'proc_fxn', @wrf_no2_vcd);
 
 dvec = make_datevec(start_dates, end_dates);
 WRFFiles = BEHRMatchedWRFFiles('region', 'us');
 for d=1:numel(dvec)
     fprintf('Working on %s\n', datestr(dvec(d)));
     day_avg = wrf_time_average(dvec(d), dvec(d), variables, 'processing', avg_proc, 'matched_wrf_files', WRFFiles);
-    [xloncorn, xlatcorn] = wrf_grid_corners(results.XLONG, results.XLAT);
+    [xloncorn, xlatcorn] = wrf_grid_corners(day_avg.XLONG, day_avg.XLAT);
     Data = struct('Latitude', day_avg.XLONG, 'Longitude', day_avg.XLAT,...
         'FoV75CornerLongitude', xloncorn, 'FoV75CornerLatitude', xlatcorn,...
         'Areaweight', ones(size(day_avg.XLONG)));
@@ -70,11 +72,25 @@ end
 end
 
 function vcd = wrf_no2_vcd(Wrf)
-no2 = permute(Wrf.no2, [3 1 2]);
-pres = permute(Wrf.pres, [3 1 2]);
-sz = size(no2);
-vcd = nan(sz(2:3));
-for i=1:numel(no2)
-    vcd(i) = integPr2(no2(:,i)*1e-6, pres(:,i), pres(1,i));
+perm_vec = [3 1 2 4];
+
+z = permute(Wrf.z, perm_vec);
+z_center = permute(Wrf.z_center, perm_vec);
+no2_ndens = permute(Wrf.no2_ndens, perm_vec);
+
+sz = size(no2_ndens);
+% wrf_day_avg needs time in the 4th dimension
+vcd = nan([sz(2:3),1,sz(4)]);
+
+for i=1:numel(vcd)
+    no2_interp = nan(size(z(:,i)));
+    no2_interp(2:end-1) = interp1(z_center(:,i), no2_ndens(:,i), z(2:end-1,i));
+    % use constant extrapolation
+    no2_interp(1) = no2_ndens(1);
+    no2_interp(end) = no2_ndens(end);
+    % z in meters, need to integrate in cm
+    vcd(i) = trapz(z(:,i)*100, no2_interp);
 end
+
+
 end
