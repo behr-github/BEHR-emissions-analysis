@@ -1,72 +1,80 @@
-function [  ] = preproc_WRF2Data(  )
+function [  ] = preproc_WRF2Data( start_dates, end_dates, save_path, varargin )
 %PREPROC_WRF2DATA Process WRF BEHR output into Data structures
-%   The goal here is to get WRF data into a format that can be used to
-%   calculate line densities as a sort of a priori-less dataset to compare
-%   agains the various a priori results. This will use WRF files already
-%   processes by the (slurm)run_wrf_output.sh file, since we need to be
-%   able to compute NO2 columns.
+%   PREPROC_WRF2DATA( START_DATES, END_DATES, SAVE_PATH ) Will process WRF
+%   data for every day in the time range(s) defined by START_DATES and
+%   END_DATES, which may be any format understood by MAKE_DATEVEC. NO2 VCDs
+%   computed from the WRF files that match up with OMI overpass times will
+%   be computed and a day average saved as "WRF_PseudoBEHR_yyyymmdd.mat" in
+%   the directory specified by SAVE_PATH.
+%
+%   Parameters:
+%
+%       'variables' - a cell array of WRF variables to store in the output
+%       files. Any variable present in the WRF file or which can be
+%       computed by READ_WRF_PREPROC is allowed. In addition 'no2_vcd',
+%       which is the only default variable included, will compute NO2 VCDs
+%       using INTEGPR2.
+%
+%       'avg_levels' - controls what levels of 3D WRF variables are
+%       averaged to produce 2D output arrays. 'all' (default) will average
+%       over all levels, otherwise this should be a vector specifying the
+%       levels by index, e.g. 1:5 to average over the first five levels.
+%       You may pass an empty array to skip averaging.
 
-wrf_path = '/Volumes/share2/USERS/LaughnerJ/WRF/E_US_BEHR/hourly/';
-save_path = '/Users/Josh/Documents/MATLAB/BEHR/Workspaces/Wind speed/SE US WRF Hourly';
-allowed_hours = 19; % can be an array of UTC hours to include; or an empty array to use all. 
-% Note that line density calculation uses all swaths (which is how UTC
-% hours are saved) so using all hours will end up giving an average over
-% several hours, which isn't ideal for comparison against satellite
-% measurements.
-start_date = '2013-06-01';
-end_date = '2013-08-30';
+E = JLLErrors;
 
-F = dir(fullfile(wrf_path,'WRF_BEHR*.nc'));
-sdnum = datenum(start_date);
-ednum = datenum(end_date);
-for a=1:numel(F)
-    [s,e] = regexp(F(a).name,'\d\d\d\d-\d\d-\d\d');
-    dnum = datenum(F(a).name(s:e));
-    if dnum < sdnum || dnum > ednum
-        continue
+p = advInputParser;
+p.addParameter('variables', {'no2_vcd'});
+p.addParameter('avg_levels', 'all');
+
+variables = pout.variables;
+avg_levels = pout.avg_levels;
+
+avg_proc.no2_vcd = struct('variables', {'no2', 'pres'}, 'proc_fxn', @wrf_no2_vcd);
+
+dvec = make_datevec(start_dates, end_dates);
+WRFFiles = BEHRMatchedWRFFiles('region', 'us');
+for d=1:numel(dvec)
+    fprintf('Working on %s\n', datestr(dvec(d)));
+    day_avg = wrf_time_average(dvec(d), dvec(d), variables, 'processing', avg_proc, 'matched_wrf_files', WRFFiles);
+    [xloncorn, xlatcorn] = wrf_grid_corners(results.XLONG, results.XLAT);
+    Data = struct('Latitude', day_avg.XLONG, 'Longitude', day_avg.XLAT,...
+        'FoV75CornerLongitude', xloncorn, 'FoV75CornerLatitude', xlatcorn,...
+        'Areaweight', ones(size(day_avg.XLONG)));
+    for i_var = 1:numel(variables)
+        this_var = variables{i_var};
+        value = day_avg.(this_var);
+        if ndims(value) > 3
+            E.notimplemented('Value averaged from WRF files has >3 dimensions');
+        elseif ~ismatrix(value) % if 3d
+            if ischar(avg_levels) && strcmpi(avg_levels, 'all')
+                levels = 1:size(value,3);
+            elseif ischar(avg_levels)
+                E.badinput('The only string recognized for "avg_levels" is "all"')
+            else
+                levels = avg_levels;
+            end
+            if ~isempty(levels)
+                value = nanmean(value(:,:,avg_levels), 3);
+            end
+        end
+        Data.(this_var) = value;
     end
     
-    % Get the geographic and temporal information and the NO2 tropospheric
-    % columns
-    [xlon, xlat, z, utchr] = read_wrf_vars(wrf_path, F(a), {'XLONG','XLAT','z','utchr'});
-    xlon = xlon(:,:,1); % these don't change with time.
-    xlat = xlat(:,:,1);
-    z = z(:,:,1,1);
-    
-    [xloncorn, xlatcorn] = wrf_grid_corners(xlon(:,:,1), xlat(:,:,1));
-    trop_no2 = compute_wrf_trop_colums(fullfile(wrf_path,F(a).name));
-    surfpres = 1013*exp(-z ./ 7400);
-    
-    % These are the fields expected by hdf_quadrangle_OMI_winds, which is
-    % used to grid the Data structures after rotating the pixels. Clouds
-    % and quality flags are set to 0 to indicate that all "pixels" are
-    % valid. Cloud pressure is set to 400 hPa as a fill value; it shouldn't
-    % be used since cloud fractions are 0. VZA needs to be 1 because a
-    % later step filters out large pixels by VZA >= 60 deg and also ignores
-    % swaths with all VZA = 0 (because at some point in BEHR's life that
-    % meant that the swath hadn't really been processed)
-    nanfill = nan(size(xlon));
-    zerofill = zeros(size(xlon));
-    onefill = ones(size(xlon));
-    Data = struct('Latitude',xlat,'Longitude',xlon,'Latcorn',xlatcorn,'Loncorn',xloncorn,...
-        'BEHRColumnAmountNO2Trop',nanfill,'ViewingZenithAngle',onefill,'SolarZenithAngle',nanfill,'AMFTrop',nanfill,'CloudFraction',zerofill,...
-        'CloudRadianceFraction',zerofill,'CloudPressure',400*onefill,'ColumnAmountNO2Trop',nanfill,'RelativeAzimuthAngle',nanfill,'MODISAlbedo',nanfill,...
-        'GLOBETerpres',surfpres,'BEHRAMFTrop',nanfill,'vcdQualityFlags',zerofill,'XTrackQualityFlags',zerofill,'UTC_hr',[]);
-    
-    u_utchrs = unique(utchr);
-    u_utchrs = u_utchrs(ismember(u_utchrs, allowed_hours));
-    Data = repmat(Data,numel(u_utchrs),1);
-    for s=1:numel(Data)
-        tt = utchr == u_utchrs(s);
-        Data(s).BEHRColumnAmountNO2Trop = nanmean(trop_no2(:,:,tt),3);
-        Data(s).UTC_hr = u_utchrs(s);
-    end
-    
-    save_name = sprintf('WRF_EMGData_%04d%02d%02d.mat',year(dnum),month(dnum),day(dnum));
-    fprintf('Saving %s\n',fullfile(save_path,save_name));
+    save_name = sprintf('WRF_PseudoBEHR_%04d%02d%02d.mat',year(dvec(d)),month(dvec(d)),day(dvec(d)));
+    fprintf('    Saving %s\n',fullfile(save_path,save_name));
     save(fullfile(save_path,save_name),'Data');
 end
 
 
 end
 
+function vcd = wrf_no2_vcd(Wrf)
+no2 = permute(Wrf.no2, [3 1 2]);
+pres = permute(Wrf.pres, [3 1 2]);
+sz = size(no2);
+vcd = nan(sz(2:3));
+for i=1:numel(no2)
+    vcd(i) = integPr2(no2(:,i)*1e-6, pres(:,i), pres(1,i));
+end
+end
