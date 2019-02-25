@@ -24,15 +24,16 @@ function [  ] = preproc_WRF2Data( start_dates, end_dates, save_path, varargin )
 E = JLLErrors;
 
 p = advInputParser;
-p.addParameter('variables', {'no2_vcd'});
+p.addParameter('variables', {'no2_vcds'});
 p.addParameter('avg_levels', 'all');
-
+p.parse(varargin{:});
+pout = p.Results;
 variables = pout.variables;
 avg_levels = pout.avg_levels;
 
 data_vars = veccat({'Date', 'Longitude', 'Latitude', 'FoV75CornerLongitude', 'FoV75CornerLatitude', 'Areaweight'}, variables);
 
-avg_proc.no2_vcd = struct('variables', {'no2', 'pres'}, 'proc_fxn', @wrf_no2_vcd);
+avg_proc.no2_vcds = struct('variables', {{'no2_ndens', 'z', 'z_center'}}, 'proc_fxn', @wrf_no2_vcd);
 
 dvec = make_datevec(start_dates, end_dates);
 WRFFiles = BEHRMatchedWRFFiles('region', 'us');
@@ -43,8 +44,8 @@ for d=1:numel(dvec)
     for i_orbit = 1:numel(behr_data)
         swath_lon_edge = edge_to_vector(behr_data(i_orbit).Longitude);
         swath_lat_edge = edge_to_vector(behr_data(i_orbit).Latitude);
-        wrf_lon = ncread(todays_wrf_files{i_orbit}, 'XLONG');
-        wrf_lat = ncread(todays_wrf_files{i_orbit}, 'XLAT');
+        wrf_lon = double(ncread(todays_wrf_files{i_orbit}, 'XLONG'));
+        wrf_lat = double(ncread(todays_wrf_files{i_orbit}, 'XLAT'));
         [wrf_loncorn, wrf_latcorn] = wrf_grid_corners(wrf_lon, wrf_lat);
         
         xx = inpolygon(wrf_lon, wrf_lat, swath_lon_edge, swath_lat_edge);
@@ -69,11 +70,11 @@ for d=1:numel(dvec)
                 value = nanmean(value, 3);
             elseif ischar(avg_levels)
                 E.badinput('The only recognized string for "avg_levels" is "all"')
-            else
+            elseif ~ismatrix(value)
                 value = nanmean(value(:,:,avg_levels),3);
             end
             
-            Data(i_orbit).(this_var) = value;
+            Data(i_orbit).(this_var) = double(value);
         end
     end
     save_name = sprintf('WRF_PseudoBEHR_%04d%02d%02d.mat',year(dvec(d)),month(dvec(d)),day(dvec(d)));
@@ -85,11 +86,24 @@ end
 end
 
 function vcd = wrf_no2_vcd(Wrf)
-no2 = permute(Wrf.no2, [3 1 2]);
-pres = permute(Wrf.pres, [3 1 2]);
-sz = size(no2);
+perm_vec = [3 1 2 4];
+
+z = permute(Wrf.z, perm_vec);
+z_center = permute(Wrf.z_center, perm_vec);
+no2_ndens = permute(Wrf.no2_ndens, perm_vec);
+
+sz = size(no2_ndens);
+% wrf_day_avg needs time in the 4th dimension
 vcd = nan(sz(2:3));
-for i=1:numel(no2)
-    vcd(i) = integPr2(no2(:,i)*1e-6, pres(:,i), pres(1,i));
+
+for i=1:numel(vcd)
+    no2_interp = nan(size(z(:,i)));
+    no2_interp(2:end-1) = interp1(z_center(:,i), no2_ndens(:,i), z(2:end-1,i));
+    % use constant extrapolation
+    no2_interp(1) = no2_ndens(1);
+    no2_interp(end) = no2_ndens(end);
+    % z in meters, need to integrate in cm
+    vcd(i) = trapz(z(:,i)*100, no2_interp);
 end
+
 end
