@@ -48,13 +48,19 @@ for d=1:numel(dvec)
         wrf_lat = double(ncread(todays_wrf_files{i_orbit}, 'XLAT'));
         [wrf_loncorn, wrf_latcorn] = wrf_grid_corners(wrf_lon, wrf_lat);
         
-        xx = inpolygon(wrf_lon, wrf_lat, swath_lon_edge, swath_lat_edge);
+        [xx, yy] = complete_rows(inpolygon(wrf_lon, wrf_lat, swath_lon_edge, swath_lat_edge));
+        % Need to keep complete
         Data(i_orbit).Date = datestr(dvec(d));
-        Data(i_orbit).Longitude = wrf_lon(xx);
-        Data(i_orbit).Latitude = wrf_lat(xx);
-        Data(i_orbit).FoV75CornerLongitude = wrf_loncorn(:,xx);
-        Data(i_orbit).FoV75CornerLatitude = wrf_latcorn(:,xx);
-        Data(i_orbit).Areaweight = ones(size(Data(i_orbit).Longitude));
+        Data(i_orbit).Longitude = wrf_lon(xx,yy);
+        Data(i_orbit).Latitude = wrf_lat(xx,yy);
+        Data(i_orbit).FoV75CornerLongitude = wrf_loncorn(:,xx,yy);
+        Data(i_orbit).FoV75CornerLatitude = wrf_latcorn(:,xx,yy);
+        
+        aw = ones(size(Data(i_orbit).Longitude));
+        outside = ~inpolygon(Data(i_orbit).Longitude, Data(i_orbit).Latitude, swath_lon_edge, swath_lat_edge);
+        aw(outside) = 0;
+        Data(i_orbit).Areaweight = aw;
+        
         for i_var = 1:numel(variables)
             this_var = variables{i_var};
             if isfield(avg_proc, this_var)
@@ -74,7 +80,8 @@ for d=1:numel(dvec)
                 value = nanmean(value(:,:,avg_levels),3);
             end
             
-            Data(i_orbit).(this_var) = double(value);
+            value = double(value(xx,yy));
+            Data(i_orbit).(this_var) = double(value(xx));
         end
     end
     save_name = sprintf('WRF_PseudoBEHR_%04d%02d%02d.mat',year(dvec(d)),month(dvec(d)),day(dvec(d)));
@@ -106,4 +113,9 @@ for i=1:numel(vcd)
     vcd(i) = trapz(z(:,i)*100, no2_interp);
 end
 
+end
+
+function [xx,yy] = complete_rows(ii)
+xx = any(ii,1);
+yy = any(ii,2);
 end
