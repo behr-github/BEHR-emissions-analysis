@@ -33,6 +33,15 @@ function [ OMI ] = rotate_plume( Data, center_lon, center_lat, theta, varargin )
 %       pixels_in_box - if true, only returns the logical array (the same
 %       size as Data.Longitude and Data.Latitude) that indicates which
 %       pixels are inside the box and pass the VZA criterion.
+%
+%       grid_control - if the string 'behr' (default), then PSM_WRAPPER is
+%       used to grid the NO2 columns in CVM mode. If a cell array of fields
+%       in Data, then CVM_GENERIC_WRAPPER is used to grid each field in the
+%       cell array.
+%
+%       grid_method - how gridding is done. Default, 'cvm' uses the
+%       constant value method gridding from BEHR-PSM-Gridding. 'interp'
+%       uses interpolation to the final lat/lon instead.
 
 
 %   Original code from Luke Valin:
@@ -99,6 +108,8 @@ p.addParameter('vza_crit',60);
 p.addParameter('loncorn', 'FoV75CornerLongitude');
 p.addParameter('latcorn', 'FoV75CornerLatitude');
 p.addParameter('pixels_in_box', false);
+p.addParameter('grid_control', 'behr');
+p.addParameter('grid_method', 'cvm');
 p.addParameter('DEBUG_LEVEL', 2);
 
 p.parse(varargin{:});
@@ -108,6 +119,8 @@ vza_crit = pout.vza_crit;
 loncorn_field = pout.loncorn;
 latcorn_field = pout.latcorn;
 only_pixels_in_box = pout.pixels_in_box;
+grid_control = pout.grid_control;
+grid_method = pout.grid_method;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 E = JLLErrors;
@@ -177,7 +190,12 @@ end
 % Remove pixels with VZA greater than the specified criteria which defaults
 % to 60 degrees. Do any data field that is the 2D shape, and avoid any flag
 % fields, because they will cause a Python error on the CVM side.
-vv = Data.ViewingZenithAngle > vza_crit;
+if isfield(Data, 'ViewingZenithAngle')
+    vv = Data.ViewingZenithAngle > vza_crit;
+else
+    warning('rotate_plume:no_vza', 'Data does not have the field ViewingZenithAngle; skipping VZA check');
+    vv = false(size(Data.Longitude));
+end
 fns = fieldnames(Data);
 for f=1:numel(fns)
     if isequal(size(Data.(fns{f})), size(vv)) && isnumeric(Data.(fns{f})) && ~ismember(fns{f}, BEHR_publishing_gridded_fields.flag_vars)
@@ -214,7 +232,52 @@ latmin = center_lat + y_box(1);  latmax = center_lat + y_box(3);
 resolution = 0.05;
 BoxGrid = GlobeGrid(resolution, 'domain', [lonmin, lonmax, latmin, latmax]);
 
-OMI = psm_wrapper(Data, BoxGrid, 'only_cvm', true, 'DEBUG_LEVEL', DEBUG_LEVEL);
+if strcmpi(grid_method, 'cvm')
+    OMI = grid_by_cvm(Data, BoxGrid);
+elseif strcmpi(grid_method, 'interp')
+    OMI = grid_by_interp(Data, BoxGrid);
+end
+
+    function OMI = grid_by_cvm(Data, BoxGrid)
+        if strcmpi(grid_control, 'behr')
+            OMI = psm_wrapper(Data, BoxGrid, 'only_cvm', true, 'DEBUG_LEVEL', DEBUG_LEVEL);
+        elseif iscellstr(grid_control)
+            for i_fn = 1:numel(grid_control)
+                fn = grid_control{i_fn};
+                [grid_value, grid_wt] = cvm_generic_wrapper(Data.(loncorn_field), Data.(latcorn_field), Data.(fn), BoxGrid, 'weights', Data.Areaweight);
+                OMI.(fn) = grid_value';
+                OMI.Areaweight = grid_wt';
+            end
+            OMI.Areaweight(isnan(OMI.Areaweight)) = 0;
+            OMI.Longitude = BoxGrid.GridLon';
+            OMI.Latitude = BoxGrid.GridLat';
+        else
+            E.badinput('"grid_control" must be the string ''behr'' or a cell array of strings');
+        end
+    end
+
+    function OMI = grid_by_interp(Data, BoxGrid)
+        if strcmpi(grid_control, 'behr')
+            E.notimplemented('Gridding by interpolation for "behr"');
+        elseif iscellstr(grid_control)
+            aw = ones(size(BoxGrid.GridLon'));
+            for i_fn = 1:numel(grid_control)
+                fn = grid_control{i_fn};
+                data_vals = Data.(fn);
+                data_vals(Data.Areaweight == 0) = nan;
+                si = scatteredInterpolant(Data.Longitude(:), Data.Latitude(:), data_vals(:));
+                OMI.(fn) = si(BoxGrid.GridLon', BoxGrid.GridLat');
+                aw(isnan(OMI.(fn))) = 0;
+            end
+            OMI.Longitude = BoxGrid.GridLon';
+            OMI.Latitude = BoxGrid.GridLat';
+            % At present, we're not doing any areaweighting b/c this is intended to
+            % work with WRF data for which that is unnecessary
+            OMI.Areaweight = aw;
+        else
+            E.badinput('"grid_control" must be the string ''behr'' or a cell array of strings');
+        end
+    end
 
 
 end

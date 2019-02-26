@@ -98,14 +98,6 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       with too many unfilled pixels and use all days that meet the
 %       windvel criterion. Defaults to false.
 %
-%       'interp' - boolean, defaults to false (CHANGED 6 Jul 2018). If
-%       true, individual days are chosen if they have a sufficient number
-%       of viable observations to represent the entire domain well. Any
-%       missing elements are filled my interpolation.  If false, bad
-%       observations (cloud fraction or row anomaly) are removed, but all
-%       days are averaged together. This mode is closer to how Lu et al.
-%       2015 did their analysis, I believe.
-%
 %       'days_of_week' - string understood as the DAYS_OF_WEEK argument to
 %       DO_KEEP_DAY_OF_WEEK() specifying which days to keep. Default is
 %       UMTWRFS, i.e. all days.
@@ -118,6 +110,12 @@ function [ no2_x, no2_linedens, no2_lindens_std, lon, lat, no2_mean, no2_std, nu
 %       'wind_weights_bins' - A vector giving the edges of the bins for the
 %       weights given by 'wind_dir_weights'. If wind_dir_weights has N
 %       elements, this must have N+1. Must be in the same units as THETA.
+%
+%       'linedens_field' - what fields in the Data structure loaded to
+%       grid. Default is 'behr', does standard BEHR gridding. For other
+%       options, see ROTATE_PLUME's "grid_control" parameter.
+%
+%       'grid_method' - see ROTATE_PLUME.
 %
 %       'DEBUG_LEVEL' - level of output to console. Defaults to 1, 0 shuts
 %       off all output.
@@ -135,10 +133,11 @@ p.addOptional('nox_or_no2','no2',@(x) ismember(lower(x),{'nox','no2'}));
 p.addParameter('rel_box_corners',[]);
 p.addParameter('no_reject',false);
 p.addParameter('force_calc',false);
-p.addParameter('interp',false);
 p.addParameter('days_of_week', 'UMTWRFS');
 p.addParameter('wind_dir_weights',[]);
 p.addParameter('wind_weights_bins',[]);
+p.addParameter('linedens_field', 'behr');
+p.addParameter('grid_method', 'cvm');
 p.addParameter('DEBUG_LEVEL',1);
 
 p.parse(varargin{:});
@@ -148,10 +147,11 @@ nox_or_no2 = pout.nox_or_no2;
 rel_box_corners = pout.rel_box_corners;
 force_calc = pout.force_calc;
 no_reject = pout.no_reject;
-interp_bool = pout.interp;
 days_of_week = pout.days_of_week;
 wind_dir_weights = pout.wind_dir_weights;
 wind_weights_bins = pout.wind_weights_bins;
+linedens_field = pout.linedens_field;
+grid_method = pout.grid_method;
 DEBUG_LEVEL = pout.DEBUG_LEVEL;
 
 if ~ischar(fpath)
@@ -198,12 +198,8 @@ if ~isscalar(DEBUG_LEVEL) || ~isnumeric(DEBUG_LEVEL) || DEBUG_LEVEL < 0
     E.badinput('DEBUG_LEVEL must be a scalar number >= 0.')
 end
 
-if ~isscalar(interp_bool) || ~islogical(interp_bool)
-    E.badinput('interp must be a scalar logical')
-end
-
 if xor(isempty(wind_dir_weights), isempty(wind_weights_bins))
-    E.badinput('Both or neight of ''wind_dir_weights'' and ''wind_weights_bins'' must be given')
+    E.badinput('Both or neither of ''wind_dir_weights'' and ''wind_weights_bins'' must be given')
 elseif isempty(wind_dir_weights) % if we passed the xor() test if one is empty, both are
     wind_dir_weights = 1;
     wind_weights_bins = [-Inf Inf];
@@ -213,6 +209,18 @@ elseif numel(wind_dir_weights) ~= numel(wind_weights_bins) - 1
     E.badinput('''wind_weights_bins'' must have one more element than ''wind_dir_weights''');
 elseif any(diff(wind_weights_bins(:)) < 0)
     E.badinput('''wind_weights_bins'' must be monotonically increasing');
+end
+
+if ischar(linedens_field) && ~strcmpi(linedens_field, 'behr')
+    % rotate_plume, if given 'behr' as grid_control will do the standard
+    % rotation and gridding for BEHR VCDs. Otherwise it expects a cell
+    % array of field names to grid.
+    omi_field = linedens_field;
+    linedens_field = {linedens_field};
+elseif ~ischar(linedens_field)
+    E.badinput('"linedens_field" must be a char array');
+else
+    omi_field = 'BEHRColumnAmountNO2Trop';
 end
 
 % Pixel reject structure for row anomaly, cloud fraction, etc.
@@ -243,6 +251,10 @@ for d=1:numel(fnames_struct)
         fprintf('%s does not exist, skipping\n', this_file);
         continue
     end
+    
+    if ~strcmpi(linedens_field, 'behr') && ~isfield(D.Data, linedens_field)
+        E.callError('data_missing_field', 'File %s is missing the requested data field "%s"', this_file, linedens_field);
+    end
 
     if ~do_keep_day_of_week(D.Data(1).Date, days_of_week)
         if DEBUG_LEVEL > 0
@@ -267,9 +279,9 @@ for d=1:numel(fnames_struct)
         
         if DEBUG_LEVEL > 0; disp('Rotating plume'); end
         if ~isempty(rel_box_corners)
-            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s), rel_box_corners);
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s), rel_box_corners, 'grid_control', linedens_field, 'grid_method', grid_method);
         else
-            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s));
+            OMI = rotate_plume(D.Data(s), center_lon, center_lat, theta(d,s), 'grid_control', linedens_field, 'grid_method', grid_method);
         end
         if isempty(OMI.Longitude)
             if DEBUG_LEVEL > 0; fprintf('No grid cells in %s\n',fnames_struct(d).name); end 
@@ -302,41 +314,21 @@ for d=1:numel(fnames_struct)
         
         debug_cell{i} = sprintf('%s: swath %d', fnames_struct(d).name, s);
 
-        if interp_bool
-            % This criterion accounts for how many neighbors are empty, giving more
-            % weight to large clumps of NaNs (due to row anomaly or clouds) and
-            % less weight to scattered pixels. It still looks like 50% is a good
-            % cutoff.
-            mfrac = badpix_metric(~xx);
-            if mfrac > .5 && ~force_calc
-                if DEBUG_LEVEL > 0; fprintf('Too many clumped missing pixels, skipping %s\n',fnames_struct(d).name); end
-                continue
-            end
             
-            % Fill in empty grid boxes by interpolation to prevent discontinuity in the
-            % line density due to an uneven number of missing values for different
-            % distances from the city.
-            if DEBUG_LEVEL > 0; disp('Interpolating to fill in gaps in NO2 matrix'); end
-            F = scatteredInterpolant(OMI.Longitude(xx), OMI.Latitude(xx), OMI.BEHRColumnAmountNO2Trop(xx));
-            Faw = scatteredInterpolant(OMI.Longitude(xx), OMI.Latitude(xx), OMI.Areaweight(xx));
-            nox(:,:,i) = F(OMI.Longitude, OMI.Latitude) * nox_no2_scale;
-            aw(:,:,i) = Faw(OMI.Longitude, OMI.Latitude) * get_wind_dir_weight(theta(d,s), wind_dir_weights, wind_weights_bins);
-        else
-            
-            OMI.BEHRColumnAmountNO2Trop(~xx) = nan;
-            OMI.Areaweight(~xx) = nan;
-            % Multiply the weights by the wind direction weight, so that it
-            % weights the NOx average and gets normalized out along with
-            % the areaweight. The idea is that since I want to use slow
-            % wind speeds to generate a source function as in Liu et al.
-            % 2016 (doi: 10.5194/acp-16-5283-2016) but do it with rotated
-            % line densities, I should weight the slow line densities so
-            % that the different wind directions contribute to the line
-            % density in the same proportions as in the fast line
-            % densities.
-            nox(:,:,i) = OMI.BEHRColumnAmountNO2Trop * nox_no2_scale;
-            aw(:,:,i) = OMI.Areaweight * get_wind_dir_weight(theta(d,s), wind_dir_weights, wind_weights_bins);
-        end
+        OMI.(omi_field)(~xx) = nan;
+        OMI.Areaweight(~xx) = nan;
+        % Multiply the weights by the wind direction weight, so that it
+        % weights the NOx average and gets normalized out along with
+        % the areaweight. The idea is that since I want to use slow
+        % wind speeds to generate a source function as in Liu et al.
+        % 2016 (doi: 10.5194/acp-16-5283-2016) but do it with rotated
+        % line densities, I should weight the slow line densities so
+        % that the different wind directions contribute to the line
+        % density in the same proportions as in the fast line
+        % densities.
+        nox(:,:,i) = OMI.(omi_field) * nox_no2_scale;
+        aw(:,:,i) = OMI.Areaweight * get_wind_dir_weight(theta(d,s), wind_dir_weights, wind_weights_bins);
+        
     end
 end
 %fclose(fid);
@@ -382,54 +374,14 @@ no2_lindens_std = no2_lindens_std(rr);
 % Finalize the uncertainties
 no2_lindens_std = sqrt(no2_lindens_std);
 
-% Convert line density from molec/cm to moles/km
-no2_linedens = no2_linedens * 1e5 / 6.022e23;
-no2_lindens_std = no2_lindens_std * 1e5 / 6.022e23;
-
+% Convert line density from molec/cm to moles/km, if doing standard BEHR
+% line densities
+if strcmpi(linedens_field, 'behr')
+    no2_linedens = no2_linedens * 1e5 / 6.022e23;
+    no2_lindens_std = no2_lindens_std * 1e5 / 6.022e23;
+end
 end
 
-function [mfrac, msum] = badpix_metric(xx)
-% Calculates a metric for the badness of missing pixels. A missing grid
-% cell doesn't contribute to this metric unless it has at least one
-% neighbor that is also missing
-sz = size(xx);
-m = zeros(sz);
-for a=1:sz(1)
-    for b=1:sz(2)
-        if a > 1 && b > 1
-            m(a,b) = m(a,b) + xx(a-1, b-1);
-        end
-        if a > 1
-            m(a,b) = m(a,b) + xx(a-1,b);
-        end
-        if a > 1 && b < sz(2)
-            m(a,b) = m(a,b) + xx(a-1,b+1);
-        end
-        if b < sz(2)
-            m(a,b) = m(a,b) + xx(a,b+1);
-        end
-        if a < sz(1) && b < sz(2)
-            m(a,b) = m(a,b) + xx(a+1,b+1);
-        end
-        if a < sz(1)
-            m(a,b) = m(a,b) + xx(a+1,b);
-        end
-        if a < sz(1) && b > 1
-            m(a,b) = m(a,b) + xx(a+1,b-1);
-        end
-        if b > 1
-            m(a,b) = m(a,b) + xx(a,b-1);
-        end
-    end
-end
-
-% How many neighbors there are, i.e. the maximum value m could take on.
-% Corner cells have 3 neighbors, non-corner edge cells have 5 and non-edge
-% cells have 8.
-n_neighbors = prod(sz-2)*8 + (prod(sz) - prod(sz-2) - 4) * 5 + 12;
-msum = sum(m(:));
-mfrac = msum / n_neighbors;
-end
 
 function weight = get_wind_dir_weight(this_theta, wind_dir_weights, wind_dir_weight_bins)
 idx = find(this_theta > wind_dir_weight_bins, 1, 'last');

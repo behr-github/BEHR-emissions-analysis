@@ -113,7 +113,7 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = line_density_file_name(start_date, end_date, by_sectors, wind_reject_filtered, wind_dir_weighted, use_wrf, winds_op, winds_cutoff, loc_inds, days_of_week)
+        function filename = line_density_file_name(start_date, end_date, by_sectors, wind_reject_filtered, wind_dir_weighted, use_wrf, winds_op, winds_cutoff, loc_inds, days_of_week, wrf_var)
             if by_sectors
                 sectors_string = 'sectors';
             else
@@ -133,10 +133,15 @@ classdef misc_emissions_analysis
             end
             
             if use_wrf
-                data_string = 'WRF';
+                if exist('wrf_var', 'var') && ~isempty(wrf_var);
+                    data_string = sprintf('WRF_%s', upper(wrf_var));
+                else
+                    data_string = 'WRF';
+                end
             else
                 data_string = 'BEHR';
             end
+            
             
             allowed_winds_ops = {'lt', 'gt'};
             if ~ismember(winds_op, allowed_winds_ops)
@@ -152,6 +157,7 @@ classdef misc_emissions_analysis
             else
                 locs_string = ['locs', sprintf_ranges(loc_inds)];
             end
+            
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
             filename = sprintf('%s_%s_%s_%s_%s_%s_no2_%sto%s_%s.mat', data_string, sectors_string, filtered_string, weighted_string, winds_string, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
@@ -2361,6 +2367,8 @@ classdef misc_emissions_analysis
             %   number of days in it that have fast winds divided by those
             %   with slow winds; it is intended to be used to weight slow
             %   wind conditions for use with the convolution algorithm.
+            %
+            %   'grid_method' - see ROTATE_PLUME.
             
             E = JLLErrors;
             
@@ -2376,9 +2384,11 @@ classdef misc_emissions_analysis
             p.addParameter('winds_op', 'gt')
             p.addParameter('winds_cutoff', 3);
             p.addParameter('use_wrf', false);
+            p.addParameter('wrf_var', '');
             p.addParameter('use_wind_rejects',true);
             p.addParameter('use_wrf_wind_rejects', nan);
             p.addParameter('weight_wind_dirs',false);
+            p.addParameter('grid_method', 'cvm');
             
             p.parse(varargin{:});
             pout = p.AdvResults;
@@ -2392,9 +2402,11 @@ classdef misc_emissions_analysis
             winds_op = pout.winds_op;
             winds_cutoff = pout.winds_cutoff;
             wrf_bool = pout.use_wrf;
+            wrf_var = pout.wrf_var;
             use_wind_rejects = pout.use_wind_rejects;
             use_wrf_rejects = pout.use_wrf_wind_rejects;
             weight_wind_dirs = pout.weight_wind_dirs;
+            grid_method = pout.grid_method;
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
                 E.badinput('The parameter "loc_indicies" must be a numeric array with all values >= 1')
@@ -2411,12 +2423,15 @@ classdef misc_emissions_analysis
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
  
             % Find the list of BEHR files between the start and end dates
-            [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily','all');
-            if wrf_bool
-                for i_file = 1:numel(behr_files)
-                    behr_files(i_file).name = strrep(behr_files(i_file).name, 'OMI', 'WRF');
-                end
-                behr_dir = misc_emissions_analysis.wrf_vcd_dir;
+            if ~wrf_bool
+                [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily','all');
+            else
+                %behr_dir = misc_emissions_analysis.wrf_vcd_dir;
+                behr_dir = '/home/josh/Documents/MATLAB/BEHR-emissions-analysis/Workspaces/debugging';
+                behr_files = dir(fullfile(behr_dir,'WRF*.mat'));
+                file_dates = date_from_behr_filenames(behr_files);
+                dvec_tmp = make_datevec(start_date, end_date);
+                behr_files(~ismember(file_dates, dvec_tmp)) = [];
             end
             % If we're doing line densities by sector, then we don't want
             % to reject any wind directions. We also don't want to reject
@@ -2432,7 +2447,7 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, filter_by_wind_dir, weight_wind_dirs, wrf_bool, winds_op, winds_cutoff, loc_indicies, days_of_week);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, filter_by_wind_dir, weight_wind_dirs, wrf_bool, winds_op, winds_cutoff, loc_indicies, days_of_week, wrf_var);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -2516,6 +2531,9 @@ classdef misc_emissions_analysis
                 
                 if wrf_bool
                     opt_args = veccat(opt_args, {'no_reject', true});
+                    if ~isempty(wrf_var)
+                        opt_args = veccat(opt_args, {'linedens_field', wrf_var});
+                    end
                 end
                 
                 % "wind_reject_field" will have been set to 'none' if
@@ -2527,11 +2545,11 @@ classdef misc_emissions_analysis
                 if by_sectors
                     fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, opt_args{:});
+                        = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'rel_box_corners', box_size, opt_args{:});
                 else
                     fprintf('Calculating rotated line densities for %s\n', winds_locs_distributed(a).ShortName);
                     [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'interp', false, 'rel_box_corners', box_size, 'days_of_week', days_of_week, opt_args{:});
+                        = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'rel_box_corners', box_size, 'days_of_week', days_of_week, opt_args{:});
                 end
             end
             

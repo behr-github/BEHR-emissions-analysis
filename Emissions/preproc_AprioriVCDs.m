@@ -96,7 +96,7 @@ end
 
 end
 
-function save_helper(save_name, Data) %#ok<INUSD>
+function save_helper(save_name, Data)
 save(save_name, 'Data');
 end
 
