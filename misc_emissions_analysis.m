@@ -1410,7 +1410,7 @@ classdef misc_emissions_analysis
                     wkday.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
                     wkend.ratio = make_empty_struct_from_cell({'nox', 'oh', 'ho2', 'ro2', 'vocr'}, nan);
                     
-                    [wkday.invert_hcho_wkday_wkend, wkend.invert_hcho_wkday_wkend] = get_invert_oh_with_hcho_wkend_wkday();
+                    [wkday.invert_hcho_wkday_wkend, wkend.invert_hcho_wkday_wkend] = misc_emissions_analysis.get_invert_oh_with_hcho_wkend_wkday();
                 end
                 
                 oh_results{i_loc} = struct('weekday', wkday, 'weekend', wkend);
@@ -2838,7 +2838,8 @@ classdef misc_emissions_analysis
             tau_vals = {'-', '+', '0', '0', '0', '0'};
             
             deltas = make_empty_struct_from_cell({'wkday', 'wkend', 'phox', 'alpha', 'tau'}, cell(6,1));
-            locs_to_calc = misc_emissions_analysis.nine_cities;  
+            %locs_to_calc = misc_emissions_analysis.nine_cities;  
+            locs_to_calc = 1:71;
             if include_uncertainty
                 n_workers = 7;
             else
@@ -6729,10 +6730,11 @@ classdef misc_emissions_analysis
         end
         
         function results = get_invert_oh_with_hcho(this_loc, alpha)
+            default_out = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'nox', 'tau', 'last_tau', 'last_hcho'}, nan);
             if nargin < 1
                 % used to return consistent struct if the fit isn't
                 % good. be sure to update if new fields added.
-                results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'nox', 'tau', 'last_tau', 'last_hcho'}, nan);
+                results = default_out;
                 return
             end
             
@@ -6742,6 +6744,12 @@ classdef misc_emissions_analysis
             
             nox_inv = this_loc.WRFData.ndens * this_loc.WRFData.behr_nox * 1e-6;
             hcho_inv = this_loc.WRFData.ndens * this_loc.WRFData.omi_hcho * 1e-6;
+
+            if hcho_inv < 0
+                fprintf('HCHO < 0, skipping\n');
+                results = default_out;
+                return
+            end
             
             t_hcho = tic;
             [results.oh, results.ho2, results.ro2, soln] = hox_solve_tau_hcho_constraint(nox_inv, this_loc.emis_tau.tau, hcho_inv, alpha);
@@ -6753,11 +6761,13 @@ classdef misc_emissions_analysis
         end
         
         function [wkday_results, wkend_results] = get_invert_oh_with_hcho_wkend_wkday(wkday_loc, wkend_loc, alpha)
+
+            default_out = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'phox', 'alpha', 'tau', 'last_hcho', 'last_tau', 'fmincon_flag', 'nox', 'hcho'}, nan);
             if nargin < 1
                 % Used to return consistent struct if the fit isn't good.
                 % update if new fields added.
-                wkday_results = make_empty_struct_from_cell({'oh', 'ho2', 'ro2', 'vocr', 'phox', 'alpha', 'tau', 'last_hcho', 'last_tau', 'fmincon_flag', 'nox', 'hcho'}, nan);
-                wkend_results = wkday_results;
+                wkday_results = default_out;
+                wkend_results = default_out;
                 return
             end
             
@@ -6766,6 +6776,13 @@ classdef misc_emissions_analysis
             
             wkday_hcho_inv = wkday_loc.WRFData.ndens * wkday_loc.WRFData.omi_hcho * 1e-6;
             wkend_hcho_inv = wkend_loc.WRFData.ndens * wkend_loc.WRFData.omi_hcho * 1e-6;
+
+            if wkday_hcho_inv < 0 || wkend_hcho_inv < 0
+                fprintf('HCHO < 0, skipping\n');
+                wkday_results = default_out;
+                wkend_results = default_out;
+                return
+            end
             
             wkday_tau = wkday_loc.emis_tau.tau;
             wkend_tau = wkend_loc.emis_tau.tau;
