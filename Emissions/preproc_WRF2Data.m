@@ -80,8 +80,7 @@ for d=1:numel(dvec)
                 value = nanmean(value(:,:,avg_levels),3);
             end
             
-            value = double(value(xx,yy));
-            Data(i_orbit).(this_var) = double(value(xx));
+            Data(i_orbit).(this_var) = double(value(xx,yy));
         end
     end
     save_name = sprintf('WRF_PseudoBEHR_%04d%02d%02d.mat',year(dvec(d)),month(dvec(d)),day(dvec(d)));
@@ -116,6 +115,6 @@ end
 end
 
 function [xx,yy] = complete_rows(ii)
-xx = any(ii,1);
-yy = any(ii,2);
+xx = any(ii,2);
+yy = any(ii,1);
 end
