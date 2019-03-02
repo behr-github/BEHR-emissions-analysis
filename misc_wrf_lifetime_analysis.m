@@ -993,6 +993,95 @@ classdef misc_wrf_lifetime_analysis
             state_outlines('k');
             title(sprintf_ranges(years));
         end
+        
+        function plot_wrf_vs_behr_lifetimes(varargin)
+            % Want to plot:
+            % 1) BEHR lifetime and WRF lifetime (total, vs. NO2+OH, vs.
+            % LNOXHNO3, vs. LNOXA, and eventually from WRF EMG fits).
+            % 2) Emissions (BEHR EMG fits, WRF NEI, and eventually WRF EMG
+            % fits)
+            % 3) NO2 VCDs
+            
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            locs = misc_emissions_analysis.cutdown_locs_by_index(misc_emissions_analysis.read_locs_file(), loc_inds);
+            
+            years = 2006:2013;
+            year_windows = arrayfun(@(y) (y-1):(y+1), years, 'uniform', false);
+            data_fields = {'emis', 'emis_uncert', 'nei_emis', 'tau', 'tau_uncert', 'wrf_tau', 'wrf_tau_no2_oh',...
+                'wrf_tau_hno3', 'wrf_tau_ans', 'behr_no2', 'wrf_no2'};
+            data = make_empty_struct_from_cell(data_fields, nan(numel(years), numel(locs)));
+            
+            % First load the WRF data and compute the derived quantities
+            wrf_locs = misc_emissions_analysis.average_profiles_for_locations(year_windows, 'TWRF', locs, 'species', {'nox', 'no2', 'ho', 'LNOXA', 'LNOXHNO3', 'temperature', 'ndens'});
+            for i_loc = 1:numel(wrf_locs)
+                wrf_locs(i_loc).WRFData.wrf_tau = misc_oh_analysis.compute_wrf_tau(wrf_locs(i_loc).WRFData, 'simple');
+                wrf_locs(i_loc).WRFData.wrf_tau_no2_oh = misc_oh_analysis.compute_wrf_tau(wrf_locs(i_loc).WRFData, 'no2+oh');
+                wrf_locs(i_loc).WRFData.wrf_tau_hno3 = misc_oh_analysis.compute_wrf_tau(wrf_locs(i_loc).WRFData, 'hno3');
+                wrf_locs(i_loc).WRFData.wrf_tau_ans = misc_oh_analysis.compute_wrf_tau(wrf_locs(i_loc).WRFData, 'ans');
+            end
+            
+            % Now load each years EMG data, BEHR VCDs, and WRF VCDs. At the
+            % same time, we'll put the wrf profile data into the data
+            % structure.
+            for i_yr = 1:numel(years)
+                fprintf('Working on %s\n', sprintf_ranges(year_windows{i_yr}));
+                emg = load(misc_emissions_analysis.behr_fit_file_name(year_windows{i_yr}, 'TWRF'));
+                emg_locs = misc_emissions_analysis.cutdown_locs_by_index(emg.locs, loc_inds);
+                
+                data.behr_no2(i_yr,:) = misc_emissions_analysis.avg_vcds_around_loc(locs, year_windows{i_yr}, 'TWRF');
+                data.wrf_no2(i_yr,:) = misc_emissions_analysis.avg_wrf_vcds_around_loc(locs, year_windows{i_yr}, 'no2');
+                
+                for i_loc = 1:numel(locs)
+                    data.emis(i_yr, i_loc) = emg_locs(i_loc).emis_tau.emis;
+                    data.emis_uncert(i_yr, i_loc) = emg_locs(i_loc).emis_tau.emis_uncert;
+                    data.nei_emis(i_yr, i_loc) = emg_locs(i_loc).emis_tau.nei_emis;
+                    data.tau(i_yr, i_loc) = emg_locs(i_loc).emis_tau.tau;
+                    data.tau_uncert(i_yr, i_loc) = emg_locs(i_loc).emis_tau.tau_uncert;
+                    
+                    data.wrf_tau(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau(i_yr);
+                    data.wrf_tau_no2_oh(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau_no2_oh(i_yr);
+                    data.wrf_tau_hno3(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau_hno3(i_yr);
+                    data.wrf_tau_ans(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau_ans(i_yr);
+                end
+            end
+            
+            figs = gobjects(numel(locs),1);
+            line_opts = {'linewidth', 2, 'markersize', 10};
+            for i_loc = 1:numel(locs)
+                figs(i_loc) = figure;
+                subplot(3,1,1);
+                l1 = gobjects(5,1);
+                l1(1) = line(years, data.tau(:, i_loc), 'color', 'b', line_opts{:});
+                l1(2) = line(years, data.wrf_tau(:, i_loc), 'color', 'r', line_opts{:});
+                l1(3) = line(years, data.wrf_tau_no2_oh(:, i_loc), 'color', 'r', 'marker', 'o', 'linestyle', 'none', line_opts{:});
+                l1(4) = line(years, data.wrf_tau_hno3(:, i_loc), 'color', 'r', 'marker', '^', 'linestyle', 'none', line_opts{:});
+                l1(5) = line(years, data.wrf_tau_ans(:, i_loc), 'color', 'r', 'marker', '*', 'linestyle', 'none', line_opts{:});
+                ylabel('NO_x lifetime (h)');
+                legend(l1, {'BEHR', 'WRF (total)', 'WRF (NO_2 + OH)', 'WRF (HNO_3)', 'WRF (ANs)'});
+                title(locs(i_loc).ShortName);
+                
+                subplot(3,1,2);
+                l2 = gobjects(2,1);
+                l2(1) = line(years, data.emis(:, i_loc), 'color', 'b', line_opts{:});
+                l2(2) = line(years, data.nei_emis(:, i_loc), 'color', 'r', 'linestyle', '--', line_opts{:});
+                ylabel('NO_x emissions (Mg NO h^{-1})');
+                legend(l2, {'BEHR', 'WRF (NEI)'});
+                
+                subplot(3,1,3);
+                l3 = gobjects(2,1);
+                l3(1) = line(years, data.behr_no2(:,i_loc), 'color', 'b', line_opts{:});
+                l3(2) = line(years, data.wrf_no2(:,i_loc), 'color', 'r', line_opts{:});
+                ylabel('NO_2 VCDs (molec. cm^{-2})')
+                legend(l3, {'BEHR', 'WRF'});
+                
+                subplot_stretch(3,1);
+            end
+        end
     end
 end
 

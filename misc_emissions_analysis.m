@@ -164,6 +164,17 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.line_density_dir, filename);
         end
         
+        function filename = behr_fit_file_name(time_period, days_of_week)
+            % BEHR_FIT_FILE_NAME - returns the standard file for the BEHR
+            % EMG fits for a time period (given as a numeric vector of
+            % years) and the days of week ('TWRF', 'US', or 'UMTWRFS').
+            % Wraps FITS_FILE_NAME and provides the default values for the
+            % remaining inputs.
+            start_date = datenum(min(time_period), 4, 1);
+            end_date = datenum(max(time_period), 9, 30);
+            filename = misc_emissions_analysis.fits_file_name(start_date, end_date, false, 1:71, days_of_week, 'lu');
+        end
+        
         function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week, fit_type)
             if using_wrf
                 product_string = 'WRF';
@@ -1571,8 +1582,88 @@ classdef misc_emissions_analysis
             end
         end
         
-        function locs = average_profiles_for_locations(time_period, days_of_week, locs, varargin)
+        function loc_avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('radius', 'by_loc');
+            p.addParameter('species', 'no2');
+            p.addParameter('ignore_missing_files', false);
             
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_radius = pout.radius;
+            vcd_species = pout.species;
+            ignore_missing_files = pout.ignore_missing_files;
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            allowed_species = {'no2','hcho'};
+            if ~ismember(vcd_species, allowed_species)
+                E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
+            end
+            
+            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
+            time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
+            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species, 'ignore_missing_files', ignore_missing_files);
+            lon = vcds.lon;
+            lat = vcds.lat;
+            lon_res = mean(diff(lon(1,:)));
+            lat_res = mean(diff(lat(:,1)));
+            if abs(lon_res - lat_res) > 1e-10
+                E.notimplemented('Different lon and lat resolutions');
+            end
+            loc_avg_vcds = nan(size(locs));
+            for i_loc = 1:numel(locs)
+                % This will use the box width (from center to edge
+                % perpendicular to the wind direction) as the radius and
+                % find all grid points with centers within that radius.
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius);
+                loc_avg_vcds(i_loc) = nanmean(vcds.daily_vcds(xx_radius));
+            end
+        end
+        
+        function locs = average_profiles_for_locations(time_period, days_of_week, locs, varargin)
+            % LOCS = AVERAGE_PROFILES_FOR_LOCATIONS( TIME_PERIOD,
+            % DAYS_OF_WEEK, LOCS ) Averages default profiles from WRF for
+            % each of the locations in the structure LOCS for the given
+            % TIME_PERIOD and DAYS_OF_WEEK. The averaged profiles will be
+            % put in a new field, WRFData, in the returned LOCS structure.
+            % By default, the average of the first five levels of the
+            % profiles is returned as a scalar.
+            %
+            % If TIME_PERIOD is a numeric vector of years, then a single
+            % profile for each species is returned, averaged over all those
+            % years. (If a given species is not available for one of those
+            % years, it is filled by interpolation before averaging.)
+            % TIME_PERIOD may also be a cell array of year vectors, in
+            % which case the returned fields will be 1-by-n, where n is
+            % the number of time periods requested.
+            %
+            % Parameters:
+            %
+            %   'species' - a cell array of species from WRF to average.
+            %   Default is
+            %   {'behr_nox','nox','omi_hcho','ho','ndens','temperature'}.
+            %   'behr_nox' and 'omi_hcho' are special variables, which are
+            %   the WRF NOx or HCHO profiles scaled by BEHR NO2 VCDs or OMI
+            %   HCHO VCDs, respectively.
+            %
+            %   'levels' - indices for which levels to average to create
+            %   the returned values. Default is 1:5, i.e. levels 1 to 5 of
+            %   the temporally averaged profiles are included in the
+            %   returned average.
+            %
+            %   'hcho_umtwrfs' - boolean, set to true to use OMI HCHO
+            %   columns averaged over all days of week for the 'omi_hcho'
+            %   specie. Default is false, will use the appropriate average
+            %   for the days of the week.
             p = inputParser;
             p.addOptional('species', {'behr_nox','nox','omi_hcho','ho','ndens','temperature'});
             p.addParameter('levels', 1:5);
@@ -1599,7 +1690,10 @@ classdef misc_emissions_analysis
                     end
                     
                     value = calc_with_interp(locs(i_loc), time_period, load_fxn);
-                    locs(i_loc).WRFData.(spec) = nanmean(value(levels));
+                    if ~isempty(levels)
+                        value = nanmean(value(levels, :), 1);
+                    end
+                    locs(i_loc).WRFData.(spec) = value;
                 end
             end
             
@@ -1628,6 +1722,9 @@ classdef misc_emissions_analysis
             end
             
             function prof = calc_with_interp(loc, years, load_prof_fxn)
+                if isnumeric(years)
+                    years = {years};
+                end
                 all_years = 2005:2014;
                 prof_by_year = nan(29, numel(all_years));
                 for iyr = 1:numel(all_years)
@@ -1648,7 +1745,39 @@ classdef misc_emissions_analysis
                     [~,prof_by_year(z,:)] = fill_nans(all_years, prof_by_year(z,:), 'noclip');
                 end
                 
-                prof = nanmean(prof_by_year(:, ismember(all_years, years)),2);
+                prof = nan(size(prof_by_year,1), numel(years));
+                for iyr = 1:numel(years)
+                    prof(:,iyr) = nanmean(prof_by_year(:, ismember(all_years, years{iyr})),2);
+                end
+            end
+        end
+        
+        function VCDs = avg_wrf_vcds_around_loc(locs, time_period, specie, varargin)
+            E = JLLErrors;
+            p = advInputParser;
+            p.addParameter('radius', 'by_loc');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            avg_radius = pout.radius;
+            
+            if ~ischar(specie)
+                E.badinput('SPECIE must be a char array')
+            end
+            
+            if ischar(avg_radius)
+                if strcmpi(avg_radius, 'by_loc')
+                    avg_radius = [];
+                else
+                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
+                end
+            end
+            
+            VCDs = nan(size(locs));
+            [vcds, xlon, xlat] = misc_wrf_lifetime_analysis.compute_wrf_vcds_for_years(time_period, specie);
+            for i_loc = 1:numel(locs)
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), xlon, xlat, avg_radius);
+                VCDs(i_loc) = nanmean(vcds(xx_radius));
             end
         end
         
@@ -6216,53 +6345,6 @@ classdef misc_emissions_analysis
             end
         end
         
-        function loc_avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
-            E = JLLErrors;
-            p = advInputParser;
-            p.addParameter('radius', 'by_loc');
-            p.addParameter('species', 'no2');
-            p.addParameter('ignore_missing_files', false);
-            
-            p.parse(varargin{:});
-            pout = p.Results;
-            
-            avg_radius = pout.radius;
-            vcd_species = pout.species;
-            ignore_missing_files = pout.ignore_missing_files;
-            
-            if ischar(avg_radius)
-                if strcmpi(avg_radius, 'by_loc')
-                    avg_radius = [];
-                else
-                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
-                end
-            end
-            
-            allowed_species = {'no2','hcho'};
-            if ~ismember(vcd_species, allowed_species)
-                E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
-            end
-            
-            [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
-            time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species, 'ignore_missing_files', ignore_missing_files);
-            lon = vcds.lon;
-            lat = vcds.lat;
-            lon_res = mean(diff(lon(1,:)));
-            lat_res = mean(diff(lat(:,1)));
-            if abs(lon_res - lat_res) > 1e-10
-                E.notimplemented('Different lon and lat resolutions');
-            end
-            loc_avg_vcds = nan(size(locs));
-            for i_loc = 1:numel(locs)
-                % This will use the box width (from center to edge
-                % perpendicular to the wind direction) as the radius and
-                % find all grid points with centers within that radius.
-                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius);
-                loc_avg_vcds(i_loc) = nanmean(vcds.daily_vcds(xx_radius));
-            end
-        end
-        
         function [shape_factors, pres_levels] = avg_wrf_prof_around_loc(locs, time_period, varargin)
             E = JLLErrors;
             p = advInputParser;
@@ -6309,50 +6391,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function VCDs = avg_wrf_vcds_around_loc(locs, time_period, specie, varargin)
-            E = JLLErrors;
-            p = advInputParser;
-            p.addParameter('radius', 'by_loc');
-            p.parse(varargin{:});
-            pout = p.Results;
-            
-            avg_radius = pout.radius;
-            
-            if ~ischar(specie)
-                E.badinput('SPECIE must be a char array')
-            end
-            
-            Profs = misc_emissions_analysis.load_time_averaged_wrf_profs(time_period);
-            xx_bad_species = ~ismember(specie, fieldnames(Profs));
-            if any(xx_bad_species)
-                E.badinput('The following species are not available in the time-averaged profile file: %s', strjoin(specie(xx_bad_species), ', '))
-            end
-            
-            if ischar(avg_radius)
-                if strcmpi(avg_radius, 'by_loc')
-                    avg_radius = [];
-                else
-                    E.badinput('The only valid string for "avg_radius" is "by_loc"')
-                end
-            end
-            
-            VCDs = nan(size(locs));
-            
-            for i_loc = 1:numel(locs)
-                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), Profs.lon, Profs.lat, avg_radius);
-                this_pres = Profs.pres(:,xx_radius);
-                this_profiles = Profs.(specie)(:,xx_radius);
-                these_vcds = nan(1, size(this_profiles, 2));
-                for i_prof = 1:numel(these_vcds)
-                    % The species concentrations in WRF are usually in
-                    % ppm and the time averaging doesn't change that.
-                    % integPr2 requires the straight mixing ratio
-                    % (parts-per-part)
-                    these_vcds(i_prof) = integPr2(this_profiles(:,i_prof)*1e-6, this_pres(:,i_prof), this_pres(1,i_prof), this_pres(end,i_prof));
-                end
-                VCDs(i_loc) = nanmean(these_vcds);
-            end
-        end
+        
         
         
         function Profs = load_time_averaged_wrf_profs(time_period)
