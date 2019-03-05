@@ -133,7 +133,7 @@ classdef misc_emissions_analysis
             end
             
             if use_wrf
-                if exist('wrf_var', 'var') && ~isempty(wrf_var);
+                if exist('wrf_var', 'var') && ~isempty(wrf_var)
                     data_string = sprintf('WRF_%s', upper(wrf_var));
                 else
                     data_string = 'WRF';
@@ -175,9 +175,20 @@ classdef misc_emissions_analysis
             filename = misc_emissions_analysis.fits_file_name(start_date, end_date, false, 1:71, days_of_week, 'lu');
         end
         
-        function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week, fit_type)
+        function filename = wrf_fit_file_name(time_period, wrf_var)
+            start_date = datenum(min(time_period), 4, 1);
+            end_date = datenum(max(time_period), 9, 30);
+            filename = misc_emissions_analysis.fits_file_name(start_date, end_date, true, 1:71, 'TWRF', wrf_var);
+        end
+        
+        function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week, fit_type, wrf_var)
             if using_wrf
-                product_string = 'WRF';
+                if ~exist('wrf_var', 'var')
+                    product_string = 'WRF';
+                else
+                    product_string = sprintf('WRF_%s', upper(wrf_var));
+                end
+                
             else
                 product_string = 'BEHR';
             end
@@ -187,6 +198,8 @@ classdef misc_emissions_analysis
             else
                 locs_string = ['locs', sprintf_ranges(loc_inds)];
             end
+            
+            
             start_date = validate_date(start_date);
             end_date = validate_date(end_date);
             filename = sprintf('%s_emg_%s_fits_%s_%sto%s_%s.mat', product_string, fit_type, locs_string, datestr(start_date(1), 'yyyy-mm-dd'), datestr(end_date(end), 'yyyy-mm-dd'), days_of_week);
@@ -2701,7 +2714,7 @@ classdef misc_emissions_analysis
             p.addParameter('file_loc_indicies','match'); % if set to 'match' then this will be the same as loc_indicies.
             p.addParameter('add_nei', true);
             p.addParameter('days_of_week', 'UMTWRFS');
-            p.addParameter('use_wrf', false);
+            p.addParameter('wrf_var', '');
             p.addParameter('do_overwrite', -1);
             % by default if it doesn't get it the second time, then it's
             % probably just going to randomly sample until it happens to
@@ -2711,6 +2724,7 @@ classdef misc_emissions_analysis
             p.addParameter('fatal_fit_fail', true);
             p.addParameter('skip_linedens_errors', -1);
             p.addParameter('fit_type', '');
+            p.addParameter('ld_scale', 1);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -2720,12 +2734,13 @@ classdef misc_emissions_analysis
             file_loc_indicies = pout.file_loc_indicies;
             add_nei = pout.add_nei;
             days_of_week = pout.days_of_week;
-            wrf_bool = pout.use_wrf;
+            wrf_var = pout.wrf_var;
             do_overwrite = pout.do_overwrite;
             max_fit_attempts = pout.max_fit_attempts;
             fatal_if_cannot_fit = pout.fatal_fit_fail;
             skip_linedens_errors = pout.skip_linedens_errors;
             fit_type_in = pout.fit_type;
+            ld_scale = pout.ld_scale;
             % time_period should be checked in select_start_end_dates
             
             if ~isnumeric(loc_indicies) || any(loc_indicies(:) < 1)
@@ -2751,12 +2766,12 @@ classdef misc_emissions_analysis
             end
             
             fit_type_in = misc_emissions_analysis.get_fit_type_interactive(fit_type_in);
-            
+            wrf_bool = ~isempty(wrf_var);
             
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_indicies, days_of_week, fit_type_in);
+            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_indicies, days_of_week, fit_type_in, wrf_var);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -2782,7 +2797,7 @@ classdef misc_emissions_analysis
                 % However for the slow line densities we do want them
                 % weighted for wind direction contribution so that they
                 % match the fast line densities.
-                slow_ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, true, wrf_bool, 'lt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week);
+                slow_ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, true, wrf_bool, 'lt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week, wrf_var);
                 if ~exist(slow_ldens_file, 'file')
                     [~,ldens_basename] = fileparts(slow_ldens_file);
                     % Use regular error function to have more control over the
@@ -2799,7 +2814,7 @@ classdef misc_emissions_analysis
                 weighted_bool = false;
                 slow_line_densities = [];
             end
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, weighted_bool, wrf_bool, 'gt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week);
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, weighted_bool, wrf_bool, 'gt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week, wrf_var);
             if ~exist(ldens_file, 'file')
                 [~,ldens_basename] = fileparts(ldens_file);
                 % Use regular error function to have more control over the
@@ -2807,13 +2822,6 @@ classdef misc_emissions_analysis
                 error('emis_analysis:no_linedens_file', 'Line density file %s not found, cannot fit EMG functions', ldens_basename);
             end
             line_densities = load(ldens_file);
-            
-            % Check that the dates match up with what we're expecting (it
-            % should because we load the file with those dates)
-            check_dvec = misc_emissions_analysis.make_datevec(start_date, end_date);
-            if ~isequal(check_dvec, line_densities.dvec)
-                E.callError('date_mismatch', 'Dates in winds file (%s) do not match required (%s to %s)', ldens_file, datestr(start_date(1)), datestr(end_date(end)));
-            end
             
             if ~isempty(loc_indicies)
                 locs = misc_emissions_analysis.cutdown_locs_by_index(line_densities.locs, loc_indicies);
@@ -2828,7 +2836,7 @@ classdef misc_emissions_analysis
             % wrfinput_d01, b/c the wrfchemi files don't include lat-lon.
             % Would have to do some work to get this to run on the cluster.
             if add_nei
-                nei_year = unique(year(check_dvec));
+                nei_year = unique(year(line_densities.dvec));
                 [nei_avg_no, nei_lon, nei_lat] = misc_emissions_analysis.load_nei_by_year(nei_year);
             end
             % Specify even the default options so that if fit_line_density
@@ -2855,16 +2863,16 @@ classdef misc_emissions_analysis
                 safety_count = 1;
                 while true
                     if strcmpi(fit_type_in, 'convolution')
-                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens);
+                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens*ld_scale);
                     else
                         fit_type = fit_type_in;
                     end
                     try
-                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
+                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens*ld_scale, 'emgtype', fit_type, common_opts{:});
                         % Try this a second time - if it gives a different
                         % answer, we should re-run, since that suggests we
                         % didn't find the minimum one time.
-                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
+                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens*ld_scale, 'emgtype', fit_type, common_opts{:});
                     catch err
                         msg = sprintf('Fitting %s failed with error:\n "%s"\nSkip this location and continue?', locs(a).ShortName, err.message);
                         if skip_linedens_errors > 0 || (skip_linedens_errors < 0 && ask_yn(msg))
@@ -6265,6 +6273,136 @@ classdef misc_emissions_analysis
                 end
             end
         end
+        
+        function fig = plot_background_ratio(varargin)
+            % Parameters:
+            %   'ratio' - how the city/background ratio is determined. Can be:
+            %       * '#/#' e.g. 95/5 which specifies the percentiles of the "city" and
+            %       "background". "background" will be taken from points upwind of the
+            %       geographic center.
+            %       * 'mu/#' e.g. 'mu/5' which means take the line density at mu_x as
+            %       the city and the fifth percentile of points upwind of that as
+            %       background.
+            %       * 'a/B' means use the ratios of the a and B fitting parameters.
+            p = advInputParser;
+            p.addParameter('loc_inds', 1:71);
+            p.addParameter('days_of_week', 'TWRF');
+            p.addParameter('ratio', '95/5');
+            p.addParameter('plot_type', 'box'); % 'box' or 'ensemble'
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            days_of_week = pout.days_of_week;
+            ratio_method = pout.ratio;
+            plot_type = pout.plot_type;
+            
+            years = 2006:2013;
+            
+            % Parse the ratio input and plot method
+            [city_ld_method, bckgnd_ld_method, do_check_fits, ylabel_str] = parse_ratio(ratio_method);
+            [plot_method, extra_dat_method] = parse_plot(plot_type);
+            
+            ratios = nan(numel(loc_inds), numel(years));
+            extra_data = ratios;
+            for i_yr = 1:numel(years)
+                yr = years(i_yr);
+                yr_win = (yr-1):(yr+1);
+                fprintf('Working on %s\n', sprintf_ranges(yr_win));
+                
+                fits = load(misc_emissions_analysis.behr_fit_file_name(yr_win, days_of_week));
+                fits.locs = misc_emissions_analysis.cutdown_locs_by_index(fits.locs, loc_inds);
+                
+                for i_loc = 1:numel(loc_inds)
+                    this_loc = fits.locs(i_loc);
+                    if do_check_fits
+                        if ~misc_emissions_analysis.is_fit_good_by_loc(this_loc)
+                            continue
+                        end
+                    end
+                    
+                    city_val = city_ld_method(this_loc);
+                    bckgnd_val = bckgnd_ld_method(this_loc);
+                    ratios(i_loc, i_yr) = city_val / bckgnd_val;
+                    extra_data(i_loc, i_yr) = extra_dat_method(this_loc);
+                end
+            end
+            
+            fig = figure;
+            plot_method(years, ratios, extra_data);
+            set(gca,'fontsize', 16);
+            ylabel(ylabel_str);
+            
+            function [city_method, bckgnd_method, check_fit, ylabel_str] = parse_ratio(ratio_method)
+                check_fit = true;
+                if strcmpi(ratio_method, 'a/B')
+                    city_method = @(loc) loc.fit_info.ffit.a;
+                    bckgnd_method = @(loc) loc.fit_info.ffit.B;
+                    ylabel_str = 'a/B';
+                elseif regcmp(ratio_method, 'u/\d+')
+                    percent = str2double(regexp(ratio_method, '\d+', 'match', 'once'));
+                    city_method = @find_ld_at_mu;
+                    bckgnd_method = @(loc) find_ld_at_percentile(loc, percent, loc.fit_info.ffit.mu_x);
+                    ylabel_str = sprintf('LD(\\mu_x)/%dth percentile', percent);
+                elseif regcmp(ratio_method, '\d+/\d+')
+                    check_fit = false;
+                    percents = cellfun(@str2double, strsplit(ratio_method, '/'));
+                    city_method = @(loc) find_ld_at_percentile(loc, percents(1));
+                    bckgnd_method = @(loc) find_ld_at_percentile(loc, percents(2), 0);
+                    ylabel_str = sprintf('%dth/%dth percentiles', percents(1), percents(2));
+                else
+                    error('Ratio method "%s" not recognized', ratio_method);
+                end
+            end
+            
+            function [plot_method, second_data_method] = parse_plot(plot_in)
+                second_data_method = @(loc) nan;
+                switch lower(plot_in)
+                    case 'box'
+                        plot_method = @plot_box;
+                    case 'ensemble'
+                        plot_method = @plot_ensemble;
+                        second_data_method = @get_nei_emis;
+                    otherwise
+                        error('Plot type "%s" not recognized', plot_in);
+                end
+            end
+            
+            function ld = find_ld_at_mu(loc)
+                ld = interp1(loc.no2_sectors.x, loc.no2_sectors.linedens, loc.fit_info.ffit.mu_x);
+            end
+            
+            function ld = find_ld_at_percentile(loc, q, x_end)
+                if nargin < 3
+                    all_ld = loc.no2_sectors.linedens;
+                else
+                    xx = loc.no2_sectors.x <= x_end;
+                    all_ld = loc.no2_sectors.linedens(xx);
+                end
+                ld = quantile(all_ld, q/100);
+            end
+            
+            function plot_box(yrs, r, varargin)
+                boxplot(r);
+                set(gca, 'xtick', 1:numel(yrs), 'xticklabels', yrs);
+            end
+            
+            function plot_ensemble(yrs, r, emis)
+                yrs = repmat(yrs, size(r,1), 1);
+                scatter(yrs(:), r(:), [], emis(:), 'filled');
+                cb = colorbar;
+                cb.Label.String = 'NEI Emissions (Mg NO/h)';
+            end
+            
+            function e = get_nei_emis(loc)
+                e = loc.emis_tau.nei_emis;
+                if isempty(e)
+                    e = nan;
+                end
+            end
+        end
+
+
         %%%%%%%%%%%%%%%%
         % Plot helpers %
         %%%%%%%%%%%%%%%%
