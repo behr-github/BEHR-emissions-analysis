@@ -51,7 +51,8 @@ classdef misc_emissions_analysis
         % Property like methods %
         %%%%%%%%%%%%%%%%%%%%%%%%%
         function value = workspace_dir()
-            my_dir = fileparts(mfilename('fullpath'));
+            %my_dir = fileparts(mfilename('fullpath'));
+            my_dir = '/global/home/users/laughner/MATLAB/BEHR-emissions-analysis';
             value = fullfile(my_dir, 'Workspaces');
         end
         
@@ -80,7 +81,7 @@ classdef misc_emissions_analysis
         end
         
         function value = wrf_vcd_dir
-            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.emis_wrf_dir, 'WRF-VCDs');
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRF-VCDs');
         end
         
         function value = oh_dir
@@ -2555,8 +2556,8 @@ classdef misc_emissions_analysis
             if ~wrf_bool
                 [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily','all');
             else
-                %behr_dir = misc_emissions_analysis.wrf_vcd_dir;
-                behr_dir = '/home/josh/Documents/MATLAB/BEHR-emissions-analysis/Workspaces/debugging';
+                behr_dir = misc_emissions_analysis.wrf_vcd_dir;
+                %behr_dir = '/home/josh/Documents/MATLAB/BEHR-emissions-analysis/Workspaces/debugging';
                 behr_files = dir(fullfile(behr_dir,'WRF*.mat'));
                 file_dates = date_from_behr_filenames(behr_files);
                 dvec_tmp = make_datevec(start_date, end_date);
@@ -2606,7 +2607,19 @@ classdef misc_emissions_analysis
             
             behr_dvec = date_from_behr_filenames(behr_files);
             if ~isequal(winds.dvec(:), behr_dvec(:))
-                E.callError('date_mismatch', 'Dates in the winds file (%s) do not match the BEHR files listed', winds_file)
+                warning('date_mismatch:behr_winds', 'Dates in winds file do not match the BEHR_files, cutting down');
+                dd = ~ismember(winds.dvec, behr_dvec);
+                winds.dvec(dd) = [];
+                if ~isequal(winds.dvec(:), behr_dvec(:))
+                    E.notimplemented('Winds file dates and behr dates are in different orders')
+                end
+                for i_loc = 1:numel(winds.locs)
+                    winds.locs(i_loc).WindDir(dd,:) = [];
+                    winds.locs(i_loc).WindSpeed(dd,:) = [];
+                    winds.locs(i_loc).U(dd,:) = [];
+                    winds.locs(i_loc).V(dd,:) = [];
+                    winds.locs(i_loc).WindUsedBool(dd,:) = [];
+                end
             end
 
             if ~isempty(loc_indicies)
