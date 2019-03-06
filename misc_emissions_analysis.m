@@ -175,10 +175,15 @@ classdef misc_emissions_analysis
             filename = misc_emissions_analysis.fits_file_name(start_date, end_date, false, 1:71, days_of_week, 'lu');
         end
         
-        function filename = wrf_fit_file_name(time_period, wrf_var)
+        function filename = wrf_fit_file_name(time_period, wrf_var, varargin)
+            if nargin < 3
+                dow = 'TWRF';
+            else
+                dow = varargin{1};
+            end
             start_date = datenum(min(time_period), 4, 1);
             end_date = datenum(max(time_period), 9, 30);
-            filename = misc_emissions_analysis.fits_file_name(start_date, end_date, true, 1:71, 'TWRF', wrf_var);
+            filename = misc_emissions_analysis.fits_file_name(start_date, end_date, true, 1:71, dow, wrf_var);
         end
         
         function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week, fit_type, wrf_var)

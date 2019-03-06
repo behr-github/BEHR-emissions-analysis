@@ -1012,8 +1012,8 @@ classdef misc_wrf_lifetime_analysis
             
             years = 2006:2013;
             year_windows = arrayfun(@(y) (y-1):(y+1), years, 'uniform', false);
-            data_fields = {'emis', 'emis_uncert', 'nei_emis', 'tau', 'tau_uncert', 'wrf_tau', 'wrf_tau_no2_oh',...
-                'wrf_tau_hno3', 'wrf_tau_ans', 'behr_no2', 'wrf_no2'};
+            data_fields = {'emis', 'emis_uncert', 'nei_emis', 'tau', 'tau_uncert', 'wrf_tau', 'wrf_tau_fit',...
+                'wrf_tau_no2_oh', 'wrf_tau_hno3', 'wrf_tau_ans', 'behr_no2', 'wrf_no2'};
             data = make_empty_struct_from_cell(data_fields, nan(numel(years), numel(locs)));
             
             % First load the WRF data and compute the derived quantities
@@ -1033,6 +1033,10 @@ classdef misc_wrf_lifetime_analysis
                 emg = load(misc_emissions_analysis.behr_fit_file_name(year_windows{i_yr}, 'TWRF'));
                 emg_locs = misc_emissions_analysis.cutdown_locs_by_index(emg.locs, loc_inds);
                 
+                % switch to TWRF later
+                wrf_emg = load(misc_emissions_analysis.wrf_fit_file_name(year_windows{i_yr}, 'no2_vcds', 'UMTWRFS'));
+                wrf_emg_locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_emg.locs, loc_inds);
+                
                 data.behr_no2(i_yr,:) = misc_emissions_analysis.avg_vcds_around_loc(locs, year_windows{i_yr}, 'TWRF');
                 data.wrf_no2(i_yr,:) = misc_emissions_analysis.avg_wrf_vcds_around_loc(locs, year_windows{i_yr}, 'no2');
                 
@@ -1044,6 +1048,7 @@ classdef misc_wrf_lifetime_analysis
                     data.tau_uncert(i_yr, i_loc) = emg_locs(i_loc).emis_tau.tau_uncert;
                     
                     data.wrf_tau(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau(i_yr);
+                    data.wrf_tau_fit(i_yr, i_loc) = wrf_emg_locs(i_loc).emis_tau.tau;
                     data.wrf_tau_no2_oh(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau_no2_oh(i_yr);
                     data.wrf_tau_hno3(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau_hno3(i_yr);
                     data.wrf_tau_ans(i_yr, i_loc) = wrf_locs(i_loc).WRFData.wrf_tau_ans(i_yr);
@@ -1057,12 +1062,13 @@ classdef misc_wrf_lifetime_analysis
                 subplot(3,1,1);
                 l1 = gobjects(5,1);
                 l1(1) = line(years, data.tau(:, i_loc), 'color', 'b', line_opts{:});
-                l1(2) = line(years, data.wrf_tau(:, i_loc), 'color', 'r', line_opts{:});
-                l1(3) = line(years, data.wrf_tau_no2_oh(:, i_loc), 'color', 'r', 'marker', 'o', 'linestyle', 'none', line_opts{:});
-                l1(4) = line(years, data.wrf_tau_hno3(:, i_loc), 'color', 'r', 'marker', '^', 'linestyle', 'none', line_opts{:});
-                l1(5) = line(years, data.wrf_tau_ans(:, i_loc), 'color', 'r', 'marker', '*', 'linestyle', 'none', line_opts{:});
+                l1(2) = line(years, data.wrf_tau_fit(:, i_loc), 'color', 'g', line_opts{:});
+                l1(3) = line(years, data.wrf_tau(:, i_loc), 'color', 'r', line_opts{:});
+                l1(4) = line(years, data.wrf_tau_no2_oh(:, i_loc), 'color', 'r', 'marker', 'o', 'linestyle', 'none', line_opts{:});
+                l1(5) = line(years, data.wrf_tau_hno3(:, i_loc), 'color', 'r', 'marker', '^', 'linestyle', 'none', line_opts{:});
+                l1(6) = line(years, data.wrf_tau_ans(:, i_loc), 'color', 'r', 'marker', '*', 'linestyle', 'none', line_opts{:});
                 ylabel('NO_x lifetime (h)');
-                legend(l1, {'BEHR', 'WRF (total)', 'WRF (NO_2 + OH)', 'WRF (HNO_3)', 'WRF (ANs)'});
+                legend(l1, {'BEHR', 'WRF (fit)', 'WRF (inst. total)', 'WRF (NO_2 + OH)', 'WRF (HNO_3)', 'WRF (ANs)'});
                 title(locs(i_loc).ShortName);
                 
                 subplot(3,1,2);
