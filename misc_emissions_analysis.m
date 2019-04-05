@@ -2873,19 +2873,27 @@ classdef misc_emissions_analysis
             
             for a=1:numel(locs)
                 fprintf('Fitting %s\n', locs(a).ShortName);
+                % Scale the stored line densities deliberately - this avoids
+                % issues later where the line densities don't match up with
+                % the EMG fit (e.g. in the systematic bias criteria for
+                % fit goodness)
+                locs(a).no2_sectors.linedens = locs(a).no2_sectors.linedens * ld_scale;
+                if strcmpi(fit_type_in, 'convolution')
+                    slow_line_densities.locs(a).no2_sectors.linedens = slow_line_densities.locs(a).no2_sectors.linedens*ld_scale;
+                end
                 safety_count = 1;
                 while true
                     if strcmpi(fit_type_in, 'convolution')
-                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens*ld_scale);
+                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens);
                     else
                         fit_type = fit_type_in;
                     end
                     try
-                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens*ld_scale, 'emgtype', fit_type, common_opts{:});
+                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
                         % Try this a second time - if it gives a different
                         % answer, we should re-run, since that suggests we
                         % didn't find the minimum one time.
-                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens*ld_scale, 'emgtype', fit_type, common_opts{:});
+                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
                     catch err
                         msg = sprintf('Fitting %s failed with error:\n "%s"\nSkip this location and continue?', locs(a).ShortName, err.message);
                         if skip_linedens_errors > 0 || (skip_linedens_errors < 0 && ask_yn(msg))
