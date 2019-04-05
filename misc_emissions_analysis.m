@@ -122,7 +122,7 @@ classdef misc_emissions_analysis
         end
         
         function value = wrf_vcd_dir
-            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.emis_wrf_dir, 'WRF-VCDs');
+            value = misc_emissions_analysis.subdir_prep(misc_emissions_analysis.workspace_dir, 'WRF-VCDs');
         end
         
         function value = oh_dir
@@ -2638,8 +2638,8 @@ classdef misc_emissions_analysis
             if ~wrf_bool
                 [behr_files, behr_dir] = list_behr_files(start_date, end_date,'daily','all');
             else
-                %behr_dir = misc_emissions_analysis.wrf_vcd_dir;
-                behr_dir = '/home/josh/Documents/MATLAB/BEHR-emissions-analysis/Workspaces/debugging';
+                behr_dir = misc_emissions_analysis.wrf_vcd_dir;
+                %behr_dir = '/home/josh/Documents/MATLAB/BEHR-emissions-analysis/Workspaces/debugging';
                 behr_files = dir(fullfile(behr_dir,'WRF*.mat'));
                 file_dates = date_from_behr_filenames(behr_files);
                 dvec_tmp = make_datevec(start_date, end_date);
@@ -2689,7 +2689,19 @@ classdef misc_emissions_analysis
             
             behr_dvec = date_from_behr_filenames(behr_files);
             if ~isequal(winds.dvec(:), behr_dvec(:))
-                E.callError('date_mismatch', 'Dates in the winds file (%s) do not match the BEHR files listed', winds_file)
+                warning('date_mismatch:behr_winds', 'Dates in winds file do not match the BEHR_files, cutting down');
+                dd = ~ismember(winds.dvec, behr_dvec);
+                winds.dvec(dd) = [];
+                if ~isequal(winds.dvec(:), behr_dvec(:))
+                    E.notimplemented('Winds file dates and behr dates are in different orders')
+                end
+                for i_loc = 1:numel(winds.locs)
+                    winds.locs(i_loc).WindDir(dd,:) = [];
+                    winds.locs(i_loc).WindSpeed(dd,:) = [];
+                    winds.locs(i_loc).U(dd,:) = [];
+                    winds.locs(i_loc).V(dd,:) = [];
+                    winds.locs(i_loc).WindUsedBool(dd,:) = [];
+                end
             end
 
             if ~isempty(loc_indicies)
@@ -2981,19 +2993,27 @@ classdef misc_emissions_analysis
             
             for a=1:numel(locs)
                 fprintf('Fitting %s\n', locs(a).ShortName);
+                % Scale the stored line densities deliberately - this avoids
+                % issues later where the line densities don't match up with
+                % the EMG fit (e.g. in the systematic bias criteria for
+                % fit goodness)
+                locs(a).no2_sectors.linedens = locs(a).no2_sectors.linedens * ld_scale;
+                if strcmpi(fit_type_in, 'convolution')
+                    slow_line_densities.locs(a).no2_sectors.linedens = slow_line_densities.locs(a).no2_sectors.linedens*ld_scale;
+                end
                 safety_count = 1;
                 while true
                     if strcmpi(fit_type_in, 'convolution')
-                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens*ld_scale);
+                        fit_type = convolved_fit_function(slow_line_densities.locs(a).no2_sectors.x, slow_line_densities.locs(a).no2_sectors.linedens);
                     else
                         fit_type = fit_type_in;
                     end
                     try
-                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens*ld_scale, 'emgtype', fit_type, common_opts{:});
+                        [ffit, emgfit, param_stats, f0, history, fitresults] = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
                         % Try this a second time - if it gives a different
                         % answer, we should re-run, since that suggests we
                         % didn't find the minimum one time.
-                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens*ld_scale, 'emgtype', fit_type, common_opts{:});
+                        ffit_check = fit_line_density(locs(a).no2_sectors.x, locs(a).no2_sectors.linedens, 'emgtype', fit_type, common_opts{:});
                     catch err
                         msg = sprintf('Fitting %s failed with error:\n "%s"\nSkip this location and continue?', locs(a).ShortName, err.message);
                         if skip_linedens_errors > 0 || (skip_linedens_errors < 0 && ask_yn(msg))
