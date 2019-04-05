@@ -565,6 +565,8 @@ classdef misc_oh_analysis
             lifetime_mode = pout.lifetime_mode;
             plot_mode = pout.plot_mode;
             
+            use_wrf_fit = strcmpi(lifetime_mode, 'fit');
+            
             if three_yr_windows
                 years = 2006:2013;
             else
@@ -593,38 +595,62 @@ classdef misc_oh_analysis
                 case 'no2+oh+ans'
                     lifetime_vars = {'LNOXA', 'no2', 'ho', 'ndens', 'temperature'};
                     hno3_tau_mode = 'no2+oh';
+                case 'fit'
+                    % needed for the HNO3/ANs lifetime calculation
+                    lifetime_vars = {'LNOXA', 'LNOXHNO3'};
                 otherwise
                     error('No lifetime variables defined for lifetime_mode = "%s"', lifetime_mode);
             end
             common_vars = {'nox', 'ho', 'LNOXA', 'vocr', 'hcho', 'temperature', 'ndens'};
-            calc_vars = {'tau'};
+            calc_vars = {'tau', 'tau_fit'};
             wrf_vars = unique(veccat(common_vars, lifetime_vars));
             all_vars = veccat(wrf_vars, calc_vars);
             proto_array = repmat({nan(n_yrs,1)}, n_locs, 1);
             % the structure index will be the location, the arrays in each
             % location field will be by year
             wrf_data = make_empty_struct_from_cell(all_vars, proto_array);
+            
+            % for three year windows, we load the WRF variables outside the
+            % loop b/c to handle filling in missing years, the average
+            % profiles function loads all years any way
+            all_windows = arrayfun(@misc_oh_analysis.year_window, years, 'uniform', false);
+            wrf_locs = misc_emissions_analysis.average_profiles_for_locations(all_windows, 'TWRF', locs, 'species', wrf_vars);
+            wrf_locs = [wrf_locs.WRFData];
             for i_yr=1:n_yrs
                 fprintf('Loading data for %d\n', years(i_yr));
                 if three_yr_windows
-                    year_window = misc_oh_analysis.year_window(years(i_yr));
-                    wrf_locs = misc_emissions_analysis.average_profiles_for_locations(year_window, 'TWRF', locs, 'species', wrf_vars);
-                    wrf_locs = [wrf_locs.WRFData];
+                    if use_wrf_fit
+                        year_window = all_windows{i_yr};
+                        wrf_fits = load(misc_emissions_analysis.wrf_fit_file_name(year_window, 'no2_vcds', 'UMTWRFS'));
+                        wrf_fit_locs = misc_emissions_analysis.cutdown_locs_by_index(wrf_fits.locs, loc_inds);
+                        clear wrf_fits
+                    end
                 else
                     year_window = years(i_yr);
                     wrf_locs = misc_oh_analysis.load_wrf_avg(locs, wrf_vars, year_window, []);
+                    if use_wrf_fit
+                        error('"fit" lifetime mode not available for 1 year windows');
+                    end
                 end
                 
                 for i_loc = 1:n_locs
                     for i_var = 1:numel(wrf_vars)
                         this_var = wrf_vars{i_var};
-                        wrf_data(i_loc).(this_var)(i_yr) = wrf_locs(i_loc).(this_var);
+                        wrf_data(i_loc).(this_var)(i_yr) = wrf_locs(i_loc).(this_var)(i_yr);
+                    end
+                    
+                    if use_wrf_fit
+                        wrf_data(i_loc).tau_fit(i_yr) = wrf_fit_locs(i_loc).emis_tau.tau;
                     end
                 end
             end
             
             for i_loc = 1:n_locs
-                wrf_data(i_loc).tau = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), lifetime_mode);
+                if strcmpi(lifetime_mode, 'fit')
+                    wrf_data(i_loc).tau = wrf_data(i_loc).tau_fit;
+                else
+                    wrf_data(i_loc).tau = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), lifetime_mode, loc_inds(i_loc));
+                end
                 wrf_data(i_loc).tau_hno3 = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), hno3_tau_mode);
                 wrf_data(i_loc).tau_ans = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), 'ans');
                 %wrf_data(i_loc).tau_oh_no2 = misc_oh_analysis.compute_wrf_tau(wrf_data(i_loc), 'no2+oh');
@@ -745,6 +771,7 @@ classdef misc_oh_analysis
         end
         
         function tau = compute_wrf_tau(Wrf, lifetime_mode)
+            
             switch lower(lifetime_mode)
                 case 'simple'
                     loss = Wrf.LNOXHNO3 + Wrf.LNOXA;
