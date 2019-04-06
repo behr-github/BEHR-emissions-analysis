@@ -4101,9 +4101,9 @@ classdef misc_emissions_analysis
             
             function [locs_wkday, locs_wkend] = load_behr_tau(this_year_window)
                 fits = load(misc_emissions_analysis.behr_fit_file_name(this_year_window, 'TWRF'));
-                locs_wkday = fits.locs;
-                fits = load(misc_emissions_analysis.behr_fit_file_name(this_year_window, 'TWRF'));
-                locs_wkend = fits.locs;
+                locs_wkday = misc_emissions_analysis.append_new_spreadsheet_fields(fits.locs);
+                fits = load(misc_emissions_analysis.behr_fit_file_name(this_year_window, 'US'));
+                locs_wkend = misc_emissions_analysis.append_new_spreadsheet_fields(fits.locs);
             end
             
             function [locs_wkday, locs_wkend] = load_wrf_tau(this_year_window)
