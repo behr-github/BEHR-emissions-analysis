@@ -219,8 +219,10 @@ if ischar(linedens_field) && ~strcmpi(linedens_field, 'behr')
     linedens_field = {linedens_field};
 elseif ~ischar(linedens_field)
     E.badinput('"linedens_field" must be a char array');
-else
+elseif strcmpi(linedens_field, 'behr')
     omi_field = 'BEHRColumnAmountNO2Trop';
+elseif strcmpi(linedens_field, 'nasa')
+    omi_field = 'ColumnAmountNO2Trop';
 end
 
 % Pixel reject structure for row anomaly, cloud fraction, etc.
@@ -375,8 +377,8 @@ no2_lindens_std = no2_lindens_std(rr);
 no2_lindens_std = sqrt(no2_lindens_std);
 
 % Convert line density from molec/cm to moles/km, if doing standard BEHR
-% line densities
-if strcmpi(linedens_field, 'behr')
+% or NASA line densities
+if ismember(lower(linedens_field), {'behr', 'nasa'})
     no2_linedens = no2_linedens * 1e5 / 6.022e23;
     no2_lindens_std = no2_lindens_std * 1e5 / 6.022e23;
 end

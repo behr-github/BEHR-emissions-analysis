@@ -155,7 +155,19 @@ classdef misc_emissions_analysis
             filename = fullfile(misc_emissions_analysis.site_info_dir, filename);
         end
         
-        function filename = line_density_file_name(start_date, end_date, by_sectors, wind_reject_filtered, wind_dir_weighted, use_wrf, winds_op, winds_cutoff, loc_inds, days_of_week, wrf_var)
+        function ind = nasa_wrf_int(use_wrf, use_nasa)
+            if use_wrf && use_nasa
+                error('use_wrf and use_nasa cannot both be true')
+            elseif use_wrf
+                ind = 1;
+            elseif use_nasa
+                ind = 2;
+            else
+                ind = 0;
+            end
+        end
+        
+        function filename = line_density_file_name(start_date, end_date, by_sectors, wind_reject_filtered, wind_dir_weighted, var_used, winds_op, winds_cutoff, loc_inds, days_of_week, wrf_var)
             if by_sectors
                 sectors_string = 'sectors';
             else
@@ -174,12 +186,14 @@ classdef misc_emissions_analysis
                 weighted_string = 'unweighted';
             end
             
-            if use_wrf
+            if var_used == 1
                 if exist('wrf_var', 'var') && ~isempty(wrf_var)
                     data_string = sprintf('WRF_%s', upper(wrf_var));
                 else
                     data_string = 'WRF';
                 end
+            elseif var_used == 2
+                data_string = 'NASA';
             else
                 data_string = 'BEHR';
             end
@@ -2554,6 +2568,10 @@ classdef misc_emissions_analysis
             %   'winds_cutoff' - a scalar number indicating the wind speed
             %   criteria that goes with 'winds_op'.
             %
+            %   'use_nasa' - a scalar logical indicating whether to use
+            %   BEHR column densities (false) or NASA column densities
+            %   (true).
+            %
             %   'use_wrf' - a scalar logical indicating whether to use VCDs
             %   derived from WRF model simulation (using the
             %   preproc_AprioriVCDs utility in this repository). By
@@ -2595,6 +2613,7 @@ classdef misc_emissions_analysis
             p.addParameter('days_of_week', 'UMTWRFS');
             p.addParameter('winds_op', 'gt')
             p.addParameter('winds_cutoff', 3);
+            p.addParameter('use_nasa', false);
             p.addParameter('use_wrf', false);
             p.addParameter('wrf_var', '');
             p.addParameter('use_wind_rejects',true);
@@ -2613,6 +2632,7 @@ classdef misc_emissions_analysis
             days_of_week = pout.days_of_week;
             winds_op = pout.winds_op;
             winds_cutoff = pout.winds_cutoff;
+            use_nasa = pout.use_nasa;
             wrf_bool = pout.use_wrf;
             wrf_var = pout.wrf_var;
             use_wind_rejects = pout.use_wind_rejects;
@@ -2659,7 +2679,8 @@ classdef misc_emissions_analysis
             
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, filter_by_wind_dir, weight_wind_dirs, wrf_bool, winds_op, winds_cutoff, loc_indicies, days_of_week, wrf_var);
+            type_indicator = misc_emissions_analysis.nasa_wrf_int(wrf_bool, use_nasa);
+            save_name = misc_emissions_analysis.line_density_file_name(start_date, end_date, by_sectors, filter_by_wind_dir, weight_wind_dirs, type_indicator, winds_op, winds_cutoff, loc_indicies, days_of_week, wrf_var);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -2758,6 +2779,8 @@ classdef misc_emissions_analysis
                     if ~isempty(wrf_var)
                         opt_args = veccat(opt_args, {'linedens_field', wrf_var});
                     end
+                elseif use_nasa
+                    opt_args = veccat(opt_vars, 'linedens_field', 'nasa');
                 end
                 
                 % "wind_reject_field" will have been set to 'none' if
@@ -2784,8 +2807,15 @@ classdef misc_emissions_analysis
             locs = winds.locs;
             dvec = winds.dvec;
             write_date = datestr(now);
+            if wrf_bool
+                ld_variable = wrf_var;
+            elseif use_nasa
+                ld_variable = 'ColumnAmountNO2Trop';
+            else
+                ld_variable = 'BEHRColumnAmountNO2Trop';
+            end
             
-            save(save_name, '-v7.3', 'locs', 'dvec', 'write_date');
+            save(save_name, '-v7.3', 'locs', 'dvec', 'write_date', 'ld_variable');
         end
         
         function locs = make_emg_fits(varargin)
