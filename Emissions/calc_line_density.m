@@ -211,7 +211,7 @@ elseif any(diff(wind_weights_bins(:)) < 0)
     E.badinput('''wind_weights_bins'' must be monotonically increasing');
 end
 
-if ischar(linedens_field) && ~strcmpi(linedens_field, 'behr')
+if ischar(linedens_field) && ~ismember(lower(linedens_field), {'behr','nasa'})
     % rotate_plume, if given 'behr' as grid_control will do the standard
     % rotation and gridding for BEHR VCDs. Otherwise it expects a cell
     % array of field names to grid.
@@ -254,7 +254,7 @@ for d=1:numel(fnames_struct)
         continue
     end
     
-    if ~strcmpi(linedens_field, 'behr') && ~isfield(D.Data, linedens_field)
+    if ~ismember(lower(linedens_field), {'behr', 'nasa'}) && ~isfield(D.Data, linedens_field)
         E.callError('data_missing_field', 'File %s is missing the requested data field "%s"', this_file, linedens_field);
     end
 

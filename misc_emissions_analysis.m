@@ -2780,7 +2780,7 @@ classdef misc_emissions_analysis
                         opt_args = veccat(opt_args, {'linedens_field', wrf_var});
                     end
                 elseif use_nasa
-                    opt_args = veccat(opt_vars, 'linedens_field', 'nasa');
+                    opt_args = veccat(opt_args, {'linedens_field', 'nasa'});
                 end
                 
                 % "wind_reject_field" will have been set to 'none' if
