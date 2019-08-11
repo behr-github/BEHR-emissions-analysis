@@ -2097,8 +2097,11 @@ classdef misc_emissions_analysis
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
             common_opts = {'DEBUG_LEVEL', 1, 'dayofweek', days_of_week};
+            if strcmpi(species, 'nasa-no2')
+                common_opts = veccat(common_opts, {'avgfield', 'ColumnAmountNO2Trop'});
+            end
             switch lower(species)
-                case 'no2'
+                case {'no2','nasa-no2'}
                     %[monthly.no2, monthly.lon, monthly.lat, monthly.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
                     monthly = [];
                     [daily.no2, daily.lon, daily.lat, daily.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
