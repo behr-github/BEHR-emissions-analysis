@@ -5474,11 +5474,18 @@ classdef misc_emissions_analysis
             %       * 'timeser' plots the HCHO/NO2 ratio as a time series.
             %       * 'scatter-avg', 'timeser-avg' same as above except
             %       uses the group average, rather than individual cities.
+            %
+            %   'filter_fit' - whether or not to remove cities if their
+            %   weekday lifetime fit is bad. 0 disables this, 1 only
+            %   removes it when the fit is bad. >=2 requires that a city
+            %   have that many good years to be kepts, but if kept, is
+            %   kept for all years.
             
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
             p.addParameter('no2_type', 'behr');
             p.addParameter('plot_mode', 'timeser-avg'); % 'scatter', 'scatter-avg', 'timeser', or 'timeser-avg'
+            p.addParameter('filter_fit', 0);
             p.addParameter('ax', []);
             p.parse(varargin{:});
             pout = p.Results;
@@ -5486,6 +5493,7 @@ classdef misc_emissions_analysis
             plot_mode = pout.plot_mode;
             no2_type = pout.no2_type;
             vcd_radius = pout.radius;
+            do_filter_fit = pout.filter_fit;
             ax = pout.ax;
             
             if isempty(ax)
@@ -5535,12 +5543,36 @@ classdef misc_emissions_analysis
             no2 = repmat(proto_arr, size(cities));
             hcho = repmat(proto_arr, size(cities));
             names = cell(1,4);
+            
+            % If filtering on good fits, we need to go through and load
+            % them first to figure out which cities to keep. When not
+            % filtering, just pretend all fits are good for simplicity.
+            good_fits = true(numel(years), numel(locs));
+            if do_filter_fit > 0
+                for iyr = 1:numel(years)
+                    yr = years(iyr);
+                    yr_win = (yr-1):(yr+1);
+                    fprintf('Loading fits for %s\n', sprintf_ranges(yr_win))
+                    [sdate, edate] = misc_emissions_analysis.select_start_end_dates(yr_win);
+                    fit_locs = load(misc_emissions_analysis.fits_file_name(sdate, edate, false, 1:71, 'TWRF', 'lu'));
+                    these_good_fits = misc_emissions_analysis.is_fit_good_by_loc(fit_locs.locs, 'any_num_pts', true, 'DEBUG_LEVEL', 0);
+                    good_fits(iyr, :) = these_good_fits(1:numel(locs));
+                end
+                
+                if do_filter_fit > 1
+                    good_fits = sum(good_fits, 1) >= do_filter_fit;
+                    good_fits = repmat(good_fits, numel(years), 1);
+                end
+            end
+            
             for iyr = 1:numel(years)
                 yr = years(iyr);
                 yr_win = (yr-1):(yr+1);
                 
                 no2_avgs = misc_emissions_analysis.avg_vcds_around_loc(locs,yr_win,'TWRF','species',no2_specie,'radius',vcd_radius);
                 hcho_avgs = misc_emissions_analysis.avg_vcds_around_loc(locs,yr_win,'TWRF','species','hcho','radius',vcd_radius);
+                no2_avgs(~good_fits(iyr, :)) = nan;
+                hcho_avgs(~good_fits(iyr, :)) = nan;
                 
                 for i_grp = 1:numel(cities)
                     loc_inds = misc_emissions_analysis.convert_input_loc_inds(cities{i_grp});
