@@ -132,12 +132,14 @@ classdef misc_emissions_analysis
         function filename = avg_file_name(year_in, days_of_week, varargin)
             p = advInputParser;
             p.addOptional('species', 'NO2');
+            p.addParameter('season', 'summer');
             p.parse(varargin{:});
             pout = p.Results;
             species = lower(pout.species);
+            season = capitalize_words(pout.season);
             
             years_str = strjoin(sprintfmulti('%d', year_in),'_');
-            filename = sprintf('Summer_avg_%s_%s_%s.mat', species, years_str, days_of_week);
+            filename = sprintf('%s_avg_%s_%s_%s.mat', season, species, years_str, days_of_week);
             filename = fullfile(misc_emissions_analysis.avg_save_dir, filename);
         end
         
@@ -501,9 +503,11 @@ classdef misc_emissions_analysis
             % degrees
             p = advInputParser;
             p.addOptional('radius', []);
+            p.addParameter('inner_rad', 0);
             p.parse(varargin{:});
             pout = p.Results;
             user_radius = pout.radius;
+            inner_radius = pout.inner_rad;
             
             if isempty(user_radius)
                 radius = mean(loc.BoxSize(3:4));
@@ -511,7 +515,7 @@ classdef misc_emissions_analysis
                 radius = user_radius;
             end
             r = sqrt((lon - loc.Longitude).^2 + (lat - loc.Latitude).^2);
-            xx = r < radius;
+            xx = r >= inner_radius & r < radius;
         end
         
         function [wrf_files, F] = closest_wrf_file_in_time(date_in, F)
@@ -1666,6 +1670,7 @@ classdef misc_emissions_analysis
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
+            p.addParameter('inner_rad', 0);
             p.addParameter('species', 'no2');
             p.addParameter('ignore_missing_files', false);
             
@@ -1673,6 +1678,7 @@ classdef misc_emissions_analysis
             pout = p.Results;
             
             avg_radius = pout.radius;
+            inner_radius = pout.inner_rad;
             vcd_species = pout.species;
             ignore_missing_files = pout.ignore_missing_files;
             
@@ -1704,7 +1710,7 @@ classdef misc_emissions_analysis
                 % This will use the box width (from center to edge
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
-                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius);
+                xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius, 'inner_rad', inner_radius);
                 loc_avg_vcds(i_loc) = nanmean(vcds.daily_vcds(xx_radius));
             end
         end
@@ -1902,6 +1908,33 @@ classdef misc_emissions_analysis
             
         end
         
+        function good_fits = create_fit_filter_vecs(filter_fit_flag, years, any_num_pts)
+            if nargin < 2
+                any_num_pts = true;
+            end
+            
+            if filter_fit_flag == 0
+                good_fits = true(numel(years), 71);
+                return
+            else
+                good_fits = false(numel(years), 71);
+            end
+            for iyr = 1:numel(years)
+                yr = years(iyr);
+                yr_win = (yr-1):(yr+1);
+                fprintf('Loading fits for %s\n', sprintf_ranges(yr_win))
+                [sdate, edate] = misc_emissions_analysis.select_start_end_dates(yr_win);
+                fit_locs = load(misc_emissions_analysis.fits_file_name(sdate, edate, false, 1:71, 'TWRF', 'lu'));
+                these_good_fits = misc_emissions_analysis.is_fit_good_by_loc(fit_locs.locs, 'any_num_pts', any_num_pts, 'DEBUG_LEVEL', 0);
+                good_fits(iyr, :) = these_good_fits;
+            end
+            
+            if filter_fit_flag > 1
+                good_fits = sum(good_fits, 1) >= filter_fit_flag;
+                good_fits = repmat(good_fits, numel(years), 1);
+            end
+        end
+        
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         % Interactive utility methods %
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -2065,6 +2098,36 @@ classdef misc_emissions_analysis
         % Generation methods %
         %%%%%%%%%%%%%%%%%%%%%%
         function make_summer_averages(varargin)
+            function [start_date, end_date] = make_dates(avg_year)
+                start_date = cell(size(avg_year));
+                end_date = cell(size(avg_year));
+                for a=1:numel(avg_year)
+                    start_date{a} = datenum(avg_year(a), 4, 1);
+                    end_date{a} = datenum(avg_year(a), 9, 30);
+                end
+            end
+            
+            misc_emissions_analysis.make_vcd_averages(@make_dates, 'summer', varargin{:});
+        end
+        
+        function make_winter_averages(varargin)
+            function [start_date, end_date] = make_dates(avg_year)
+                start_date = cell(2, numel(avg_year));
+                end_date = cell(2, numel(avg_year));
+                for a=1:numel(avg_year)
+                    start_date{1,a} = datenum(avg_year(a), 1, 1);
+                    end_date{1,a} = datenum(avg_year(a), 3, 31);
+                    start_date{2,a} = datenum(avg_year(a), 10, 1);
+                    end_date{2,a} = datenum(avg_year(a), 12, 31);
+                end
+                start_date = start_date(:);
+                end_date = end_date(:);
+            end
+            
+            misc_emissions_analysis.make_vcd_averages(@make_dates, 'winter', varargin{:});
+        end
+        
+        function make_vcd_averages(date_fxn, season, varargin)
             % MAKE_SUMMER_AVERAGES Make summertime averages of NO2 or HCHO
             % VCDs.
             %
@@ -2093,12 +2156,7 @@ classdef misc_emissions_analysis
             days_of_week = misc_emissions_analysis.choose_days_of_week(days_of_week);
             species = opt_ask_multichoice('Which species to average?', {'NO2', 'HCHO'}, species, '"species"');
             
-            start_date = cell(size(avg_year));
-            end_date = cell(size(avg_year));
-            for a=1:numel(avg_year)
-                start_date{a} = datenum(avg_year(a), 4, 1);
-                end_date{a} = datenum(avg_year(a), 9, 30);
-            end
+            [start_date, end_date] = date_fxn(avg_year);
             
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
@@ -2116,7 +2174,7 @@ classdef misc_emissions_analysis
                     daily = monthly;
             end
             
-            save_name = misc_emissions_analysis.avg_file_name(avg_year, days_of_week, species);
+            save_name = misc_emissions_analysis.avg_file_name(avg_year, days_of_week, species, 'season', season);
             save(save_name, 'monthly', 'daily');
         end
         
@@ -5458,10 +5516,15 @@ classdef misc_emissions_analysis
             end
         end
         
-        function fig = plot_no2_hcho_vcds_by_group(varargin)
+        function [fig, ratio, ratio_std, ratio_n] = plot_no2_hcho_vcds_by_group(varargin)
             % PLOT_NO2_HCHO_VCDS_BY_GROUP Plot ratio of HCHO to NO2 VCDs for
             % each of the four groups of cities (decreasing, increasing,
             % CCD and CCU).
+            %
+            % Returns the figure handle, and (if plot_mode is a timeseries
+            % one) the HCHO:NO2 ratios, standard deviations, and number of
+            % points as cell arrays (decreasing, increasing, ccup, and
+            % ccdown).
             %
             % Parameters:
             %   'radius' - radius (in degrees) to averaged VCDs from around
@@ -5547,23 +5610,10 @@ classdef misc_emissions_analysis
             % If filtering on good fits, we need to go through and load
             % them first to figure out which cities to keep. When not
             % filtering, just pretend all fits are good for simplicity.
-            good_fits = true(numel(years), numel(locs));
-            if do_filter_fit > 0
-                for iyr = 1:numel(years)
-                    yr = years(iyr);
-                    yr_win = (yr-1):(yr+1);
-                    fprintf('Loading fits for %s\n', sprintf_ranges(yr_win))
-                    [sdate, edate] = misc_emissions_analysis.select_start_end_dates(yr_win);
-                    fit_locs = load(misc_emissions_analysis.fits_file_name(sdate, edate, false, 1:71, 'TWRF', 'lu'));
-                    these_good_fits = misc_emissions_analysis.is_fit_good_by_loc(fit_locs.locs, 'any_num_pts', true, 'DEBUG_LEVEL', 0);
-                    good_fits(iyr, :) = these_good_fits(1:numel(locs));
-                end
-                
-                if do_filter_fit > 1
-                    good_fits = sum(good_fits, 1) >= do_filter_fit;
-                    good_fits = repmat(good_fits, numel(years), 1);
-                end
-            end
+            
+            good_fits = misc_emissions_analysis.create_fit_filter_vecs(do_filter_fit, years);
+            good_fits = good_fits(:, 1:numel(locs));
+           
             
             for iyr = 1:numel(years)
                 yr = years(iyr);
@@ -5590,6 +5640,10 @@ classdef misc_emissions_analysis
             lall = gobjects(numel(cities),1);
             plot_err = false;
             add_city_names = false;
+            
+            ratio = cell(size(no2));
+            ratio_std = cell(size(no2));
+            ratio_n = cell(size(no2));
             for i_grp = 1:numel(cities)
                 if regcmpi(plot_mode, '^scatter')
                     if regcmpi(plot_mode, 'avg$')
@@ -5601,24 +5655,27 @@ classdef misc_emissions_analysis
                     l = line(ax, no2{i_grp}, hcho{i_grp}, group_styles(i_grp));
                     lall(i_grp) = l(1);
                 elseif regcmpi(plot_mode, '^timeser')
-                    ratio = hcho{i_grp} ./ no2{i_grp};
+                    this_ration = hcho{i_grp} ./ no2{i_grp};
                     if regcmpi(plot_mode, 'avg$')
                         %ratio(ratio<0) = nan;
-                        ratio_std = nanstd(ratio, [], 2);
-                        ratio = nanmean(ratio, 2);
+                        ratio_n{i_grp} = sum(~isnan(this_ration), 2);
+                        ratio_std{i_grp} = nanstd(this_ration, [], 2);
+                        ratio{i_grp} = nanmean(this_ration, 2);
                         plot_err = true;
                         x = years + group_jitter(i_grp);
                     else
+                        ratio_n = ones(size(this_ration));
+                        ratio_std = nan(size(this_ration));
                         add_city_names = true;
                         x = years;
                     end
-                    l = line(ax, x, ratio, group_styles(i_grp));
+                    l = line(ax, x, ratio{i_grp}, group_styles(i_grp));
                     if plot_err
-                        scatter_errorbars(x, ratio, ratio_std, 'color', group_styles(i_grp).color, 'parent', ax)
+                        scatter_errorbars(x, ratio{i_grp}, ratio_std{i_grp}, 'color', group_styles(i_grp).color, 'parent', ax)
                     elseif add_city_names
                         for i_city = 1:length(names{i_grp})
                             city_x = i_grp + 2013*ones(size(names{i_grp}));
-                            city_y = ratio(end,:);
+                            city_y = ratio{i_grp}(end,:);
                             text(city_x, city_y, names{i_grp}, 'color', group_styles(i_grp).color, 'parent', ax);
                         end
                     end
@@ -5632,6 +5689,125 @@ classdef misc_emissions_analysis
                 set(gca, 'xlim', [2005 2020], 'xtick', 2006:2013)
             end
         end
+        
+        function plot_hcho_no2_ratio_sig(varargin)
+            args = update_params(varargin, 'plot_mode', 'timeser-avg');
+            [fig, ratios, ratio_stds, ratio_ns] = misc_emissions_analysis.plot_no2_hcho_vcds_by_group(args{:});
+            % each of the outputs should be a cell array with each cell
+            % being a group of cities and a column vector of values per 
+            % year.
+            ratios = cat(2, ratios{:});
+            ratio_stds = cat(2, ratio_stds{:});
+            ratio_ns = cat(2, ratio_ns{:});
+            names = {'Decr.', 'Incr', 'CCU', 'CCD'};
+            
+            n_groups = size(ratios, 2);
+            n_years = size(ratios, 1);
+            close(fig);
+            fig = figure;
+            
+            [yticks, xticks] = meshgrid(1:n_groups, 1:n_groups);
+            years = 2006:2013;
+            if numel(years) ~= n_years
+                error('Different number of years than expected');
+            end
+            
+            for iyr = 1:n_years
+                these_ratios = ratios(iyr, :);
+                these_stds = ratio_stds(iyr, :);
+                these_ns = ratio_ns(iyr, :);
+                
+                is_diff = false(n_groups, n_groups);
+                for i = 1:n_groups
+                    for j = (i+1):n_groups
+                        [~, ~, d] = two_sample_t_test_alt(these_ratios(i), these_stds(i), these_ns(i), these_ratios(j), these_stds(j), these_ns(j));
+                        is_diff(i,j) = d;
+                        is_diff(j,i) = d;
+                    end
+                end
+                
+                ax = subplot(2, 4, iyr);
+                line(xticks(is_diff), yticks(is_diff), 'marker', 'o', 'color', [0 0.5 0], 'linewidth', 2, 'linestyle', 'none');
+                line(xticks(~is_diff), yticks(~is_diff), 'marker', 'x', 'color', 'r', 'linewidth', 2, 'linestyle', 'none');
+                set(ax, 'xtick', 1:4, 'xticklabels', names, 'ytick', 1:4, 'yticklabels', names);
+                title(ax, sprintf('%d', years(iyr)));
+            end
+            
+            subplot_stretch(2,4);
+        end
+        
+        function plot_vcd_trends_by_radius(varargin)
+            %UNTITLED Summary of this function goes here
+            %   Detailed explanation goes here
+            
+            p = advInputParser;
+            p.addParameter('filter_flag', 0, @(x) x >= 0);
+            p.addParameter('specie', 'no2');
+            p.addParameter('days_of_week', 'TWRF', @(x) ismember(x, 'TWRF', 'US'));
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            filter_flag = pout.filter_flag;
+            days_of_week = pout.days_of_week;
+            vcd_specie = pout.specie;
+            
+            years = 2006:2013;
+            radii = [0, 25, 50, 75, 100]/111;  % roughly convert kilometers into degrees.
+            midpoints = 0.5 * (radii(1:end-1) + radii(2:end));
+            n_rad = numel(radii) - 1;
+            good_fits = misc_emissions_analysis.create_fit_filter_vecs(filter_flag, years);
+            
+            locs = misc_emissions_analysis.read_locs_file();
+            loc_inds = 1:49;%misc_emissions_analysis.loc_types_to_inds('Cities');
+            locs = locs(loc_inds);
+            good_fits = good_fits(:, loc_inds);
+            
+            vcds = nan([size(good_fits), n_rad]);
+            
+            for iyr = 1:numel(years)
+                for irad = 1:n_rad
+                    yr_win = (years(iyr)-1):(years(iyr)+1);
+                    inner = radii(irad);
+                    outer = radii(irad+1);
+                    these_vcds = misc_emissions_analysis.avg_vcds_around_loc(locs, yr_win, days_of_week,...
+                        'species', vcd_specie, 'radius', outer, 'inner_rad', inner);
+                    these_vcds(~good_fits(iyr, :)) = nan;
+                    vcds(iyr, :, irad) = these_vcds;
+                end
+            end
+            
+            % For each group of cities, get the average by year and radius, then plot
+            % VCD vs. distance, colored by time.
+            cities = cell(1,4);
+            cities_names = {'Decreasing', 'Increasing', 'CCU', 'CCD'};
+            cities{1} = cities_lifetime_groups.decr_lifetime;
+            cities{2} = cities_lifetime_groups.incr_lifetime;
+            cities{3} = cities_lifetime_groups.ccup_lifetime;
+            cities{4} = cities_lifetime_groups.ccdown_lifetime;
+            
+            fig = figure;
+            
+            for i_grp = 1:numel(cities)
+                ax = subplot(2, 2, i_grp);
+                grp_inds = misc_emissions_analysis.convert_input_loc_inds(cities{i_grp});
+                grp_vcds = squeeze(nanmean(vcds(:, grp_inds, :), 2));
+                for iyr = 1:numel(years)
+                    color = map2colmap(iyr, 1, numel(years), 'jet');
+                    line(midpoints, grp_vcds(iyr, :), 'color', color, 'marker', 'o');
+                end
+                
+                colorbar;
+                caxis([min(years), max(years)]);
+                colormap('jet');
+                title(ax, cities_names{i_grp});
+            end
+            
+            subplot_stretch(2,2);
+            
+        end
+
+
 
         function make_t_score_table(csv_file, dow)
             years = 2006:2013;
