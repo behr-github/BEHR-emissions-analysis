@@ -1074,9 +1074,15 @@ classdef misc_emissions_analysis
             vcd_species = pout.species;
             ignore_missing_files = pout.ignore_missing_files;
             
-            allowed_species = {'no2','hcho'};
+            allowed_species = {'nasa_no2', 'no2','hcho'};
             if ~ismember(vcd_species, allowed_species)
                 E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
+            end
+            
+            if strcmpi(vcd_species, 'nasa_no2')
+                struct_field = 'no2';
+            else
+                struct_field = vcd_species;
             end
             
             init_done = false;
@@ -1101,7 +1107,7 @@ classdef misc_emissions_analysis
                     adding_monthly = ~isempty(year_vcds.monthly);
                     init_done = true;
                 end
-                DailyAvg.addData(year_vcds.daily.(vcd_species), year_vcds.daily.weights)
+                DailyAvg.addData(year_vcds.daily.(struct_field), year_vcds.daily.weights)
                 if adding_monthly
                     if ~isempty(year_vcds.monthly)
                         MonthlyAvg.addData(year_vcds.monthly.(vcd_species), year_vcds.monthly.weights)
@@ -1678,7 +1684,7 @@ classdef misc_emissions_analysis
                 end
             end
             
-            allowed_species = {'no2','hcho'};
+            allowed_species = {'no2','nasa_no2','hcho'};
             if ~ismember(vcd_species, allowed_species)
                 E.badinput('"vcd_species" must be one of: %s', strjoin(allowed_species, ', '))
             end
@@ -5000,6 +5006,10 @@ classdef misc_emissions_analysis
             %   'req_most' - set to true to limit the locations plotted to
             %   those with at most one bad fit.
             %
+            %   'min_fits_req' - minimum number of good fits required for a
+            %   city to be included. Default is 1. Overridden by 'req_most'
+            %   when that is true.
+            %
             %   'req_num_pts' - set to true to require >= 60 points in the
             %   line density.
             %
@@ -5021,8 +5031,10 @@ classdef misc_emissions_analysis
             p.addParameter('allow_missing_vcds', false);
             p.addParameter('exclude_bad_fits', true);
             p.addParameter('req_most', nan);
+            p.addParameter('min_fits_req', 1);
             p.addParameter('req_num_pts', nan);
             p.addParameter('incl_err', nan);
+            p.addParameter('use_nasa_vcds', false);
             p.addParameter('ax',[]);
             p.parse(varargin{:});
             pout = p.Results;
@@ -5031,6 +5043,7 @@ classdef misc_emissions_analysis
             do_plot_fig = ~pout.no_fig;
             allow_missing_vcds = pout.allow_missing_vcds;
             exclude_bad_fits = pout.exclude_bad_fits;
+            use_nasa_vcds = pout.use_nasa_vcds;
             ax = pout.ax;
             
             % options for the quantity to plot
@@ -5069,6 +5082,9 @@ classdef misc_emissions_analysis
             req_most_good_fits = opt_ask_yn('Only use cities with at most one bad fit?', pout.req_most, '"req_most"');
             req_num_pts = opt_ask_yn('Require line densities to have the ideal number of points?', pout.req_num_pts, '"req_num_pts"');
             include_err = opt_ask_yn('Include uncertainty on the plot?', pout.incl_err, '"incl_err"');
+            
+            req_n_fits = pout.min_fits_req;
+            
             if window_width == 1
                 years = {2005 2006 2007 2008 2009 2012 2013 2014};
                 x_vals = cell2mat(years);
@@ -5207,13 +5223,14 @@ classdef misc_emissions_analysis
                 weekend_vcds(~good_weekend_fits,i_yr) = nan;
             end
             
+            n_good_fits = sum(~isnan(week_vals),2);
             if req_most_good_fits
-                good_for_trends = sum(~isnan(week_vals),2) >= size(week_vals,2) - 1;
+                good_for_trends = n_good_fits >= size(week_vals,2) - 1;
                 if remove_decreasing_cities
                     good_for_trends = good_for_trends & ~all(diff(week_vals, 1, 2) < 0, 2);
                 end
             else
-                good_for_trends = any(~isnan(week_vals),2);
+                good_for_trends = n_good_fits >= req_n_fits;
             end
 
             week_vals = week_vals(good_for_trends, :);
@@ -5314,9 +5331,14 @@ classdef misc_emissions_analysis
             end
             
             function vcds = load_vcds(locs, days_of_week)
+                if use_nasa_vcds
+                    vcd_specie = 'nasa_no2';
+                else
+                    vcd_specie = 'no2';
+                end
                 vcds = nan(numel(locs), n_years);
                 for i_yr_inner = 1:n_years
-                    vcds(:,i_yr_inner) = misc_emissions_analysis.avg_vcds_around_loc(locs, years{i_yr_inner}, days_of_week, 'ignore_missing_files', allow_missing_vcds);
+                    vcds(:,i_yr_inner) = misc_emissions_analysis.avg_vcds_around_loc(locs, years{i_yr_inner}, days_of_week, 'species', vcd_specie, 'ignore_missing_files', allow_missing_vcds);
                 end
             end
             
@@ -5455,12 +5477,14 @@ classdef misc_emissions_analysis
             
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
+            p.addParameter('no2_type', 'behr');
             p.addParameter('plot_mode', 'timeser-avg'); % 'scatter', 'scatter-avg', 'timeser', or 'timeser-avg'
             p.addParameter('ax', []);
             p.parse(varargin{:});
             pout = p.Results;
             
             plot_mode = pout.plot_mode;
+            no2_type = pout.no2_type;
             vcd_radius = pout.radius;
             ax = pout.ax;
             
@@ -5469,6 +5493,12 @@ classdef misc_emissions_analysis
                 ax = gca;
             else
                 fig = ax.Parent;
+            end
+            
+            if strcmpi(no2_type, 'nasa')
+                no2_specie = 'nasa_no2';
+            else
+                no2_specie = 'no2';
             end
             
             cities = cell(1,4);
@@ -5496,7 +5526,7 @@ classdef misc_emissions_analysis
                     error('No linestyle defined for plot mode == "%s"', plot_mode)
             end
             group_styles = struct('marker', {'o','d','v','^'}, 'color', colors, 'markerfacecolor', colors, 'linestyle', linestyle);
-            
+            group_jitter = [-0.15, -0.05, 0.05, 0.15];
             locs = misc_emissions_analysis.read_locs_file();
             locs = locs(misc_emissions_analysis.get_loc_inds_of_type('Cities'));
             years = 2006:2013;
@@ -5504,12 +5534,12 @@ classdef misc_emissions_analysis
             proto_arr = {nan(numel(years), numel(locs))};
             no2 = repmat(proto_arr, size(cities));
             hcho = repmat(proto_arr, size(cities));
-            
+            names = cell(1,4);
             for iyr = 1:numel(years)
                 yr = years(iyr);
                 yr_win = (yr-1):(yr+1);
                 
-                no2_avgs = misc_emissions_analysis.avg_vcds_around_loc(locs,yr_win,'TWRF','species','no2','radius',vcd_radius);
+                no2_avgs = misc_emissions_analysis.avg_vcds_around_loc(locs,yr_win,'TWRF','species',no2_specie,'radius',vcd_radius);
                 hcho_avgs = misc_emissions_analysis.avg_vcds_around_loc(locs,yr_win,'TWRF','species','hcho','radius',vcd_radius);
                 
                 for i_grp = 1:numel(cities)
@@ -5520,13 +5550,14 @@ classdef misc_emissions_analysis
                     end
                     no2{i_grp}(iyr, :) = no2_avgs(loc_inds);
                     hcho{i_grp}(iyr, :) = hcho_avgs(loc_inds);
-                    
-                    
+                    names{i_grp} = {locs(loc_inds).ShortName};
                 end
             end
             
             
             lall = gobjects(numel(cities),1);
+            plot_err = false;
+            add_city_names = false;
             for i_grp = 1:numel(cities)
                 if regcmpi(plot_mode, '^scatter')
                     if regcmpi(plot_mode, 'avg$')
@@ -5541,16 +5572,33 @@ classdef misc_emissions_analysis
                     ratio = hcho{i_grp} ./ no2{i_grp};
                     if regcmpi(plot_mode, 'avg$')
                         %ratio(ratio<0) = nan;
+                        ratio_std = nanstd(ratio, [], 2);
                         ratio = nanmean(ratio, 2);
+                        plot_err = true;
+                        x = years + group_jitter(i_grp);
+                    else
+                        add_city_names = true;
+                        x = years;
                     end
-                    l = line(ax, years, ratio, group_styles(i_grp));
+                    l = line(ax, x, ratio, group_styles(i_grp));
+                    if plot_err
+                        scatter_errorbars(x, ratio, ratio_std, 'color', group_styles(i_grp).color, 'parent', ax)
+                    elseif add_city_names
+                        for i_city = 1:length(names{i_grp})
+                            city_x = i_grp + 2013*ones(size(names{i_grp}));
+                            city_y = ratio(end,:);
+                            text(city_x, city_y, names{i_grp}, 'color', group_styles(i_grp).color, 'parent', ax);
+                        end
+                    end
                     lall(i_grp) = l(1);
                 end
             end
             legend(lall, cities_names);
             xlabel(xlabel_str);
             ylabel(ylabel_str);
-            
+            if add_city_names
+                set(gca, 'xlim', [2005 2020], 'xtick', 2006:2013)
+            end
         end
 
         function make_t_score_table(csv_file, dow)
