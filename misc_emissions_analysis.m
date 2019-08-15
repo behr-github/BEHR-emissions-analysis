@@ -2154,18 +2154,18 @@ classdef misc_emissions_analysis
             end
             
             days_of_week = misc_emissions_analysis.choose_days_of_week(days_of_week);
-            species = opt_ask_multichoice('Which species to average?', {'NO2', 'HCHO'}, species, '"species"');
+            species = opt_ask_multichoice('Which species to average?', {'NO2', 'HCHO', 'NASA_NO2'}, species, '"species"');
             
             [start_date, end_date] = date_fxn(avg_year);
             
             % Make the monthly profile product average, then try to make
             % the daily one. If there's no data, it will return a NaN
             common_opts = {'DEBUG_LEVEL', 1, 'dayofweek', days_of_week};
-            if strcmpi(species, 'nasa-no2')
+            if strcmpi(species, 'nasa_no2')
                 common_opts = veccat(common_opts, {'avgfield', 'ColumnAmountNO2Trop'});
             end
             switch lower(species)
-                case {'no2','nasa-no2'}
+                case {'no2','nasa_no2'}
                     %[monthly.no2, monthly.lon, monthly.lat, monthly.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'monthly', common_opts{:});
                     monthly = [];
                     [daily.no2, daily.lon, daily.lat, daily.weights] = behr_time_average(start_date, end_date, 'prof_mode', 'daily', common_opts{:});
