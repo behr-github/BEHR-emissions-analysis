@@ -1071,11 +1071,13 @@ classdef misc_emissions_analysis
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('species', 'no2');
+            p.addParameter('season', 'summer');
             p.addParameter('ignore_missing_files', false);
             p.parse(varargin{:});
             pout = p.Results;
             
             vcd_species = pout.species;
+            season = pout.season;
             ignore_missing_files = pout.ignore_missing_files;
             
             allowed_species = {'nasa_no2', 'no2','hcho'};
@@ -1091,7 +1093,7 @@ classdef misc_emissions_analysis
             
             init_done = false;
             for i_yr = 1:numel(years)
-                avg_filename = misc_emissions_analysis.avg_file_name(years(i_yr), days_of_week, vcd_species);
+                avg_filename = misc_emissions_analysis.avg_file_name(years(i_yr), days_of_week, vcd_species, 'season', season);
                 try
                     year_vcds = load(avg_filename);
                 catch err
@@ -1131,6 +1133,43 @@ classdef misc_emissions_analysis
             vcds.lat = lat;
             vcds.daily_vcds = DailyAvg.getWeightedAverage();
             vcds.monthly_vcds = DailyAvg.getWeightedAverage();
+        end
+        
+        function [x, ld_array] = load_line_density_array(varargin)
+            %LOAD_LINE_DENSITY_ARRAY Load all weekday line densities into one array
+            %   [X, LD_ARRAY] = LOAD_LINE_DENSITY_ARRAY() Load line densities for all
+            %   cities into LD_ARRAY, interpolating them to the x-coordinates, X.
+            %
+            %   [X, LD_ARRAY] = LOAD_LINE_DENSITY_ARRAY('days_of_week', DOW) specify
+            %   the days of week to load as 'TWRF' or 'US'.
+            
+            p = advInputParser;
+            p.addParameter('days_of_week', 'TWRF');
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            days_of_week = pout.days_of_week;
+            
+            x = -100:3:200;
+            years = 2006:2013;
+            last_city = 49;
+            ld_array = nan(last_city, numel(x), numel(years));
+            
+            for iyr = 1:numel(years)
+                yr = years(iyr);
+                yr_win = (yr-1):(yr+1);
+                fprintf('Loading %s\n', sprintf_ranges(yr_win));
+                fits = load(misc_emissions_analysis.behr_fit_file_name(yr_win, days_of_week));
+                
+                for iloc = 1:last_city
+                    if ~misc_emissions_analysis.is_fit_good_by_loc(fits.locs(iloc), 'any_num_pts', true, 'DEBUG_LEVEL', 0)
+                        continue
+                    end
+                    interp_ld = interp1(fits.locs(iloc).no2_sectors.x, fits.locs(iloc).no2_sectors.linedens, x);
+                    ld_array(iloc, :, iyr) = interp_ld;
+                end
+            end
+            
         end
         
         function moves = read_moves_data(varargin)
@@ -1672,6 +1711,7 @@ classdef misc_emissions_analysis
             p.addParameter('radius', 'by_loc');
             p.addParameter('inner_rad', 0);
             p.addParameter('species', 'no2');
+            p.addParameter('season', 'summer');
             p.addParameter('ignore_missing_files', false);
             
             p.parse(varargin{:});
@@ -1680,6 +1720,7 @@ classdef misc_emissions_analysis
             avg_radius = pout.radius;
             inner_radius = pout.inner_rad;
             vcd_species = pout.species;
+            season = pout.season;
             ignore_missing_files = pout.ignore_missing_files;
             
             if ischar(avg_radius)
@@ -1697,7 +1738,7 @@ classdef misc_emissions_analysis
             
             [start_dates, end_dates] = misc_emissions_analysis.select_start_end_dates(time_period);
             time_period_years = unique(cellfun(@year, veccat(start_dates, end_dates)));
-            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species, 'ignore_missing_files', ignore_missing_files);
+            vcds = misc_emissions_analysis.load_vcds_for_years(time_period_years, days_of_week, 'species', vcd_species, 'season', season, 'ignore_missing_files', ignore_missing_files);
             lon = vcds.lon;
             lat = vcds.lat;
             lon_res = mean(diff(lon(1,:)));
@@ -5032,6 +5073,7 @@ classdef misc_emissions_analysis
             %       weekend and weekday lifetime
             %       * 'Emissions': plot emissions derived from the fits
             %       * 'VCDs': plot trends in NO2 VCDs
+            %       * 'Winter VCDs': plot trends in winter BEHR NO2 VCDs
             %       * 'Weekend/weekday VCDs': plot ratio of weekend and
             %       weekday NO2 VCDs
             %       * 'Weekend - weekday VCDs': plot difference of weekend
@@ -5112,6 +5154,7 @@ classdef misc_emissions_analysis
             pqopts.emissions = 'Emissions';
             pqopts.moves = 'MOVES';
             pqopts.vcds = 'VCDs';
+            pqopts.winter_vcds = 'Winter VCDs';
             pqopts.wkend_wkday_vcds_ratio = 'Weekend/weekday VCDs';
             pqopts.wkend_wkday_vcds_diff = 'Weekend - weekday VCDs';
             pqopts.expected_vcds = 'Expected VCDs';
@@ -5394,9 +5437,16 @@ classdef misc_emissions_analysis
                 else
                     vcd_specie = 'no2';
                 end
+                
+                if regcmpi(plot_quantity, pqopts.winter_vcds)
+                    season = 'winter';
+                else
+                    season = 'summer';
+                end
                 vcds = nan(numel(locs), n_years);
                 for i_yr_inner = 1:n_years
-                    vcds(:,i_yr_inner) = misc_emissions_analysis.avg_vcds_around_loc(locs, years{i_yr_inner}, days_of_week, 'species', vcd_specie, 'ignore_missing_files', allow_missing_vcds);
+                    vcds(:,i_yr_inner) = misc_emissions_analysis.avg_vcds_around_loc(locs, years{i_yr_inner},...
+                        days_of_week, 'species', vcd_specie, 'season', season, 'ignore_missing_files', allow_missing_vcds);
                 end
             end
             
@@ -5808,6 +5858,110 @@ classdef misc_emissions_analysis
         end
 
 
+        function [figs] = plot_loc_vcd_diff_maps(varargin)
+            %UNTITLED Summary of this function goes here
+            %   Detailed explanation goes here
+            
+            p = advInputParser;
+            p.addParameter('key_years', [2006, 2010, 2013]);
+            p.addParameter('days_of_week', 'TWRF');
+            p.addParameter('loc_inds', 1:49);
+            p.addParameter('season', 'summer');
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            key_years = pout.key_years;
+            loc_inds =  misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            days_of_week = pout.days_of_week;
+            season = pout.season;
+            
+            % Load the VCDs for each of the three year periods
+            nlocs = numel(loc_inds);
+            nyears = numel(key_years);
+            vcds = cell(size(key_years));
+            
+            for iyr = 1:nyears
+                yr = key_years(iyr);
+                yr_win = (yr-1):(yr+1);
+                vcd_struct = misc_emissions_analysis.load_vcds_for_years(yr_win, days_of_week, 'season', season);
+                
+                % lon and lat should be the same for all years
+                lon = vcd_struct.lon;
+                lat = vcd_struct.lat;
+                vcds{iyr} = vcd_struct.daily_vcds;
+            end
+            
+            locs = misc_emissions_analysis.read_locs_file();
+            locs = locs(loc_inds);
+            
+            figs = gobjects(nlocs,1);
+            for iloc = 1:nlocs
+                figs(iloc) = figure;
+                this_loc = locs(iloc);
+                
+                % assuming the grid cells are all 0.05 deg, this will get the right
+                % radius in # of boxes
+                radius = nanmean(this_loc.BoxSize(3:4))/0.05;
+                [xx,yy] = misc_emissions_analysis.find_indicies_in_box_around_point(this_loc, lon, lat, radius);
+                
+                abs_axes = cell(nyears,1);
+                diff_axes = cell(nyears-1,1);
+                max_vcd = 0;
+                max_diff = 0;
+                
+                for iyr = 1:nyears
+                    yr = key_years(iyr);
+                    yr_win = (yr-1):(yr+1);
+                    ax = subplot(2, nyears, iyr);
+                    abs_axes{iyr} = ax;
+                    these_vcds = vcds{iyr}(xx,yy);
+                    pcolor(ax, lon(xx, yy), lat(xx,yy), these_vcds);
+                    shading flat
+                    colorbar
+                    if nanmax(these_vcds(:)) > max_vcd
+                        max_vcd = nanmax(these_vcds(:));
+                    end
+                    
+                    title(ax, sprintf('%s: %s', this_loc.Location, sprintf_ranges(yr_win)));
+                    
+                    if iyr > 1
+                        ax = subplot(2, nyears, iyr+nyears);
+                        diff_axes{iyr-1} = ax;
+                        these_diffs = vcds{iyr}(xx,yy) - vcds{iyr-1}(xx,yy);
+                        pcolor(ax, lon(xx, yy), lat(xx, yy), these_diffs);
+                        shading flat
+                        colormap(ax, blue_red_cmap);
+                        colorbar
+                        this_max = nanmax(abs(these_diffs(:)));
+                        if this_max > max_diff
+                            max_diff = this_max;
+                        end
+                        title(ax, sprintf('%d* vs. %d*', key_years(iyr), key_years(iyr-1)));
+                        
+                    else
+                        
+                    end
+                end
+                
+                max_vcd = ceil(max_vcd/5e14)*5e14;
+                max_diff = ceil(max_diff/5e14)*5e14;
+                
+                for iax = 1:numel(abs_axes)
+                    caxis(abs_axes{iax}, [0, max_vcd]);
+                end
+                
+                for iax = 1:numel(diff_axes)
+                    caxis(diff_axes{iax}, [-max_diff, max_diff]);
+                end
+                
+                subplot_stretch(2, nyears, 'figh', figs(iloc));
+            end
+            
+        end
+
+
+        
 
         function make_t_score_table(csv_file, dow)
             years = 2006:2013;
@@ -6791,6 +6945,138 @@ classdef misc_emissions_analysis
                 state_outlines('k');
             end
         end
+        
+        function fig = plot_linedens_trends(varargin)
+            %PLOT_LINEDENS_TRENDS Plot trends in line densities of cities
+            %
+            %   Parameters:
+            %
+            %   'x' - the x coordinates of the line density.
+            %
+            %   'ld_array' - the line density array loaded by LOAD_LINE_DENSITY_ARRAY.
+            %   If not given then this and x are both loaded. If this is given, but x
+            %   is not, the standard x is assumed.
+            %
+            %   'loc_inds' - location indices or names. If not given, all cities are
+            %   plotted on one figure.
+            %
+            %   'normalize_to' - how to normalize the line densities. Options are:
+            %       * false - do not normalize
+            %       * 'mean-vec' - normalize by the vector of mean line densities, i.e.
+            %       each point in the line density gets normalized by its mean.
+            %       * 'mean' - normalize by the overall mean of the line densities,
+            %       i.e. all points are normalized by the same value.
+            %       * 'max-vec' - as 'mean-vec' but for the maximum
+            %       * 'max' - as 'mean' but for the maximum
+            %       * 'first' - normalize by the first year to have non-NaN line
+            %       densities. Behaves like 'mean-vec' and 'max-vec'.
+            %
+            %   'average_cities' - average across all cities selected by 'loc_inds'.
+            
+            p = advInputParser;
+            p.addParameter('x', -100:3:200);
+            p.addParameter('ld_array', nan);
+            p.addParameter('loc_inds', 1:49);
+            p.addParameter('normalize_to', false);
+            p.addParameter('average_cities', false);
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            x = pout.x;
+            ld_array = pout.ld_array;
+            inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
+            normalize_to = pout.normalize_to;
+            do_average = pout.average_cities;
+            
+            if isscalar(ld_array)
+                [x, ld_array] = misc_emissions_analysis.load_line_density_array();
+            end
+            
+            ncities = numel(inds);
+            years = 2006:2013;
+            locs = misc_emissions_analysis.read_locs_file();
+            
+            if normalize_to
+                vec_sz = [1, 1, numel(years)];
+                point_sz = [1, numel(x), numel(years)];
+                switch lower(normalize_to)
+                    case 'mean-vec'
+                        yr_lds = nanmean(ld_array, 3);
+                        sz = vec_sz;
+                        ystr = 'Norm. to mean vec';
+                    case 'mean'
+                        yr_lds = reshape(ld_array, size(ld_array,1), []);
+                        yr_lds = nanmean(yr_lds, 2);
+                        sz = point_sz;
+                        ystr = 'Norm. to mean';
+                    case 'max-vec'
+                        yr_lds = nanmax(ld_array, [], 3);
+                        sz = vec_sz;
+                        ystr = 'Norm to max vec';
+                    case 'max'
+                        yr_lds = reshape(ld_array, size(ld_array,1), []);
+                        yr_lds = nanmax(yr_lds, [], 2);
+                        sz = point_sz;
+                        ystr = 'Norm to max';
+                    case 'first'
+                        yr_lds = extract_first(ld_array);
+                        sz = vec_sz;
+                        ystr = 'Norm to first year';
+                    otherwise
+                        error('%s is not a valid value for NORMALIZE_TO', normalize_to)
+                end
+                yr_lds = repmat(yr_lds, sz);
+                ld_array = ld_array ./ yr_lds;
+            else
+                ystr = 'mol/km';
+            end
+            
+            if do_average
+                ld_array = nanmean(ld_array(inds, :, :), 1);
+                ncities = 1;
+                inds = 1;
+            end
+            
+            
+            
+            fig = figure;
+            [height, width] = square_subplot_dims(ncities);
+            for icity = 1:numel(inds)
+                ax = subplot(height, width, icity);
+                subld = squeeze(ld_array(inds(icity), :, :));
+                for iyr = 1:size(subld,2)
+                    if iyr == normalize_to
+                        continue
+                    end
+                    col = map2colmap(iyr, 1, size(subld,2), 'jet');
+                    line(ax, x, subld(:, iyr), 'color', col);
+                end
+                colorbar;
+                colormap('jet');
+                caxis([years(1), years(end)]);
+                ylabel(sprintf('Line densities (%s)', ystr));
+                if ~do_average
+                    title(ax, locs(inds(icity)).Location);
+                end
+            end
+            
+            subplot_stretch(height, width, 'factor', 0.75);
+            
+            function first_lds = extract_first(lds)
+                has_data = squeeze(any(~isnan(lds),2));
+                first_lds = nan(size(lds,1), size(lds,2));
+                for i = 1:size(has_data,1)
+                    ifirst = find(has_data(i,:),1,'first');
+                    if ~isempty(ifirst)
+                        first_lds(i,:) = lds(i,:,ifirst);
+                    end
+                end
+            end
+            
+        end
+
+
         
         function plot_line_dens_fits_by_year(varargin)
             % PLOT_LINE_DENS_FITS_BY_YEAR Plots line densities and their
