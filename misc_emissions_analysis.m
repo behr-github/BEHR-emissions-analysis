@@ -233,6 +233,17 @@ classdef misc_emissions_analysis
             filename = misc_emissions_analysis.fits_file_name(start_date, end_date, false, 1:71, days_of_week, 'lu');
         end
         
+        function filename = nasa_fit_file_name(time_period, days_of_week)
+            % NASA_FIT_FILE_NAME - returns the standard file for the NASA
+            % EMG fits for a time period (given as a numeric vector of
+            % years) and the days of week ('TWRF', 'US', or 'UMTWRFS').
+            % Wraps FITS_FILE_NAME and provides the default values for the
+            % remaining inputs.
+            start_date = datenum(min(time_period), 4, 1);
+            end_date = datenum(max(time_period), 9, 30);
+            filename = misc_emissions_analysis.fits_file_name(start_date, end_date, 2, 1:71, days_of_week, 'lu');
+        end
+        
         function filename = wrf_fit_file_name(time_period, wrf_var, varargin)
             if nargin < 3
                 dow = 'TWRF';
@@ -244,14 +255,15 @@ classdef misc_emissions_analysis
             filename = misc_emissions_analysis.fits_file_name(start_date, end_date, true, 1:71, dow, 'lu', wrf_var);
         end
         
-        function filename = fits_file_name(start_date, end_date, using_wrf, loc_inds, days_of_week, fit_type, wrf_var)
-            if using_wrf
+        function filename = fits_file_name(start_date, end_date, var_type, loc_inds, days_of_week, fit_type, wrf_var)
+            if var_type == 1
                 if ~exist('wrf_var', 'var')
                     product_string = 'WRF';
                 else
                     product_string = sprintf('WRF_%s', upper(wrf_var));
                 end
-                
+            elseif var_type == 2
+                product_string = 'NASA';
             else
                 product_string = 'BEHR';
             end
@@ -984,7 +996,7 @@ classdef misc_emissions_analysis
             % fit? Testing with the box model shows that with only 31
             % points, the fitting procedure has a hard time fitting more
             % than a narrow range of lifetimes, but does better with 61.
-            if (sum(~isnan(linedens)) < 60 || sum(~isnan(linedens)) > 70) && ~allow_any_num_pts
+            if (sum(~isnan(linedens)) < 46 || sum(~isnan(linedens)) > 70) && ~allow_any_num_pts
                 if DEBUG_LEVEL > 0
                     fprintf('Fit rejected by too few line density points\n');
                 end
@@ -1091,6 +1103,8 @@ classdef misc_emissions_analysis
                 struct_field = vcd_species;
             end
             
+            track_stddev = strcmpi(vcd_species, 'hcho');
+            
             init_done = false;
             for i_yr = 1:numel(years)
                 avg_filename = misc_emissions_analysis.avg_file_name(years(i_yr), days_of_week, vcd_species, 'season', season);
@@ -1109,14 +1123,29 @@ classdef misc_emissions_analysis
                     lat = year_vcds.daily.lat;
                     DailyAvg = RunningAverage();
                     MonthlyAvg = RunningAverage();
+                    DailyStd = RunningAverage();
+                    MonthlyStd = RunningAverage();
                     
                     adding_monthly = ~isempty(year_vcds.monthly);
                     init_done = true;
                 end
                 DailyAvg.addData(year_vcds.daily.(struct_field), year_vcds.daily.weights)
+                if track_stddev
+                    % in omhcho_time_average, the std. deviation is the
+                    % column uncertainty, added in quadrature, squared at
+                    % the end and divided by the sqrt of the weights, which
+                    % are RMS weighted. Undo that so that we're adding
+                    % the uncertainties in quadrature
+                    std_daily = (year_vcds.daily.stddev .* sqrt(year_vcds.daily.weights)).^2;
+                    DailyStd.addData(std_daily, year_vcds.daily.weights);
+                end
                 if adding_monthly
                     if ~isempty(year_vcds.monthly)
                         MonthlyAvg.addData(year_vcds.monthly.(vcd_species), year_vcds.monthly.weights)
+                        if track_stddev
+                            std_monthly = (year_vcds.monthly.stddev .* sqrt(year_vcds.monthly.weights)).^2;
+                            MonthlyStd.addData(std_monthly, year_vcds.monthly.weights);
+                        end
                     else
                         E.callError('missing_monthly_vcds', '%d average has no monthly VCDs, but previous years do', years(i_yr));
                     end
@@ -1133,6 +1162,12 @@ classdef misc_emissions_analysis
             vcds.lat = lat;
             vcds.daily_vcds = DailyAvg.getWeightedAverage();
             vcds.monthly_vcds = DailyAvg.getWeightedAverage();
+            vcds.daily_wts = DailyAvg.weights;
+            vcds.monthly_wts = MonthlyAvg.weights;
+            if track_stddev
+                vcds.daily_stddev = sqrt(DailyStd.getWeightedAverage()) ./ sqrt(DailyStd.weights);
+                vcds.monthly_stddev = sqrt(MonthlyStd.getWeightedAverage()) ./ sqrt(MonthlyStd.weights);
+            end
         end
         
         function [x, ld_array] = load_line_density_array(varargin)
@@ -1249,7 +1284,9 @@ classdef misc_emissions_analysis
                 xx_window = xx_yr & ismember(moves_table_in{:,'emis_month'}, months_req) ...
                     & moves_table_in{:, 'species_id'} == species;
                 
-                moves{i_yr, 2} = nanmean(sum_to_year(moves_table_in(xx_window, :)));
+                nhours = (datenum(years_req(i_yr),10,1) - datenum(years_req(i_yr),4,1))*24;
+                conv = 1e-3 / nhours; % convert kg/summer to Mg/h
+                moves{i_yr, 2} = conv * nanmean(sum_to_year(moves_table_in(xx_window, :)));
             end
             
             
@@ -1705,7 +1742,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function loc_avg_vcds = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
+        function [loc_avg_vcds, loc_std_vcds, loc_n_vcds] = avg_vcds_around_loc(locs, time_period, days_of_week, varargin)
             E = JLLErrors;
             p = advInputParser;
             p.addParameter('radius', 'by_loc');
@@ -1747,12 +1784,30 @@ classdef misc_emissions_analysis
                 E.notimplemented('Different lon and lat resolutions');
             end
             loc_avg_vcds = nan(size(locs));
+            loc_std_vcds = nan(size(locs));
+            loc_n_vcds = nan(size(locs));
+            loc_err_vcds = nan(size(locs));
             for i_loc = 1:numel(locs)
                 % This will use the box width (from center to edge
                 % perpendicular to the wind direction) as the radius and
                 % find all grid points with centers within that radius.
                 xx_radius = misc_emissions_analysis.find_indices_in_radius_around_loc(locs(i_loc), lon, lat, avg_radius, 'inner_rad', inner_radius);
                 loc_avg_vcds(i_loc) = nanmean(vcds.daily_vcds(xx_radius));
+                loc_std_vcds(i_loc) = nanstd(vcds.daily_vcds(xx_radius));
+                loc_n_vcds(i_loc) = sum(xx_radius(:));
+                % Disabling for now, would need to add counts to the HCHO
+                % averages to do this properly. 
+%                 if strcmpi(vcd_species, 'hcho')
+%                     % mimics the calculation in omhcho_time_average, where
+%                     % the errors are added in quadrature, and then divided
+%                     % by the sqrt of the weights which are the number of
+%                     % obs. We get back to the undivided err, add it in
+%                     % quadrature, then redivide by the total number of obs
+%                     % in the final average.
+%                     err2 = (vcds.daily_stddev(xx_radius) .* sqrt(vcds.daily_wts)).^2;
+%                     wts = vcds.daily_wts;
+%                     loc_err_vcds(i_loc) = sqrt(nansum2(err2)) ./ sqrt(nansum2(wts));
+%                 end
             end
         end
         
@@ -1950,7 +2005,7 @@ classdef misc_emissions_analysis
         end
         
         function good_fits = create_fit_filter_vecs(filter_fit_flag, years, any_num_pts)
-            if nargin < 2
+            if nargin < 3
                 any_num_pts = true;
             end
             
@@ -2986,6 +3041,7 @@ classdef misc_emissions_analysis
             p.addParameter('add_nei', true);
             p.addParameter('days_of_week', 'UMTWRFS');
             p.addParameter('wrf_var', '');
+            p.addParameter('use_nasa', false);
             p.addParameter('do_overwrite', -1);
             % by default if it doesn't get it the second time, then it's
             % probably just going to randomly sample until it happens to
@@ -3006,6 +3062,7 @@ classdef misc_emissions_analysis
             add_nei = pout.add_nei;
             days_of_week = pout.days_of_week;
             wrf_var = pout.wrf_var;
+            use_nasa = pout.use_nasa;
             do_overwrite = pout.do_overwrite;
             max_fit_attempts = pout.max_fit_attempts;
             fatal_if_cannot_fit = pout.fatal_fit_fail;
@@ -3038,11 +3095,12 @@ classdef misc_emissions_analysis
             
             fit_type_in = misc_emissions_analysis.get_fit_type_interactive(fit_type_in);
             wrf_bool = ~isempty(wrf_var);
+            type_indicator = misc_emissions_analysis.nasa_wrf_int(wrf_bool, use_nasa);
             
             [start_date, end_date] = misc_emissions_analysis.select_start_end_dates(time_period);
             % If overwrite not given and the save file exists, ask to
             % overwrite. Otherwise, only overwrite if instructed.
-            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, wrf_bool, loc_indicies, days_of_week, fit_type_in, wrf_var);
+            save_name = misc_emissions_analysis.fits_file_name(start_date, end_date, type_indicator, loc_indicies, days_of_week, fit_type_in, wrf_var);
             if exist(save_name, 'file')
                 if do_overwrite < 0
                     if ~ask_yn(sprintf('%s exists. Overwrite?', save_name))
@@ -3068,7 +3126,7 @@ classdef misc_emissions_analysis
                 % However for the slow line densities we do want them
                 % weighted for wind direction contribution so that they
                 % match the fast line densities.
-                slow_ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, true, wrf_bool, 'lt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week, wrf_var);
+                slow_ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, true, type_indicator, 'lt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week, wrf_var);
                 if ~exist(slow_ldens_file, 'file')
                     [~,ldens_basename] = fileparts(slow_ldens_file);
                     % Use regular error function to have more control over the
@@ -3085,7 +3143,7 @@ classdef misc_emissions_analysis
                 weighted_bool = false;
                 slow_line_densities = [];
             end
-            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, weighted_bool, wrf_bool, 'gt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week, wrf_var);
+            ldens_file = misc_emissions_analysis.line_density_file_name(start_date, end_date, false, filtered_bool, weighted_bool, type_indicator, 'gt', misc_emissions_analysis.fast_slow_sep, file_loc_indicies, days_of_week, wrf_var);
             if ~exist(ldens_file, 'file')
                 [~,ldens_basename] = fileparts(ldens_file);
                 % Use regular error function to have more control over the
@@ -4379,7 +4437,7 @@ classdef misc_emissions_analysis
             if isempty(ax)
                 figure;
                 ax = axes();
-            elseif ~ax
+            elseif ~isgraphics(ax)
                 do_plot = false;
             end
             
@@ -5167,6 +5225,12 @@ classdef misc_emissions_analysis
             plot_quantity = opt_ask_multichoice('Which quantity to plot?', struct2cell(pqopts), pout.plot_quantity, '"plot_quantity"', 'list', true);
             do_normalize = opt_ask_yn('Normalize each location''s value to its average?', pout.normalize', '"normalize"');
             
+            if do_normalize
+                ylabel_str = sprintf('Normalized %s', plot_quantity);
+            else
+                ylabel_str = plot_quantity;
+            end
+            
             % options for the averaging
             avgopts.none = 'None';
             avgopts.avg = 'Average';
@@ -5257,7 +5321,7 @@ classdef misc_emissions_analysis
                         this_week_err = NaN;
                         this_weekend_val = NaN;
                         this_weekend_err = NaN;
-                    elseif any(strcmpi(plot_quantity, {pqopts.vcds, pqopts.wkend_wkday_vcds_ratio, pqopts.wkend_wkday_vcds_diff}))
+                    elseif any(strcmpi(plot_quantity, {pqopts.vcds, pqopts.winter_vcds, pqopts.wkend_wkday_vcds_ratio, pqopts.wkend_wkday_vcds_diff}))
                         this_week_val = week_vcds(i_loc, i_yr);
                         this_week_err = NaN;
                         this_weekend_val = weekend_vcds(i_loc, i_yr);
@@ -5591,7 +5655,7 @@ classdef misc_emissions_analysis
             %   'filter_fit' - whether or not to remove cities if their
             %   weekday lifetime fit is bad. 0 disables this, 1 only
             %   removes it when the fit is bad. >=2 requires that a city
-            %   have that many good years to be kepts, but if kept, is
+            %   have that many good years to be kept, but if kept, is
             %   kept for all years.
             
             p = advInputParser;
@@ -6068,6 +6132,8 @@ classdef misc_emissions_analysis
             
             if strcmpi(data_product, 'behr')
                 name_fxn = @(yrs, dow) misc_emissions_analysis.behr_fit_file_name(yrs, dow);
+            elseif strcmpi(data_product, 'nasa')
+                name_fxn = @(yrs, dow) misc_emissions_analysis.nasa_fit_file_name(yrs, dow);
             elseif strcmpi(data_product, 'wrf')
                 name_fxn = @(yrs, dow) misc_emissions_analysis.wrf_fit_file_name(yrs, 'no2_vcds', 'TWRF');
             else
@@ -7020,7 +7086,13 @@ classdef misc_emissions_analysis
                         sz = point_sz;
                         ystr = 'Norm to max';
                     case 'first'
-                        yr_lds = extract_first(ld_array);
+                        % If we're averaging, we want all cities relative
+                        % to the same first year, otherwise that means
+                        % we'll be averaging quantities that are relative
+                        % to different years together. If we're not
+                        % averaging, then let's make it relative to the
+                        % first good year.
+                        yr_lds = extract_first(ld_array, do_average);
                         sz = vec_sz;
                         ystr = 'Norm to first year';
                     otherwise
@@ -7063,7 +7135,11 @@ classdef misc_emissions_analysis
             
             subplot_stretch(height, width, 'factor', 0.75);
             
-            function first_lds = extract_first(lds)
+            function first_lds = extract_first(lds, being_averaged)
+                if being_averaged
+                    first_lds = lds(:, :, 1);
+                    return
+                end
                 has_data = squeeze(any(~isnan(lds),2));
                 first_lds = nan(size(lds,1), size(lds,2));
                 for i = 1:size(has_data,1)
