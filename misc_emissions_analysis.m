@@ -6308,6 +6308,52 @@ classdef misc_emissions_analysis
             
         end
         
+        function plot_box_city_group_vcds(varargin)
+            p = advInputParser;
+            p.addParameter('groups', {'decr', 'incr', 'ccu', 'ccd'});
+            
+            p.parse(varargin{:});
+            pout = p.Results;
+            groups = pout.groups;
+            
+            group_cities = struct('decr', {cities_lifetime_groups.decr_lifetime},...
+                'incr', {cities_lifetime_groups.incr_lifetime},...
+                'ccu', {cities_lifetime_groups.ccup_lifetime},...
+                'ccd', {cities_lifetime_groups.ccdown_lifetime});
+            group_colors = struct('decr', 'k', 'incr', 'b', 'ccu', [0 0.5 0], 'ccd', 'r');
+            group_labels = struct('decr', 'Decr.', 'incr', 'Incr.', 'ccu', 'CCU', 'ccd', 'CCD');
+            
+            ngrp = numel(groups);
+            l = gobjects(ngrp, 1);
+            width = 0.5 / ngrp;
+            offsets = linspace(-0.16, 0.16, ngrp);
+            labels = cell(1, ngrp);
+            
+            fig = figure;
+            ax = gca;
+            hold on
+            
+            for igr = 1:numel(groups)
+                thisg = groups{igr};
+                [~, years, vcds] = misc_emissions_analysis.plot_avg_lifetime_change('locations', group_cities.(thisg), ...
+                    'plot_quantity', 'VCDs', 'normalize', false, 'plot_averaging', 'None', ...
+                    'no_fig', true, 'req_most', false, 'min_fits_req', 3, 'req_num_pts', false,...
+                    'incl_err', false, 'always_restrict_to_moves', false);
+                
+                col = group_colors.(thisg);
+                boxplot(ax, vcds, 'positions', years + offsets(igr), 'labels', years, 'widths', width, 'colors', col, 'symbol', '+');
+                l(igr) = line([nan, nan], [nan, nan], 'color', col, 'linewidth', 2);
+                labels{igr} = group_labels.(thisg);
+            end
+            
+            legend(l, labels);
+            ylabel('VCD (molec. cm^{-2})');
+            set(gca, 'xlim', [2005 2014], 'ylim', [0 1e16], 'xtick', years);
+            
+        end
+
+
+        
         function [figs, info] = plot_vcd_vs_concentration(varargin)
             % This plots the surface or boundary layer concentration
             % inferred from average WRF-Chem profiles vs. BEHR VCDs. We
