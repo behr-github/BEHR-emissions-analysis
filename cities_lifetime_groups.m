@@ -59,7 +59,7 @@ classdef cities_lifetime_groups
             weekdays.Boston = NaN;
             weekdays.Cheyenne = NaN;
             weekdays.Fresno = NaN;
-            weekdays.LasVega = NaN;
+            weekdays.LasVegas = NaN;
             weekdays.Miami = NaN;
             weekdays.Phoenix = NaN;
             weekdays.Portland = NaN;

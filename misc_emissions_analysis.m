@@ -2031,6 +2031,19 @@ classdef misc_emissions_analysis
             end
         end
         
+        function locs = recalc_tau_uncertainty(locs, varargin)
+            p = advInputParser;
+            p.addParameter('percent_uncert', 10);
+            p.parse(varargin{:});
+            pout = p.Results;
+            
+            frac_uncert = pout.percent_uncert / 100;
+            
+            for iloc = 1:numel(locs)
+                locs(iloc).emis_tau.tau_uncert = locs(iloc).emis_tau.tau * frac_uncert;
+            end
+        end
+        
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         % Interactive utility methods %
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -5193,6 +5206,7 @@ classdef misc_emissions_analysis
             p.addParameter('req_num_pts', nan);
             p.addParameter('incl_err', nan);
             p.addParameter('use_nasa_vcds', false);
+            p.addParameter('recalc_err', false);
             p.addParameter('ax',[]);
             p.parse(varargin{:});
             pout = p.Results;
@@ -5202,6 +5216,7 @@ classdef misc_emissions_analysis
             allow_missing_vcds = pout.allow_missing_vcds;
             exclude_bad_fits = pout.exclude_bad_fits;
             use_nasa_vcds = pout.use_nasa_vcds;
+            recalc_err = pout.recalc_err;
             ax = pout.ax;
             
             % options for the quantity to plot
@@ -5621,6 +5636,10 @@ classdef misc_emissions_analysis
                 oh_data = load(misc_emissions_analysis.oh_file_name(sdates, edates));
                 locs_wkday = misc_emissions_analysis.append_new_spreadsheet_fields(oh_data.locs_wkday);
                 locs_wkend = misc_emissions_analysis.append_new_spreadsheet_fields(oh_data.locs_wkend);
+                if recalc_err
+                    locs_wkday = misc_emissions_analysis.recalc_tau_uncertainty(locs_wkday);
+                    locs_wkend = misc_emissions_analysis.recalc_tau_uncertainty(locs_wkend);
+                end
             end
             
             function [locs_wkday, locs_wkend] = load_wrf_tau(this_year_window)
@@ -6108,7 +6127,7 @@ classdef misc_emissions_analysis
             end
         end
         
-        function plot_lifetime_with_sig(varargin)
+        function figs = plot_lifetime_with_sig(varargin)
             % PLOT_LIFETIME_WITH_SIG Plot weekday and weekend lifetimes for
             % locations along with grids showing which lifetimes are
             % significantly different from one another.
@@ -6122,6 +6141,7 @@ classdef misc_emissions_analysis
             p.addParameter('loc_inds', 1:71);
             p.addParameter('product', 'behr');
             p.addParameter('hide_bad_fits', false);
+            p.addParameter('recalc_err', false);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -6129,6 +6149,7 @@ classdef misc_emissions_analysis
             loc_inds = misc_emissions_analysis.convert_input_loc_inds(pout.loc_inds);
             hide_bad_fits = pout.hide_bad_fits;
             data_product = pout.product;
+            recalc_err = pout.recalc_err;
             
             if strcmpi(data_product, 'behr')
                 name_fxn = @(yrs, dow) misc_emissions_analysis.behr_fit_file_name(yrs, dow);
@@ -6161,6 +6182,11 @@ classdef misc_emissions_analysis
                 wkdays.locs = misc_emissions_analysis.cutdown_locs_by_index(wkdays.locs, loc_inds);
                 wkends = load(name_fxn(yr_win, 'US'));
                 wkends.locs = misc_emissions_analysis.cutdown_locs_by_index(wkends.locs, loc_inds);
+                
+                if recalc_err
+                    wkdays.locs = misc_emissions_analysis.recalc_tau_uncertainty(wkdays.locs);
+                    wkends.locs = misc_emissions_analysis.recalc_tau_uncertainty(wkends.locs);
+                end
                 
                 for i_loc = 1:n_locs
                     taus(i_yr, i_loc, 1) = get_tau(wkdays.locs(i_loc).emis_tau.tau);
@@ -7154,7 +7180,7 @@ classdef misc_emissions_analysis
 
 
         
-        function plot_line_dens_fits_by_year(varargin)
+        function figs = plot_line_dens_fits_by_year(varargin)
             % PLOT_LINE_DENS_FITS_BY_YEAR Plots line densities and their
             % fits from all years on one plot.
             %
@@ -7195,6 +7221,7 @@ classdef misc_emissions_analysis
             p.addParameter('source', 'behr');
             p.addParameter('include_bad', false);
             p.addParameter('include_weekends', true);
+            p.addParameter('key_years_only', false);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -7211,11 +7238,12 @@ classdef misc_emissions_analysis
             data_source = pout.source;
             include_bad_fits = pout.include_bad;
             include_weekends = pout.include_weekends;
+            key_years_only = pout.key_years_only;
             
             if strcmpi(data_source, 'behr')
                 wrf_bool = false;
                 weekdays = 'TWRF';
-                n_subplots = 2;
+                n_subplots = 1 + include_weekends;
                 ld_scale = 1;
             elseif strcmpi(data_source, 'wrf')
                 wrf_bool = true;
@@ -7279,13 +7307,16 @@ classdef misc_emissions_analysis
                 figs(i_loc) = figure;
                 subplot_stretch(n_subplots,1);
                 ax1 = subplot(n_subplots,1,1);
-                plot_ld_fits(ax1, xcoords(i_loc, :, 1), line_densities(i_loc, :, 1), fits(i_loc, :, 1));
+                
+                key_years = cities_lifetime_groups.get_key_years(locs(i_loc).ShortName, 'TWRF', 'no_nans');
+                plot_ld_fits(ax1, xcoords(i_loc, :, 1), line_densities(i_loc, :, 1), fits(i_loc, :, 1), key_years);
                 set_axis_labels(ax1);
                 title(ax1, sprintf('%s, weekdays', locs(i_loc).ShortName));
                 
                 if include_weekends
                     ax2 = subplot(n_subplots,1,2);
-                    plot_ld_fits(ax2, xcoords(i_loc, :, 2), line_densities(i_loc, :, 2), fits(i_loc, :, 2));
+                    key_years = cities_lifetime_groups.get_key_years(locs(i_loc).ShortName, 'US', 'no_nans');
+                    plot_ld_fits(ax2, xcoords(i_loc, :, 2), line_densities(i_loc, :, 2), fits(i_loc, :, 2), key_years);
                     set_axis_labels(ax2);
                     title(ax2, 'weekends');
                 end
@@ -7367,10 +7398,14 @@ classdef misc_emissions_analysis
                 xlabel(ax, sprintf('%s (km)', x_normstr));
             end
             
-            function plot_ld_fits(ax, x, lds, fits)
+            function plot_ld_fits(ax, x, lds, fits, key_yrs)
                 h_ld = gobjects(n_yrs,1);
                 h_fit = gobjects(n_yrs,1);
                 for i=1:numel(x)
+                    if key_years_only && ~ismember(years(i), key_yrs)
+                        continue
+                    end
+                    
                     if plot_line_dens
                         h_ld(i) = line(ax, x{i}, lds{i}, 'marker', 'o', 'linestyle', 'none');
                     end
@@ -7379,15 +7414,24 @@ classdef misc_emissions_analysis
                     end
                 end
                 
+                if key_years_only
+                    xx_yrs = ismember(years, key_yrs);
+                    h_ld = h_ld(xx_yrs);
+                    h_fit = h_fit(xx_yrs);
+                    line_years = key_yrs;
+                else
+                    line_years = years;
+                end
+                
                 % If only plotting fit or only plotting line densities, just plot
                 % them and use those series in the legend. If plotting both, use
                 % the fits in the legend for colors and add dummy entries to
                 % differentiate fit and line density
                 h = [];
-                leg_strs = arrayfun(@(x) sprintf_ranges((x-1):(x+1)), years', 'uniform', false);
+                leg_strs = arrayfun(@(x) sprintf_ranges((x-1):(x+1)), line_years', 'uniform', false);
                 if plot_fit
                     h = h_fit;
-                    misc_emissions_analysis.set_year_series_plot_colors(h_fit, 'k');
+                    misc_emissions_analysis.set_year_series_plot_colors(h_fit, 'k', line_years);
                     if plot_line_dens
                         h(end+1) = line(ax, nan,nan,'linewidth',2,'color','k');
                         leg_strs{end+1} = 'Fits';
@@ -7400,7 +7444,7 @@ classdef misc_emissions_analysis
                         h(end+1) = line(ax, nan,nan,'marker','o','color','k','markerfacecolor','k','linestyle','none');
                         leg_strs{end+1} = 'Line densities';
                     end
-                    misc_emissions_analysis.set_year_series_plot_colors(h_ld, 'k');
+                    misc_emissions_analysis.set_year_series_plot_colors(h_ld, 'k', line_years);
                 end
                 
                 legend(ax, h, leg_strs);
@@ -7659,13 +7703,23 @@ classdef misc_emissions_analysis
         % Plot helpers %
         %%%%%%%%%%%%%%%%
         
-        function set_year_series_plot_colors(lineh, edge_color)
+        function set_year_series_plot_colors(lineh, edge_color, line_years)
+            n_lines = numel(lineh);
+            
             if nargin < 2
                 edge_color = '';
             end
-            n_lines = numel(lineh);
+            if nargin < 3
+                line_years = 1:n_lines;
+                min_yr = 1;
+                max_yr = n_lines;
+            else
+                min_yr = 2006;
+                max_yr = 2013;
+            end
+            
             for i=1:n_lines
-                this_color = map2colmap(i, n_lines, 'jet');
+                this_color = map2colmap(line_years(i), min_yr, max_yr, 'jet');
                 lineh(i).Color = this_color;
                 lineh(i).MarkerFaceColor = this_color;
                 if ~isempty(edge_color)
