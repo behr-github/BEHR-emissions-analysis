@@ -237,6 +237,11 @@ classdef cities_lifetime_groups
             % cities with < 60 points in their line densities.
             cities = {'Austin', 'Bakersfield', 'Baltimore', 'Boston', 'Cheyenne', 'Fresno', 'Las Vegas', 'Miami', 'Phoenix', 'Portland', 'Sacramento', 'San Antonio'};
         end
+        
+        function cities = visually_marginal(include_short)
+            cities = {'Albuquerque', 'Cincinnati', 'Columbus', 'Dallas',...
+                'Detroit', 'Knoxville', 'Orlando', 'Philadelphia', 'San Francisco', 'Toronto'};
+        end
     end
 end
 

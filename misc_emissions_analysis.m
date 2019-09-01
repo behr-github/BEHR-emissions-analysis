@@ -5208,6 +5208,7 @@ classdef misc_emissions_analysis
             p.addParameter('use_nasa_vcds', false);
             p.addParameter('recalc_err', false);
             p.addParameter('ax',[]);
+            p.addParameter('exclude',[]);
             p.parse(varargin{:});
             pout = p.Results;
             
@@ -5217,6 +5218,7 @@ classdef misc_emissions_analysis
             exclude_bad_fits = pout.exclude_bad_fits;
             use_nasa_vcds = pout.use_nasa_vcds;
             recalc_err = pout.recalc_err;
+            exclude_inds = misc_emissions_analysis.convert_input_loc_inds(pout.exclude);
             ax = pout.ax;
             
             % options for the quantity to plot
@@ -5295,6 +5297,7 @@ classdef misc_emissions_analysis
                 else
                     xx = misc_emissions_analysis.convert_input_loc_inds(location_inds_or_names);
                 end
+                xx = xx(~ismember(xx, exclude_inds));
                 week_locs = week_locs(xx);
                 weekend_locs = weekend_locs(xx);
                 
@@ -6337,6 +6340,7 @@ classdef misc_emissions_analysis
         function plot_box_city_group_vcds(varargin)
             p = advInputParser;
             p.addParameter('groups', {'decr', 'incr', 'ccu', 'ccd'});
+            p.addParameter('exclude', []);
             
             p.parse(varargin{:});
             pout = p.Results;
@@ -6349,10 +6353,12 @@ classdef misc_emissions_analysis
             group_colors = struct('decr', 'k', 'incr', 'b', 'ccu', [0 0.5 0], 'ccd', 'r');
             group_labels = struct('decr', 'Decr.', 'incr', 'Incr.', 'ccu', 'CCU', 'ccd', 'CCD');
             
+            exclude_inds = misc_emissions_analysis.convert_input_loc_inds(pout.exclude);
+            
             ngrp = numel(groups);
             l = gobjects(ngrp, 1);
-            width = 0.5 / ngrp;
-            offsets = linspace(-0.16, 0.16, ngrp);
+            width = 0.6 / ngrp;
+            offsets = linspace(-0.3, 0.3, ngrp);
             labels = cell(1, ngrp);
             
             fig = figure;
@@ -6361,10 +6367,14 @@ classdef misc_emissions_analysis
             
             for igr = 1:numel(groups)
                 thisg = groups{igr};
-                [~, years, vcds] = misc_emissions_analysis.plot_avg_lifetime_change('locations', group_cities.(thisg), ...
+                grp_inds = misc_emissions_analysis.convert_input_loc_inds(group_cities.(thisg));
+                grp_inds = grp_inds(~ismember(grp_inds, exclude_inds));
+                [~, years, vcds] = misc_emissions_analysis.plot_avg_lifetime_change('locations', grp_inds, ...
                     'plot_quantity', 'VCDs', 'normalize', false, 'plot_averaging', 'None', ...
                     'no_fig', true, 'req_most', false, 'min_fits_req', 3, 'req_num_pts', false,...
                     'incl_err', false, 'always_restrict_to_moves', false);
+                %years = 2006:2013;
+                %vcds = 9e15*rand(10, length(years));
                 
                 col = group_colors.(thisg);
                 boxplot(ax, vcds, 'positions', years + offsets(igr), 'labels', years, 'widths', width, 'colors', col, 'symbol', '+');
@@ -6374,8 +6384,8 @@ classdef misc_emissions_analysis
             
             legend(l, labels);
             ylabel('VCD (molec. cm^{-2})');
-            set(gca, 'xlim', [2005 2014], 'ylim', [0 1e16], 'xtick', years);
-            
+            set(gca, 'xlim', [2005 2014], 'ylim', [0 1e16], 'xtick', years, 'fontsize', 14, 'xticklabelrotation', 30);
+            grid on
         end
 
 
