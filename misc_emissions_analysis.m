@@ -2938,7 +2938,7 @@ classdef misc_emissions_analysis
             end
             
             parfor a=1:numel(winds.locs)
-                opt_args = {};
+                opt_args = {'sectors', by_sectors};
                 
                 box_size = winds_locs_distributed(a).BoxSize;
                 if any(isnan(box_size))
@@ -2965,15 +2965,10 @@ classdef misc_emissions_analysis
                 % though.
                 wind_logical = misc_emissions_analysis.set_wind_conditions(winds_locs_distributed(a), winds_cutoff, winds_op, wind_reject_field);
 
-                if by_sectors
-                    fprintf('Calculating sector line densities for %s\n', winds_locs_distributed(a).ShortName);
-                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density_sectors(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'rel_box_corners', box_size, opt_args{:});
-                else
-                    fprintf('Calculating rotated line densities for %s\n', winds_locs_distributed(a).ShortName);
-                    [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
-                        = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical, 'rel_box_corners', box_size, 'days_of_week', days_of_week, opt_args{:});
-                end
+                fprintf('Calculating line densities for %s\n', winds_locs_distributed(a).ShortName);
+                [no2(a).x, no2(a).linedens, no2(a).linedens_std, no2(a).lon, no2(a).lat, no2(a).no2_mean, no2(a).no2_std, no2(a).num_valid_obs, no2(a).nox, no2(a).debug_cell] ...
+                    = calc_line_density(behr_dir, behr_files, winds_locs_distributed(a).Longitude, winds_locs_distributed(a).Latitude, winds_locs_distributed(a).WindDir, wind_logical,...
+                    'rel_box_corners', box_size, 'days_of_week', days_of_week, opt_args{:});
             end
             
             for a=1:numel(winds.locs)
